@@ -1,0 +1,1957 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+<title>Pocket GM — Soccer</title>
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/babel.min.js"></script>
+<script src="vendor/tailwind.js"></script>
+<style>
+  html { background:#0b1220; }
+  body { background:#0b1220; color:#e5e7eb;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    -webkit-text-size-adjust:100%; -webkit-tap-highlight-color:transparent; }
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#27324a;border-radius:6px}
+  ::-webkit-scrollbar-track{background:#0b1220}
+  .tnum{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel-src" id="app-src">
+const { useState, useEffect, useRef, useMemo } = React;
+// Global "open this player's full card" handler, provided at App root so a player's
+// name is clickable ANYWHERE (squad, leaders, transfers, fixtures, ...).
+const PlayerCtx = React.createContext(null);
+
+/* =========================================================================
+   POCKET GM — SOCCER   (single-file React)
+   Full football-manager suite: squad, formations (multi-position players!),
+   double round-robin league sim across two divisions with promotion &
+   relegation, a domestic knockout cup, stat leaders, finances/contracts,
+   the transfer market + free agency, a youth academy, season awards, a
+   hall of fame, and a multi-season franchise loop. Fictional clubs/players.
+   ========================================================================= */
+
+/* ----------------------------- RNG / utils ----------------------------- */
+let _rng = Math.random;
+function setRng(fn){ _rng = fn || Math.random; }
+function mulberry32(seed){
+  let a = seed >>> 0;
+  return function(){
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rint = (a, b) => Math.floor(_rng() * (b - a + 1)) + a;
+const pick = arr => arr[Math.floor(_rng() * arr.length)];
+const chance = p => _rng() < p;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const round = Math.round;
+function gauss(mean, sd){
+  let u = 0, v = 0;
+  while (u === 0) u = _rng();
+  while (v === 0) v = _rng();
+  return mean + sd * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+const rateGauss = (mean, sd) => clamp(round(gauss(mean, sd)), 20, 99);
+const n01 = r => clamp((r - 20) / 79, 0, 1);   // normalize 20..99 -> 0..1
+const money = m => (Math.abs(m) >= 1 ? "£" + m.toFixed(1) + "M" : "£" + round(m * 1000) + "K");
+function wpick(arr, wfn){
+  let tot = 0; arr.forEach(x => tot += Math.max(0, wfn(x)));
+  if(tot <= 0) return arr.length ? pick(arr) : null;
+  let r = _rng() * tot;
+  for(const x of arr){ const w = Math.max(0, wfn(x)); if(r < w) return x; r -= w; }
+  return arr[arr.length-1];
+}
+function poisson(lambda){
+  lambda = clamp(lambda, 0.02, 8);
+  const L = Math.exp(-lambda); let k = 0, p = 1;
+  do { k++; p *= _rng(); } while(p > L);
+  return k - 1;
+}
+// Player-id generator. Resets to 1 each page load, but ids persist in the save; after
+// loading we MUST resume past the highest existing id (uid.atLeast in migrate) or newly
+// generated players (youth, FA fill) reuse low ids and overwrite existing players.
+const uid = (() => { let i = 1; const f = () => i++; f.atLeast = n => { if(Number.isFinite(n) && n >= i) i = n + 1; }; return f; })();
+
+/* ----------------------------- name pools ------------------------------ */
+const FIRST = ["Jack","Harry","Mason","Leo","Oliver","Diego","Carlos","Mateo","Luca","Andre","Marco","Kai","Liam","Noah","Ethan","Hugo","Felix","Omar","Yusuf","Malik","Rafael","Pedro","Bruno","Joao","Nico","Sergio","Pablo","Lorenzo","Matteo","Adam","Reece","Callum","Dylan","Connor","Ryan","Tyler","Aaron","Cole","Owen","Finn","Theo","Isaac","Elias","Gabriel","Samuel","Julian","Sebastian","Adrian","Ivan","Viktor","Lukas","Tomas","Stefan","Mathis","Enzo","Karim","Idris","Tariq","Amir","Kofi","Kwame","Sol","Ezra","Reuben","Jude","Phil","Bukayo","Declan","Mohammed","Hakim","Sami","Anton","Dmitri","Pavel","Milan","Luka","Marko","Ante","Goran","Niko","Henrik","Erik","Bjorn","Sven","Lars","Mika","Aleksi","Jonas","Pierre","Olivier","Cedric","Bastien","Remy","Thiago","Vinicius","Gustavo","Caio","Rodrigo","Santiago","Cristian","Maxim","Daniel","Victor","Marcus","Anders","Jamal","Kylian","Ousmane","Riyad","Nabil","Youssef"];
+const LAST = ["Walker","Brooks","Hayes","Bennett","Foster","Carter","Reyes","Diaz","Lopez","Ortega","Vargas","Santos","Silva","Costa","Fernandes","Pereira","Oliveira","Ribeiro","Almeida","Carvalho","Rossi","Bianchi","Romano","Greco","Conti","Moretti","Muller","Schmidt","Fischer","Weber","Wagner","Becker","Hoffmann","Schulz","Koch","Bauer","Klein","Wolf","Neumann","Dubois","Laurent","Moreau","Lefebvre","Garcia","Martinez","Rodriguez","Gonzalez","Hernandez","Perez","Sanchez","Ramirez","Torres","Flores","Rivera","Gomez","Ruiz","Alvarez","Castillo","Ibrahimovic","Larsson","Eriksson","Andersson","Nilsson","Hansen","Pedersen","Berg","Lindqvist","Virtanen","Korhonen","Novak","Horvat","Kovac","Petrov","Ivanov","Popov","Sokolov","Volkov","Kuznetsov","Mensah","Owusu","Boateng","Diop","Traore","Kone","Toure","Cisse","Ndiaye","Bah","Okafor","Adeyemi","Eze","Saka","Rashford","Sterling","Kane","Foden","Mount","Grealish","Bellingham","Rice","Sancho","Maguire","Stones","Trippier","Pickford","Henderson","Alexander","Wan","Gallagher","Palmer","Watkins","Toney","Maddison","Bowen","Ramsdale"];
+const genName = () => pick(FIRST) + " " + pick(LAST);
+
+/* ----------------------------- positions ------------------------------- */
+// Canonical positions used in formations and player generation.
+const ALL_POS = ["GK","RB","CB","LB","RWB","LWB","CDM","CM","CAM","RM","LM","RW","LW","ST"];
+const GROUP = pos => pos==="GK" ? "GK"
+  : ["RB","CB","LB","RWB","LWB"].includes(pos) ? "DEF"
+  : ["CDM","CM","CAM","RM","LM"].includes(pos) ? "MID" : "ATT";
+// Vertical band on the pitch (0 = goal line .. 5 = attack), used for the pitch
+// diagram AND for the out-of-position penalty (same band = small penalty).
+const BAND = { GK:0, RB:1, CB:1, LB:1, RWB:1, LWB:1, CDM:2, CM:3, RM:3, LM:3, CAM:4, RW:5, LW:5, ST:5 };
+
+// Per-position OVR weights over the six outfield attributes + gk. Each sums ~1.0.
+const POS_W = {
+  GK:  {gk:.70, phy:.14, pas:.16},
+  CB:  {def:.46, phy:.24, pas:.12, pac:.13, dri:.05},
+  RB:  {def:.34, pac:.22, phy:.14, pas:.16, dri:.14},
+  LB:  {def:.34, pac:.22, phy:.14, pas:.16, dri:.14},
+  RWB: {def:.30, pac:.24, phy:.13, pas:.17, dri:.16},
+  LWB: {def:.30, pac:.24, phy:.13, pas:.17, dri:.16},
+  CDM: {def:.34, pas:.26, phy:.20, dri:.12, sho:.08},
+  CM:  {pas:.30, dri:.20, def:.18, phy:.14, sho:.18},
+  CAM: {pas:.28, dri:.26, sho:.24, pac:.12, phy:.10},
+  RM:  {pac:.24, dri:.26, pas:.20, sho:.18, phy:.12},
+  LM:  {pac:.24, dri:.26, pas:.20, sho:.18, phy:.12},
+  RW:  {pac:.26, dri:.27, sho:.22, pas:.15, phy:.10},
+  LW:  {pac:.26, dri:.27, sho:.22, pas:.15, phy:.10},
+  ST:  {sho:.38, pac:.22, dri:.18, phy:.14, pas:.08},
+};
+// Attribute tilts (added to a base mean) so a generated player's raw attributes suit
+// his position (a striker shoots, a centre-back defends, a keeper has 'keeping').
+const POS_TILT = {
+  GK:  {pac:-18, sho:-26, pas:-2, dri:-12, def:-10, phy:6,  gk:20},
+  CB:  {pac:-6,  sho:-18, pas:-6, dri:-12, def:18,  phy:12, gk:-30},
+  RB:  {pac:8,   sho:-10, pas:2,  dri:2,   def:8,   phy:2,  gk:-30},
+  LB:  {pac:8,   sho:-10, pas:2,  dri:2,   def:8,   phy:2,  gk:-30},
+  RWB: {pac:12,  sho:-6,  pas:4,  dri:6,   def:4,   phy:0,  gk:-30},
+  LWB: {pac:12,  sho:-6,  pas:4,  dri:6,   def:4,   phy:0,  gk:-30},
+  CDM: {pac:-2,  sho:-6,  pas:6,  dri:0,   def:12,  phy:10, gk:-30},
+  CM:  {pac:2,   sho:2,   pas:10, dri:6,   def:2,   phy:4,  gk:-30},
+  CAM: {pac:4,   sho:8,   pas:10, dri:10,  def:-8,  phy:-2, gk:-30},
+  RM:  {pac:12,  sho:4,   pas:6,  dri:10,  def:-4,  phy:-2, gk:-30},
+  LM:  {pac:12,  sho:4,   pas:6,  dri:10,  def:-4,  phy:-2, gk:-30},
+  RW:  {pac:14,  sho:8,   pas:4,  dri:12,  def:-10, phy:-4, gk:-30},
+  LW:  {pac:14,  sho:8,   pas:4,  dri:12,  def:-10, phy:-4, gk:-30},
+  ST:  {pac:10,  sho:18,  pas:-2, dri:8,   def:-14, phy:6,  gk:-30},
+};
+// Secondary-position eligibility graph — THE multi-position feature. A generated player
+// gets his primary position plus 1–3 related secondaries he can also play, so many
+// formations are viable (a RW who can fill RM/ST, a CB who covers RB/CDM, ...).
+const POS_ADJ = {
+  GK:["GK"],
+  RB:["RB","RWB","CB","RM"], LB:["LB","LWB","CB","LM"],
+  RWB:["RWB","RB","RM","RW"], LWB:["LWB","LB","LM","LW"],
+  CB:["CB","RB","LB","CDM"],
+  CDM:["CDM","CM","CB"], CM:["CM","CDM","CAM"],
+  CAM:["CAM","CM","RW","LW","ST"],
+  RM:["RM","RW","RWB","CM"], LM:["LM","LW","LWB","CM"],
+  RW:["RW","RM","LW","ST","CAM"], LW:["LW","LM","RW","ST","CAM"],
+  ST:["ST","CAM","RW","LW"],
+};
+function rollPositions(primary){
+  const opts = (POS_ADJ[primary] || [primary]).filter(p => p !== primary);
+  const set = [primary];
+  if(primary !== "GK"){
+    const k = chance(0.18) ? 0 : chance(0.55) ? 1 : chance(0.75) ? 2 : 3;
+    for(let i=0;i<k && opts.length;i++){ const c = pick(opts); if(!set.includes(c)) set.push(c); }
+  }
+  return set;
+}
+// out-of-position penalty applied to a player's effective rating when fielded at `slot`.
+function posPenalty(player, slot){
+  if((player.positions||[player.pos]).includes(slot)) return 0;
+  const pb = BAND[slot];
+  const near = (player.positions||[player.pos]).some(p => Math.abs(BAND[p]-pb) <= 1);
+  return near ? 7 : 16;
+}
+const posLabel = p => (p.positions && p.positions.length>1)
+  ? p.positions[0] + " (" + p.positions.slice(1).join(",") + ")" : p.pos;
+
+/* ----------------------------- formations ------------------------------ */
+const FORMATIONS = {
+  "4-4-2":          ["GK","RB","CB","CB","LB","RM","CM","CM","LM","ST","ST"],
+  "4-3-3":          ["GK","RB","CB","CB","LB","CM","CM","CM","RW","ST","LW"],
+  "4-3-3 (DM)":     ["GK","RB","CB","CB","LB","CDM","CM","CM","RW","ST","LW"],
+  "4-2-3-1":        ["GK","RB","CB","CB","LB","CDM","CDM","RM","CAM","LM","ST"],
+  "4-4-2 Diamond":  ["GK","RB","CB","CB","LB","CDM","CM","CM","CAM","ST","ST"],
+  "4-5-1":          ["GK","RB","CB","CB","LB","RM","CM","CM","CM","LM","ST"],
+  "3-5-2":          ["GK","CB","CB","CB","RWB","CM","CM","CM","LWB","ST","ST"],
+  "3-4-3":          ["GK","CB","CB","CB","RM","CM","CM","LM","RW","ST","LW"],
+  "5-3-2":          ["GK","RWB","CB","CB","CB","LWB","CM","CM","CM","ST","ST"],
+};
+const FORMATION_NAMES = Object.keys(FORMATIONS);
+// Pitch coordinates (x,y in 0..100) for a formation, derived from each slot's band so the
+// formation editor can draw a top-down pitch. y: GK near own goal (90) .. attack (14).
+function pitchCoords(slots){
+  const Y = {0:90, 1:72, 2:60, 3:46, 4:32, 5:16};
+  const byBand = {};
+  slots.forEach((pos,i)=>{ const b=BAND[pos]; (byBand[b]=byBand[b]||[]).push(i); });
+  const xy = new Array(slots.length);
+  Object.keys(byBand).forEach(b=>{
+    const idxs = byBand[b]; const n = idxs.length;
+    idxs.forEach((slotIdx,k)=>{
+      const x = n===1 ? 50 : 12 + (76*k)/(n-1);
+      xy[slotIdx] = { x, y: Y[b] };
+    });
+  });
+  return xy;
+}
+
+/* ----------------------------- clubs ----------------------------------- */
+// [city, nickname, abbr]. First 20 start in the Premier division, next 20 in the
+// Championship (second tier). Promotion/relegation swaps clubs between them each year.
+const CLUB_DEFS = [
+  ["Kingsbridge","United","KBU"],["Harrowgate","City","HGC"],["Ashford","Rovers","ASH"],
+  ["Blackmoor","Athletic","BLA"],["Crownhill","FC","CRH"],["Easton","Wanderers","EAS"],
+  ["Fenwick","Albion","FEN"],["Granville","Town","GRA"],["Hollowell","United","HOL"],
+  ["Ironbridge","City","IRB"],["Jarrow","Rovers","JAR"],["Kelvindale","FC","KEL"],
+  ["Langmere","Athletic","LAN"],["Marsden","United","MRS"],["Northwood","City","NOR"],
+  ["Oakvale","Wanderers","OAK"],["Pemberton","Albion","PEM"],["Ravenscar","Town","RAV"],
+  ["Stonegate","FC","STO"],["Thornbury","United","THB"],
+  ["Underwood","City","UND"],["Valeford","Rovers","VAL"],["Westcliff","Athletic","WES"],
+  ["Yarmouth","Wanderers","YAR"],["Aldermoor","FC","ALD"],["Brackenhill","United","BRK"],
+  ["Carrowmore","City","CAR"],["Dunfield","Rovers","DUN"],["Ellerby","Athletic","ELL"],
+  ["Foxholme","Town","FOX"],["Gosforth","Wanderers","GOS"],["Hartcliffe","United","HRT"],
+  ["Inglewood","FC","ING"],["Kestonbury","City","KES"],["Lynmouth","Rovers","LYN"],
+  ["Millbrook","Athletic","MIL"],["Norbeck","Town","NRB"],["Otterburn","United","OTT"],
+  ["Pinevale","City","PIN"],["Quarrydale","FC","QUA"],
+];
+const DIV_NAMES = ["Premier","Championship"];
+const TEAMS_PER_DIV = 20;
+
+/* ----------------------------- player gen ------------------------------ */
+function emptyStats(){ return { App:0, Min:0, G:0, A:0, CS:0, YC:0, RC:0, MOTM:0, ratingSum:0, ratingN:0 }; }
+function avgRating(s){ return s && s.ratingN ? s.ratingSum/s.ratingN : 0; }
+function computeOvr(p){
+  const w = POS_W[p.pos] || POS_W.CM;
+  let s = 0; for(const k in w) s += w[k] * (p[k]||0);
+  p.ovr = clamp(round(s), 20, 99);
+  return p.ovr;
+}
+function setPotential(p){
+  const room = clamp(round((25 - p.age) * 1.7 + gauss(2,4)), -4, 26);
+  p.pot = clamp(p.ovr + Math.max(0, room), p.ovr, 99);
+  if(p.age <= 20 && chance(0.05)) p.pot = clamp(p.pot + rint(12,26), p.ovr, 99);   // rare wonderkid
+}
+// wage (£M/yr) and transfer value (£M) from ability, age and contract.
+function wageFor(p){
+  let s = Math.pow(Math.max(0, p.ovr-40)/59, 2.1) * 22;
+  if(p.age < 23) s *= 0.5; else if(p.age < 27) s *= 0.82;
+  return clamp(round(s*10)/10, 0.2, 30);
+}
+function abilityValue(o){ return Math.pow(Math.max(0, o-35)/45, 2.6) * 90; }
+function playerValue(p){
+  const pot = p.pot || p.ovr;
+  const youth = clamp((27 - p.age) / 12, 0, 1);
+  const projOvr = p.ovr + (pot - p.ovr) * youth;
+  const cur = abilityValue(p.ovr), fut = abilityValue(projOvr);
+  const w = 0.30 + 0.50 * youth;
+  let v = cur * (1 - w) + fut * w;
+  if(p.age >= 30) v *= clamp(1 - (p.age - 29) * 0.07, 0.35, 1);
+  return Math.max(0.2, round(v*10)/10);
+}
+function makePlayer(pos, ageRange, meanAdj=0){
+  const age = rint(ageRange[0], ageRange[1]);
+  const tilt = POS_TILT[pos] || POS_TILT.CM;
+  const base = 52 + meanAdj;
+  const p = {
+    id: uid(), name: genName(), age, pos, positions: rollPositions(pos), isGK: pos==="GK",
+    foot: chance(0.75) ? "R" : (chance(0.85) ? "L" : "B"), num: rint(1,40),
+    pac: rateGauss(base+tilt.pac,11), sho: rateGauss(base+tilt.sho,12),
+    pas: rateGauss(base+tilt.pas,11), dri: rateGauss(base+tilt.dri,11),
+    def: rateGauss(base+tilt.def,12), phy: rateGauss(base+tilt.phy,11),
+    gk:  rateGauss(base+tilt.gk,12),
+    stats: emptyStats(), career: emptyStats(), history: [],
+  };
+  // ~7% of players are standouts — a fat top end so elite talent stands apart
+  if(chance(0.07)){
+    const b = rint(7,16);
+    ["pac","sho","pas","dri","def","phy","gk"].forEach(k=>{
+      const wt = (POS_W[pos]||{})[k] || 0;
+      if(wt > 0.10) p[k] = clamp(p[k] + b, 20, 99);
+    });
+  }
+  computeOvr(p); setPotential(p); p.peakOvr = p.ovr;
+  p.salary = wageFor(p); p.years = rint(1,4); p.value = playerValue(p);
+  return p;
+}
+
+/* ----------------------------- league gen ------------------------------ */
+const STADIUM_NAMES = ["Riverside","Highbury Park","The Den","Elm Road","Victoria Park","Stonebridge","Old Mill Ground","Kingsmeadow","Fortress Park","Saxon Field","The Crucible","Moorland Stadium","Tunstall Park","Greenfield","Castle Road","Harbour End","Abbey Stadium","Brookvale","Sandhill Park","Penrose Ground","Whitmore Park","Cathedral Ground","Eastlands","The Vale","Brightside Park","Lowfields","Mariners Park","Cliffe End","Ashwood Stadium","Foundry Park","Northgate","Belmont Ground","Carrow End","Deepdale Park","Goldstone Ground","Hillsborough Park","Loftus Field","Maine Ground","New Den","Priory Park"];
+function makeClub(def, idx, div){
+  const [city, nick, abbr] = def;
+  return {
+    id: idx, city, nick, abbr, name: city + " " + nick, div,
+    stadium: STADIUM_NAMES[idx % STADIUM_NAMES.length], capacity: rint(18,62)*1000,
+    pld:0, w:0, d:0, l:0, gf:0, ga:0, pts:0,
+    budget: rint(20,140) + (div===0?60:0), formation: "4-3-3", xi: [], bench: [],
+    academy: { level: 1 }, history: [],
+    userControlled: false,
+  };
+}
+function buildSquad(clubId, div){
+  const players = [];
+  const meanAdj = div===0 ? 0 : -8;   // second-tier clubs are a notch weaker
+  // a balanced senior squad: 3 GK, 7 DEF, 8 MID, 5 ATT = 23
+  const plan = ["GK","GK","GK","RB","LB","CB","CB","CB","RWB","LWB",
+    "CDM","CM","CM","CAM","RM","LM","CM","RW","LW","ST","ST","CAM","RW"];
+  plan.forEach(pos => { const ageR = chance(0.25)?[18,22]:[22,33]; players.push(makePlayer(pos, ageR, meanAdj)); });
+  players.forEach(p => p.teamId = clubId);
+  return players;
+}
+function generateLeague(userTeamId, opts={}){
+  const { seed=null } = opts;
+  if(seed!=null && !Number.isNaN(seed)) setRng(mulberry32(seed >>> 0));
+  const clubs = CLUB_DEFS.map((d,i)=>makeClub(d, i, i < TEAMS_PER_DIV ? 0 : 1));
+  clubs[userTeamId].userControlled = true;
+  const players = {};
+  clubs.forEach(c => buildSquad(c.id, c.div).forEach(p => players[p.id] = p));
+  clubs.forEach(c => autoPickXI(c, players));
+  setRng(null);
+  return { clubs, players };
+}
+
+/* ----------------------------- schedule -------------------------------- */
+// Double round-robin per division via the circle method: 20 teams -> 38 rounds.
+// Returns rounds[]; each round = array of {home, away, div, played, hs, as}.
+function divRounds(clubIds){
+  const ids = clubIds.slice();
+  if(ids.length % 2) ids.push(null);
+  const n = ids.length, half = n/2;
+  const fixed = ids[0]; let rot = ids.slice(1);
+  const firstLeg = [];
+  for(let r=0;r<n-1;r++){
+    const row = rot.slice(); const arr = [fixed].concat(row);
+    const games = [];
+    for(let i=0;i<half;i++){
+      const a = arr[i], b = arr[n-1-i];
+      if(a==null || b==null) continue;
+      // alternate home/away by round for balance
+      games.push(r%2===0 ? {home:a, away:b} : {home:b, away:a});
+    }
+    firstLeg.push(games);
+    rot = [rot[rot.length-1]].concat(rot.slice(0, rot.length-1));   // rotate
+  }
+  // second leg = reverse fixtures
+  const secondLeg = firstLeg.map(games => games.map(g => ({home:g.away, away:g.home})));
+  return firstLeg.concat(secondLeg);
+}
+function buildSchedule(clubs){
+  const divs = [[],[]];
+  clubs.forEach(c => divs[c.div].push(c.id));
+  const r0 = divRounds(divs[0]), r1 = divRounds(divs[1]);
+  const nRounds = Math.max(r0.length, r1.length);
+  const rounds = [];
+  for(let i=0;i<nRounds;i++){
+    const games = [];
+    (r0[i]||[]).forEach(g => games.push({ home:g.home, away:g.away, div:0, played:false, hs:0, as:0 }));
+    (r1[i]||[]).forEach(g => games.push({ home:g.home, away:g.away, div:1, played:false, hs:0, as:0 }));
+    rounds.push(games);
+  }
+  return rounds;
+}
+
+/* ----------------------------- match sim ------------------------------- */
+// Effective rating of player `p` if fielded at formation `slot`.
+function effRating(p, slot){ return Math.max(20, p.ovr - posPenalty(p, slot)); }
+// Three unit ratings (DEF / MID / ATT) for a club's current XI, 20..99-ish.
+function unitRatings(club, players){
+  const slots = FORMATIONS[club.formation] || FORMATIONS["4-3-3"];
+  const xi = (club.xi||[]).map((id,i)=>({ p: players[id], slot: slots[i] })).filter(o=>o.p);
+  let dS=0,dN=0, mS=0,mN=0, aS=0,aN=0, gk=50;
+  xi.forEach(({p,slot})=>{
+    const er = effRating(p, slot), b = BAND[slot];
+    if(slot==="GK"){ gk = p.gk; return; }
+    if(b<=2){ dS+=er; dN++; }
+    else if(b===3){ mS+=er; mN++; }
+    else { aS+=er; aN++; }
+    if(b===2){ mS+=er*0.5; mN+=0.5; }   // DMs help midfield too
+  });
+  const DEF = (dN? dS/dN : 50)*0.7 + gk*0.3;
+  const MID = mN? mS/mN : 50;
+  const ATT = aN? aS/aN : 50;
+  return { DEF, MID, ATT, gk };
+}
+function clubStrength(club, players){
+  const u = unitRatings(club, players);
+  return round(0.34*u.DEF + 0.33*u.MID + 0.33*u.ATT);
+}
+const TACTIC_MOD = {
+  attacking: { xgFor:1.16, xgAgainst:1.12 },
+  balanced:  { xgFor:1.0,  xgAgainst:1.0 },
+  defensive: { xgFor:0.86, xgAgainst:0.83 },
+};
+// Simulate one match. Mutates player season stats + both clubs' table rows.
+// Returns a box-score object (used to show the user's match in detail).
+function simMatch(home, away, players, opts={}){
+  const neutral = !!opts.neutral;
+  const uH = unitRatings(home, players), uA = unitRatings(away, players);
+  const hAtt = (0.55*n01(uH.ATT) + 0.30*n01(uH.MID) + 0.15*n01(uH.DEF));
+  const hDef = (0.55*n01(uH.DEF) + 0.30*n01(uH.MID) + 0.15*n01(uH.ATT));
+  const aAtt = (0.55*n01(uA.ATT) + 0.30*n01(uA.MID) + 0.15*n01(uA.DEF));
+  const aDef = (0.55*n01(uA.DEF) + 0.30*n01(uA.MID) + 0.15*n01(uA.ATT));
+  const tH = TACTIC_MOD[home.tactic||"balanced"], tA = TACTIC_MOD[away.tactic||"balanced"];
+  const homeAdv = neutral ? 1 : 1.12, awayAdv = neutral ? 1 : 0.92;
+  let xgH = clamp(1.32 * Math.exp(1.7*(hAtt - aDef)) * tH.xgFor * tA.xgAgainst * homeAdv, 0.15, 5.5);
+  let xgA = clamp(1.32 * Math.exp(1.7*(aAtt - hDef)) * tA.xgFor * tH.xgAgainst * awayAdv, 0.15, 5.5);
+  let hs = poisson(xgH), as = poisson(xgA);
+  if(opts.mustDecide && hs===as){ if(chance(clamp(0.5+(clubStrength(home,players)-clubStrength(away,players))/40,0.1,0.9))) hs++; else as++; }
+  const box = { home, away, hs, as, hScorers:[], aScorers:[], hRatings:[], aRatings:[], neutral };
+  applyMatch(home, away, hs, as, players, box, opts);
+  return box;
+}
+function lineupOf(club, players){
+  const slots = FORMATIONS[club.formation] || FORMATIONS["4-3-3"];
+  return (club.xi||[]).map((id,i)=>({ p: players[id], slot: slots[i] })).filter(o=>o.p && !isInjured(o.p));
+}
+// attacking weight of a slot (who tends to score) and creative weight (who assists)
+const SCORE_W = { GK:0, RB:0.6, LB:0.6, CB:0.7, RWB:0.9, LWB:0.9, CDM:1.0, CM:2.2, CAM:4.5, RM:3.2, LM:3.2, RW:5.5, LW:5.5, ST:9 };
+const CREATE_W = { GK:0, RB:1.2, LB:1.2, CB:0.4, RWB:2.0, LWB:2.0, CDM:1.4, CM:3.2, CAM:5.0, RM:4.2, LM:4.2, RW:4.5, LW:4.5, ST:2.2 };
+function applyMatch(home, away, hs, as, players, box, opts){
+  const isCup = !!opts.cup;
+  const H = lineupOf(home, players), A = lineupOf(away, players);
+  // appearances + minutes for everyone who started (90'); a couple of bench cameos
+  function credit(side, club){
+    side.forEach(({p})=>{ p.stats.App++; p.stats.Min += 90; });
+    const bench = (club.bench||[]).map(id=>players[id]).filter(p=>p && !isInjured(p));
+    bench.slice(0,3).forEach(p=>{ if(chance(0.5)){ p.stats.App++; p.stats.Min += rint(8,30); } });
+  }
+  credit(H, home); credit(A, away);
+  // distribute goals to scorers + assisters
+  function awardGoals(side, n){
+    const out = [];
+    for(let i=0;i<n;i++){
+      const sc = wpick(side, o => (SCORE_W[o.slot]||0) * (0.5 + n01(o.p.sho)));
+      if(!sc) continue;
+      sc.p.stats.G++;
+      const min = rint(1,90);
+      let assistName = null, assistId = null;
+      if(chance(0.72)){
+        const cands = side.filter(o => o !== sc);
+        const as2 = wpick(cands, o => (CREATE_W[o.slot]||0) * (0.5 + n01(o.p.pas*0.6 + o.p.dri*0.4)));
+        if(as2){ as2.p.stats.A++; assistName = as2.p.name; assistId = as2.p.id; }
+      }
+      out.push({ name: sc.p.name, id: sc.p.id, min, assist: assistName, assistId });
+    }
+    out.sort((a,b)=>a.min-b.min);
+    return out;
+  }
+  box.hScorers = awardGoals(H, hs);
+  box.aScorers = awardGoals(A, as);
+  // clean sheets
+  if(as===0) H.forEach(({p,slot})=>{ if(BAND[slot]<=2 || slot==="GK") p.stats.CS++; });
+  if(hs===0) A.forEach(({p,slot})=>{ if(BAND[slot]<=2 || slot==="GK") p.stats.CS++; });
+  // cards (light)
+  [H,A].forEach(side => side.forEach(({p,slot})=>{
+    const yc = clamp(0.10 + (BAND[slot]<=2?0.06:0) - n01(p.phy)*0.04, 0.04, 0.22);
+    if(chance(yc)) p.stats.YC++;
+    if(chance(0.01)) { p.stats.RC++; injure(p, rint(2,4)); }
+  }));
+  // ratings + man of the match
+  const res = hs>as?1 : hs<as?-1 : 0;
+  function rate(side, scored, conceded, result){
+    let best=null, bestR=0;
+    side.forEach(({p,slot})=>{
+      let r = 6.2 + (result>0?0.4:result<0?-0.3:0);
+      r += 0.95 * countGoals(box, p.id);
+      r += 0.55 * countAssists(box, p.id);
+      if(conceded===0 && (BAND[slot]<=2||slot==="GK")) r += 0.6;
+      if(conceded>=3 && (BAND[slot]<=2||slot==="GK")) r -= 0.5;
+      r = clamp(r + gauss(0, 0.35), 4.0, 10);
+      p.stats.ratingSum += r; p.stats.ratingN++;
+      if(r>bestR){ bestR=r; best=p; }
+    });
+    return best;
+  }
+  const motmH = rate(H, hs, as, res), motmA = rate(A, as, hs, -res);
+  const motm = (res>=0 ? motmH : motmA) || motmH || motmA;
+  if(motm) motm.stats.MOTM++;
+  box.motm = motm ? motm.name : null;
+  // standings (cup matches don't affect the league table)
+  if(!isCup){
+    home.pld++; away.pld++; home.gf+=hs; home.ga+=as; away.gf+=as; away.ga+=hs;
+    if(hs>as){ home.w++; home.pts+=3; away.l++; }
+    else if(hs<as){ away.w++; away.pts+=3; home.l++; }
+    else { home.d++; away.d++; home.pts++; away.pts++; }
+  }
+}
+function countGoals(box, id){ return box.hScorers.filter(s=>s.id===id).length + box.aScorers.filter(s=>s.id===id).length; }
+function countAssists(box, id){ return box.hScorers.concat(box.aScorers).filter(s=>s.assistId===id).length; }
+
+/* ----------------------------- injuries -------------------------------- */
+function isInjured(p){ return !!(p && p.injury && p.injury.weeks > 0); }
+function injure(p, weeks){ p.injury = { weeks, type: pick(["knock","hamstring","ankle","muscle strain"]) }; }
+function maybeInjure(club, players, settings){
+  if(settings && settings.injuries===false) return;
+  const xi = (club.xi||[]).map(id=>players[id]).filter(Boolean);
+  xi.forEach(p=>{ if(!isInjured(p) && chance(0.012)) injure(p, rint(1,6)); });
+}
+
+/* ----------------------------- XI selection ---------------------------- */
+// Auto-pick the best available XI for a club's current formation, honoring each
+// player's position eligibility (least penalty + highest rating wins each slot).
+function autoPickXI(club, players){
+  const slots = FORMATIONS[club.formation] || FORMATIONS["4-3-3"];
+  const squad = Object.values(players).filter(p => p.teamId===club.id && !isInjured(p));
+  const used = new Set();
+  const xi = [];
+  slots.forEach(slot=>{
+    let best=null, bestScore=-1;
+    squad.forEach(p=>{
+      if(used.has(p.id)) return;
+      const score = effRating(p, slot);
+      if(score>bestScore){ bestScore=score; best=p; }
+    });
+    if(best){ used.add(best.id); xi.push(best.id); }
+  });
+  club.xi = xi;
+  // bench: best remaining, keeping a keeper first
+  const rest = squad.filter(p=>!used.has(p.id)).sort((a,b)=>b.ovr-a.ovr);
+  const benchGK = rest.find(p=>p.pos==="GK");
+  const bench = [];
+  if(benchGK) bench.push(benchGK.id);
+  rest.forEach(p=>{ if(bench.length<9 && p.id!==(benchGK&&benchGK.id)) bench.push(p.id); });
+  club.bench = bench;
+}
+function ensureXI(club, players){ if(!club.xi || club.xi.length<11) autoPickXI(club, players); }
+
+/* ----------------------------- standings ------------------------------- */
+function tableFor(G, div){
+  return G.clubs.filter(c=>c.div===div).slice().sort((a,b)=>
+    b.pts-a.pts || (b.gf-b.ga)-(a.gf-a.ga) || b.gf-a.gf || a.name.localeCompare(b.name));
+}
+function leaguePos(G, club){ return tableFor(G, club.div).findIndex(c=>c.id===club.id) + 1; }
+
+/* ----------------------------- domestic cup ---------------------------- */
+// 32-team knockout: all 20 top-flight clubs + the 12 highest-rated second-tier clubs.
+// Rounds resolve on set matchdays. Single match; a draw is decided by strength coin-flip.
+const CUP_NAME = "Pocket Cup";
+const CUP_MD = { 6:"R32", 13:"R16", 21:"QF", 29:"SF", 36:"Final" };
+function initCup(G){
+  const top = G.clubs.filter(c=>c.div===0).map(c=>c.id);
+  const second = G.clubs.filter(c=>c.div===1)
+    .sort((a,b)=>clubStrength(b,G.players)-clubStrength(a,G.players)).slice(0,12).map(c=>c.id);
+  let pool = top.concat(second);
+  for(let i=pool.length-1;i>0;i--){ const j=Math.floor(_rng()*(i+1)); [pool[i],pool[j]]=[pool[j],pool[i]]; }
+  G.cup = { alive: pool, round: "R32", ties: [], history: [], winner: null, results: {} };
+}
+function playCupRound(G){
+  const cup = G.cup; if(!cup || cup.winner) return;
+  const ids = cup.alive.slice();
+  const winners = [], ties = [];
+  for(let i=0;i<ids.length;i+=2){
+    const a = G.clubs[ids[i]], b = G.clubs[ids[i+1]];
+    if(!b){ winners.push(ids[i]); continue; }
+    ensureXI(a, G.players); ensureXI(b, G.players);
+    const box = simMatch(a, b, G.players, { cup:true, neutral: cup.round==="Final", mustDecide:true });
+    const w = box.hs>=box.as ? a.id : b.id;   // mustDecide guarantees no draw
+    winners.push(w);
+    ties.push({ home:a.id, away:b.id, hs:box.hs, as:box.as, win:w });
+  }
+  cup.results[cup.round] = ties;
+  cup.history.unshift({ round: cup.round, ties });
+  if(winners.length===1){ cup.winner = winners[0]; cup.alive = winners; }
+  else {
+    cup.alive = winners;
+    const order = ["R32","R16","QF","SF","Final"];
+    cup.round = order[order.indexOf(cup.round)+1] || "Final";
+  }
+}
+
+/* ----------------------------- sim loop -------------------------------- */
+function simRound(G){
+  if(G.phase!=="regular") return;
+  const round = G.schedule[G.day]; if(!round) return;
+  // tactic context for the user's club (its chosen formation/tactic already on the club)
+  round.forEach(g=>{
+    const home = G.clubs[g.home], away = G.clubs[g.away];
+    ensureXI(home, G.players); ensureXI(away, G.players);
+    const box = simMatch(home, away, G.players, {});
+    g.played = true; g.hs = box.hs; g.as = box.as;
+    if(home.id===G.userTeamId || away.id===G.userTeamId){
+      G.lastMatch = serializeBox(box, G);
+      logNews(G, "match", `${home.abbr} ${box.hs}-${box.as} ${away.abbr}`, G.userTeamId);
+    }
+    maybeInjure(home, G.players, G.settings); maybeInjure(away, G.players, G.settings);
+  });
+  // injuries heal a week
+  Object.values(G.players).forEach(p=>{ if(isInjured(p)) p.injury.weeks--; });
+  // domestic cup round on its matchday
+  if(CUP_MD[G.day+1] && G.cup && !G.cup.winner){ playCupRound(G); if(G.cup.winner!=null && CUP_MD[G.day+1]==="Final"){ const wc=G.clubs[G.cup.winner]; logNews(G,"cup",`🏆 ${wc.name} win the ${CUP_NAME}!`, wc.id); } }
+  G.day++;
+  if(G.day >= G.schedule.length){ G.phase = "offseason"; finalizeSeason(G); }
+}
+function serializeBox(box, G){
+  return {
+    season: G.season, day: G.day+1,
+    home: box.home.abbr, away: box.away.abbr, homeName: box.home.name, awayName: box.away.name,
+    hs: box.hs, as: box.as, neutral: box.neutral, cup: !!box.cup,
+    hScorers: box.hScorers, aScorers: box.aScorers, motm: box.motm,
+  };
+}
+// sim forward until the user's next league match is about to be played (or season end)
+function simToNextUserMatch(G){
+  let guard = 0;
+  while(G.phase==="regular" && guard++ < 60){
+    simRound(G);
+    if(G.phase!=="regular") break;
+    const next = G.schedule[G.day];
+    if(next && next.some(g=>g.home===G.userTeamId || g.away===G.userTeamId)) break;
+  }
+}
+
+/* ----------------------------- offseason ------------------------------- */
+function finalizeSeason(G){
+  // champion + awards
+  const top = tableFor(G, 0);
+  const champ = top[0];
+  G.champions = G.champions || [];
+  G.champions.unshift({ season:G.season, id:champ.id, abbr:champ.abbr });
+  logNews(G, "title", `🏆 ${champ.name} are champions of the ${DIV_NAMES[0]}!`, champ.id);
+  computeAwards(G);
+  G.phase = "offseason";
+}
+function computeAwards(G){
+  const all = Object.values(G.players).filter(p=>p.teamId!=null && G.clubs[p.teamId] && G.clubs[p.teamId].div===0 && p.stats.App>=10);
+  const boot = all.slice().sort((a,b)=>b.stats.G-a.stats.G)[0];
+  const glove = all.filter(p=>p.pos==="GK").sort((a,b)=>b.stats.CS-a.stats.CS)[0];
+  const pots = all.slice().sort((a,b)=>(avgRating(b.stats)+b.stats.G*0.03+b.stats.A*0.02)-(avgRating(a.stats)+a.stats.G*0.03+a.stats.A*0.02))[0];
+  const yng = all.filter(p=>p.age<=21).sort((a,b)=>avgRating(b.stats)-avgRating(a.stats))[0];
+  const a = { season:G.season,
+    pots: pots?{id:pots.id,name:pots.name,team:G.clubs[pots.teamId].abbr,r:+avgRating(pots.stats).toFixed(2)}:null,
+    boot: boot?{id:boot.id,name:boot.name,team:G.clubs[boot.teamId].abbr,g:boot.stats.G}:null,
+    glove: glove?{id:glove.id,name:glove.name,team:G.clubs[glove.teamId].abbr,cs:glove.stats.CS}:null,
+    young: yng?{id:yng.id,name:yng.name,team:G.clubs[yng.teamId].abbr,r:+avgRating(yng.stats).toFixed(2)}:null };
+  G.awardHistory = G.awardHistory || []; G.awardHistory.unshift(a);
+  if(pots){ pots.awards=(pots.awards||0)+1; }
+  if(boot){ boot.golden=(boot.golden||0)+1; }
+}
+// Roll the franchise into the next season: archive stats, age & develop players, expire
+// contracts, promotion/relegation, youth intake, finances, fresh fixtures + cup.
+function startNextSeason(G){
+  // archive each player's season into history + career, then reset season stats
+  Object.values(G.players).forEach(p=>{
+    if(p.stats.App>0){
+      p.history = p.history || [];
+      p.history.push({ season:G.season, team: p.teamId!=null && G.clubs[p.teamId] ? G.clubs[p.teamId].abbr : "—",
+        App:p.stats.App, G:p.stats.G, A:p.stats.A, CS:p.stats.CS, r:+avgRating(p.stats).toFixed(2) });
+      if(p.history.length>30) p.history = p.history.slice(-30);
+      for(const k in p.stats) p.career[k] = (p.career[k]||0) + p.stats[k];
+    }
+    p.stats = emptyStats();
+  });
+  // record club season history + reset table
+  G.clubs.forEach(c=>{
+    c.history = c.history || [];
+    c.history.push({ season:G.season, div:c.div, pos:leaguePos(G,c), w:c.w, d:c.d, l:c.l, gf:c.gf, ga:c.ga, pts:c.pts });
+    if(c.history.length>40) c.history = c.history.slice(-40);
+  });
+  // age + develop everyone (rostered players AND the existing free-agent pool, once each —
+  // do FAs here BEFORE expiries add new names so the just-released don't age twice)
+  Object.values(G.players).forEach(p=>developPlayer(p));
+  (G.freeAgents||[]).forEach(p=>developPlayer(p));
+  hallOfFameCheck(G);
+  // contracts: decrement, expiries become free agents
+  G.freeAgents = G.freeAgents || [];
+  Object.values(G.players).forEach(p=>{
+    if(p.teamId==null) return;
+    p.years = (p.years||1) - 1;
+    if(p.years<=0){
+      // AI clubs re-sign most of their useful players; the rest hit the market
+      const club = G.clubs[p.teamId];
+      if(club && club.userControlled){ p.years=0; }   // user must decide (renew in squad)
+      else if(p.ovr>=58 && chance(0.78)){ p.years=rint(2,4); p.salary=wageFor(p); }
+      else { releaseToFA(G, p); }
+    }
+  });
+  // retirements (old, low-rated)
+  Object.values(G.players).forEach(p=>{
+    if(p.age>=34 && (p.ovr<62 || p.age>=39) && chance(p.age>=37?0.55:0.22)){
+      if(p.teamId!=null){ logNews(G,"retire",`${p.name} (${p.pos}) retires at ${p.age}`, p.teamId); }
+      delete G.players[p.id];
+    }
+  });
+  // promotion / relegation: bottom 3 of Premier <-> top 3 of Championship
+  const prem = tableFor(G,0), champ = tableFor(G,1);
+  const down = prem.slice(-3), up = champ.slice(0,3);
+  down.forEach(c=>{ c.div=1; logNews(G,"releg",`⬇️ ${c.name} are relegated to the ${DIV_NAMES[1]}`, c.id); });
+  up.forEach(c=>{ c.div=0; logNews(G,"promo",`⬆️ ${c.name} are promoted to the ${DIV_NAMES[0]}`, c.id); });
+  // finances: gate revenue from final position + cup run, pay nothing here (wages tracked live)
+  G.clubs.forEach(c=>{
+    const pos = leaguePos(G,c);
+    const base = c.div===0 ? 70 : 18;
+    const prize = c.div===0 ? clamp((21-pos)*3.0, 6, 60) : clamp((21-pos)*1.0, 2, 22);
+    const gate = round(c.capacity/1000 * (c.div===0?0.55:0.30));
+    c.budget = round((c.budget + base + prize + gate) * 10)/10;
+    c.pld=0;c.w=0;c.d=0;c.l=0;c.gf=0;c.ga=0;c.pts=0;
+  });
+  // youth intake into every club, refill thin squads
+  G.clubs.forEach(c=>youthIntake(G, c));
+  G.clubs.forEach(c=>refillSquad(G, c));
+  // thin the free-agent pool (already aged above)
+  G.freeAgents = G.freeAgents.filter(p=>p.ovr>=48 || p.age<=23).slice(0,160);
+  // fresh fixtures + cup + reset XIs
+  G.season++; G.day=0; G.phase="regular";
+  G.schedule = buildSchedule(G.clubs);
+  initCup(G);
+  G.clubs.forEach(c=>autoPickXI(c, G.players));
+  G.transferOffers = [];
+  G.lastMatch = null;
+  setOwnerExpectation(G);
+}
+function developPlayer(p){
+  p.age++;
+  let delta = 0;
+  if(p.age<=23) delta = (p.pot - p.ovr) > 0 ? rint(1, 4) : rint(0,1);
+  else if(p.age<=27) delta = (p.pot - p.ovr) > 0 ? rint(0, 2) : 0;
+  else if(p.age<=30) delta = -rint(0,1);
+  else delta = -rint(1,3);
+  // nudge the underlying attributes so OVR shifts coherently
+  const keys = ["pac","sho","pas","dri","def","phy","gk"];
+  const w = POS_W[p.pos]||{};
+  const relevant = keys.filter(k=>(w[k]||0)>0.05);
+  for(let i=0;i<Math.abs(delta);i++){
+    const k = relevant.length?pick(relevant):pick(keys);
+    p[k] = clamp(p[k] + (delta>0?1:-1), 20, 99);
+  }
+  // pace fades fastest with age
+  if(p.age>=30) p.pac = clamp(p.pac - rint(0,2), 20, 99);
+  computeOvr(p);
+  p.peakOvr = Math.max(p.peakOvr||p.ovr, p.ovr);
+  p.salary = wageFor(p); p.value = playerValue(p);
+}
+function releaseToFA(G, p){
+  p.teamId = null; p.years = 0; p.injury = null;
+  G.freeAgents = G.freeAgents || [];
+  if(!G.freeAgents.some(x=>x.id===p.id)) G.freeAgents.push(p);
+  delete G.players[p.id];
+}
+function youthIntake(G, club){
+  const lvl = (club.academy && club.academy.level) || 1;
+  const n = 1 + (chance(0.4+lvl*0.1)?1:0) + (lvl>=4&&chance(0.4)?1:0);
+  const intake = [];
+  for(let i=0;i<n;i++){
+    const pos = pick(ALL_POS);
+    const p = makePlayer(pos, [16,18], -10 + lvl*1.5);
+    p.pot = clamp(Math.max(p.pot, p.ovr + rint(8, 14+lvl*3)), p.ovr, 99); setPotential(p);
+    p.pot = clamp(Math.max(p.pot, p.ovr + rint(8, 14+lvl*3)), p.ovr, 99);
+    p.teamId = club.id; p.salary = Math.min(p.salary, 0.4); p.years = rint(2,4); p.youth = true;
+    G.players[p.id] = p; intake.push(p);
+  }
+  if(club.userControlled){
+    G.youthIntake = intake.map(p=>({ id:p.id, name:p.name, pos:p.pos, ovr:p.ovr, pot:p.pot }));
+    if(intake.length) logNews(G,"youth",`🎓 Youth intake: ${intake.map(p=>p.name+" ("+p.pos+" "+p.ovr+"→"+p.pot+")").join(", ")}`, club.id);
+  }
+}
+function refillSquad(G, club){
+  let squad = Object.values(G.players).filter(p=>p.teamId===club.id);
+  const need = pos => squad.filter(p=>p.pos===pos).length;
+  while(squad.filter(p=>p.pos==="GK").length<2){ const p=makePlayer("GK",[19,28],club.div===0?-2:-8); p.teamId=club.id; p.years=rint(1,3); G.players[p.id]=p; squad.push(p); }
+  while(squad.length<22){ const p=makePlayer(pick(ALL_POS),[19,29],club.div===0?-2:-8); p.teamId=club.id; p.years=rint(1,3); G.players[p.id]=p; squad.push(p); }
+  autoPickXI(club, G.players);
+}
+
+/* ----------------------------- hall of fame ---------------------------- */
+function hallOfFameCheck(G){
+  G.hof = G.hof || [];
+  Object.values(G.players).forEach(p=>{
+    if(p.age>=34 && (p.career.G>=120 || (p.peakOvr>=88 && p.career.App>=250) || (p.awards||0)>=2)){
+      if(!p.hof){ p.hof=true; G.hof.unshift({ id:p.id, name:p.name, pos:p.pos, G:p.career.G, A:p.career.A, App:p.career.App, peak:p.peakOvr, season:G.season }); }
+    }
+  });
+  if(G.hof.length>120) G.hof.length=120;
+}
+
+/* ----------------------------- transfers ------------------------------- */
+// Buy a player from another club: pay the fee from your budget; he joins your squad.
+function buyPlayer(G, p, fee){
+  const buyer = G.clubs[G.userTeamId];
+  if(buyer.budget < fee) return { ok:false, msg:"Not enough budget for that fee." };
+  const seller = p.teamId!=null ? G.clubs[p.teamId] : null;
+  buyer.budget = round((buyer.budget - fee)*10)/10;
+  if(seller){ seller.budget = round((seller.budget + fee)*10)/10; }
+  p.teamId = buyer.id; p.years = Math.max(p.years||0, rint(2,4)); p.salary = wageFor(p);
+  autoPickXI(buyer, G.players);
+  logNews(G,"transfer",`➡️ Signed ${p.pos} ${p.name} (${p.ovr}) for ${money(fee)}`, buyer.id);
+  return { ok:true };
+}
+// Sell one of your players to an AI club for a fee.
+function sellPlayer(G, p, fee, toClubId){
+  const seller = G.clubs[G.userTeamId];
+  const buyer = toClubId!=null ? G.clubs[toClubId] : null;
+  seller.budget = round((seller.budget + fee)*10)/10;
+  if(buyer){ buyer.budget = round(Math.max(0, buyer.budget - fee)*10)/10; p.teamId = buyer.id; autoPickXI(buyer, G.players); }
+  else { p.teamId = null; G.freeAgents=G.freeAgents||[]; G.freeAgents.push(p); }
+  autoPickXI(seller, G.players);
+  logNews(G,"transfer",`⬅️ Sold ${p.pos} ${p.name} (${p.ovr}) for ${money(fee)}`, seller.id);
+}
+// AI clubs occasionally bid for your best/surplus players.
+function generateTransferOffers(G){
+  G.transferOffers = G.transferOffers || [];
+  if(G.transferOffers.length>=4) return;
+  const squad = Object.values(G.players).filter(p=>p.teamId===G.userTeamId);
+  if(squad.length<=18) return;
+  const target = wpick(squad, p=>p.value);
+  if(!target) return;
+  const suitors = G.clubs.filter(c=>c.id!==G.userTeamId && c.budget>target.value*1.1);
+  if(!suitors.length) return;
+  const by = pick(suitors);
+  const fee = round(target.value * (0.9 + _rng()*0.6) *10)/10;
+  G.transferOffers.push({ id:"of"+Date.now()+Math.floor(_rng()*999), playerId:target.id, by:by.id, fee });
+  logNews(G,"offer",`💬 ${by.name} bid ${money(fee)} for ${target.name}`, G.userTeamId);
+}
+// Sign an out-of-contract free agent (no fee; wage only). Squad cap keeps it sane.
+function signFreeAgent(G, p){
+  const club = G.clubs[G.userTeamId];
+  const squad = Object.values(G.players).filter(x=>x.teamId===G.userTeamId);
+  if(squad.length>=30) return { ok:false, msg:"Squad is full (30)." };
+  G.freeAgents = (G.freeAgents||[]).filter(x=>x.id!==p.id);
+  p.teamId = club.id; p.years = rint(1,3); p.salary = wageFor(p);
+  G.players[p.id] = p;
+  autoPickXI(club, G.players);
+  logNews(G,"sign",`✍️ Signed free agent ${p.pos} ${p.name} (${p.ovr})`, club.id);
+  return { ok:true };
+}
+function wageBill(G, clubId){
+  return round(Object.values(G.players).filter(p=>p.teamId===clubId).reduce((s,p)=>s+(p.salary||0),0)*10)/10;
+}
+
+/* ----------------------------- owner ----------------------------------- */
+function setOwnerExpectation(G){
+  const c = G.clubs[G.userTeamId];
+  if(c.div===1){ G.expectation = { text:"Win promotion back to the "+DIV_NAMES[0], target:"promo" }; return; }
+  const last = (c.history||[]).slice(-1)[0];
+  const lastPos = last ? last.pos : 12;
+  if(lastPos<=4) G.expectation = { text:"Challenge for the title (top 3)", target:"top3" };
+  else if(lastPos<=10) G.expectation = { text:"Finish in the top half", target:"top10" };
+  else G.expectation = { text:"Avoid relegation", target:"safe" };
+}
+
+/* ----------------------------- news ------------------------------------ */
+function logNews(G, type, msg, teamId){
+  if(!G) return;
+  if(!Array.isArray(G.news)) G.news=[];
+  G.news.unshift({ season:G.season, day:(G.day||0)+1, phase:G.phase, type, msg, teamId: teamId==null?null:teamId });
+  if(G.news.length>250) G.news.length=250;
+}
+
+/* ----------------------------- save / load ----------------------------- */
+const SAVE_VERSION = 1;
+const SLOT_INDEX = "pgsoccer_slots";
+const slotKey = id => "pgsoccer_slot_" + id;
+function listSlots(){
+  try{ const a = JSON.parse(localStorage.getItem(SLOT_INDEX)||"[]"); return Array.isArray(a)?a.sort((x,y)=>y.updated-x.updated):[]; }
+  catch(e){ return []; }
+}
+function saveGame(G){
+  try{
+    if(!G.slotId) G.slotId = "s" + Date.now() + Math.floor(Math.random()*999);
+    localStorage.setItem(slotKey(G.slotId), JSON.stringify(G));
+    const u = G.clubs[G.userTeamId];
+    const idx = listSlots().filter(s=>s.id!==G.slotId);
+    idx.push({ id:G.slotId, club:u?u.name:"—", abbr:u?u.abbr:"", season:G.season, day:(G.day||0)+1, phase:G.phase, updated:Date.now() });
+    localStorage.setItem(SLOT_INDEX, JSON.stringify(idx));
+    return true;
+  }catch(e){ return false; }
+}
+function loadSlot(id){
+  try{ const g = JSON.parse(localStorage.getItem(slotKey(id))); return g?migrate(g):null; }catch(e){ return null; }
+}
+function deleteSlot(id){
+  try{ localStorage.removeItem(slotKey(id)); localStorage.setItem(SLOT_INDEX, JSON.stringify(listSlots().filter(s=>s.id!==id))); }catch(e){}
+}
+function migrate(G){
+  if(!G || !Array.isArray(G.clubs)) return G;
+  try{
+    let maxId=0; Object.values(G.players||{}).forEach(p=>{ if(typeof p.id==="number"&&p.id>maxId) maxId=p.id; });
+    (G.freeAgents||[]).forEach(p=>{ if(p&&typeof p.id==="number"&&p.id>maxId) maxId=p.id; });
+    uid.atLeast(maxId);
+    if(!Array.isArray(G.news)) G.news=[];
+    if(!Array.isArray(G.freeAgents)) G.freeAgents=[];
+    if(!Array.isArray(G.transferOffers)) G.transferOffers=[];
+    if(!Array.isArray(G.champions)) G.champions=[];
+    if(!Array.isArray(G.awardHistory)) G.awardHistory=[];
+    if(!Array.isArray(G.hof)) G.hof=[];
+    if(!G.settings) G.settings={ injuries:true };
+    if(!G.cup) initCup(G);
+    G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; ensureXI(c, G.players); });
+    if(!G.expectation) setOwnerExpectation(G);
+    G.version = SAVE_VERSION;
+  }catch(e){}
+  return G;
+}
+function exportSave(G){
+  try{
+    const blob = new Blob([JSON.stringify(G)], {type:"application/json"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const u = G.clubs[G.userTeamId];
+    a.href=url; a.download=`pocketgm-soccer-${u?u.abbr:"save"}-${G.season}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 1000); return true;
+  }catch(e){ return false; }
+}
+function importSave(file, onLoad){
+  const r = new FileReader();
+  r.onload = e=>{ try{ const g=migrate(JSON.parse(e.target.result)); if(g&&Array.isArray(g.clubs)) onLoad(g); else alert("Not a valid Pocket GM Soccer save."); }catch(err){ alert("Couldn't read that save file."); } };
+  r.readAsText(file);
+}
+
+/* ----------------------------- new game -------------------------------- */
+function newGame(userTeamId, opts={}){
+  const { clubs, players } = generateLeague(userTeamId, opts);
+  const G = {
+    season: 2026, day: 0, phase: "regular", version: SAVE_VERSION,
+    seed: (opts && opts.seed!=null && !Number.isNaN(opts.seed)) ? (opts.seed>>>0) : null,
+    userTeamId, clubs, players,
+    schedule: buildSchedule(clubs),
+    freeAgents: [], transferOffers: [], news: [], champions: [], awardHistory: [], hof: [],
+    cup: null, lastMatch: null, settings: { injuries:true },
+  };
+  // seed a small free-agent pool
+  for(let i=0;i<40;i++){ const p=makePlayer(pick(ALL_POS),[20,33],-4); p.teamId=null; G.freeAgents.push(p); }
+  initCup(G);
+  setOwnerExpectation(G);
+  return G;
+}
+
+/* ======================================================================= */
+/*                                 UI                                       */
+/* ======================================================================= */
+function App(){
+  const [G, setG] = useState(null);
+  const [screen, setScreen] = useState("menu");
+  const [tab, setTab] = useState("hub");
+  const [toast, setToast] = useState("");
+  const [globalPlayer, setGlobalPlayer] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+
+  const commit = g => { const ok=saveGame(g); if(!ok) tShow("⚠️ Save failed — storage full. Use Save File to back up."); setG({...g}); };
+  const tShow = msg => { setToast(msg); setTimeout(()=>setToast(""),2400); };
+  const openSlot = id => { const g=loadSlot(id); if(g){ setG(g); setTab("hub"); setScreen("play"); } else tShow("Couldn't load that save."); };
+  const toMenu = () => { if(G) saveGame(G); setG(null); setScreen("menu"); };
+
+  if(screen==="menu") return <MainMenu onLoad={openSlot} onNew={()=>setScreen("splash")} />;
+  if(screen==="splash" || !G) return <Splash onStart={(id,opts)=>{ const g=newGame(id,opts); g.slotId=null; commit(g); setTab("hub"); setScreen("play"); }} onBack={listSlots().length?()=>setScreen("menu"):null} />;
+
+  const user = G.clubs[G.userTeamId];
+
+  const TABS = [
+    ["hub","Hub"],["squad","Squad"],["tactics","Tactics"],["table","Table"],
+    ["players","Players"],["stats","Leaders"],["cup","Cup"],["fixtures","Fixtures"],
+    ["transfers","Transfers"],["fa","Free Agents"],["finances","Finances"],
+    ["awards","Awards"],["hof","Hall of Fame"],["news","News"],
+  ];
+  if(G.phase==="offseason") TABS.push(["offseason","Offseason"]);
+
+  return (
+    <PlayerCtx.Provider value={p=>setGlobalPlayer(p)}>
+    <div className="min-h-screen">
+      <header className="sticky top-0 z-20 bg-[#0d1526] border-b border-[#1d2940] px-4 py-3 flex items-center gap-3 flex-wrap">
+        <div className="font-black text-lg tracking-tight">⚽ POCKET <span className="text-emerald-400">GM</span></div>
+        <div className="text-sm text-slate-400">{user.name}</div>
+        <div className="ml-auto flex items-center gap-2 text-sm">
+          <Badge>{G.season}</Badge>
+          <Badge>{DIV_NAMES[user.div]}</Badge>
+          <Badge>{G.phase==="regular"?`MD ${G.day+1}/${G.schedule.length}`:G.phase.toUpperCase()}</Badge>
+          <Badge>{user.w}-{user.d}-{user.l}</Badge>
+          <button onClick={()=>{ if(exportSave(G)) tShow("💾 Save file downloaded"); }}
+            className="px-2 py-1 rounded bg-[#16213a] hover:bg-[#1c2c4a] text-slate-200 text-xs">Save File</button>
+          <label className="px-2 py-1 rounded bg-[#16213a] hover:bg-[#1c2c4a] text-slate-200 text-xs cursor-pointer">
+            Load File
+            <input type="file" accept="application/json,.json" className="hidden"
+              onChange={e=>{ const f=e.target.files[0]; if(f) importSave(f, g=>{ g.slotId=null; commit(g); setTab("hub"); setScreen("play"); tShow("✅ Save loaded"); }); e.target.value=""; }} />
+          </label>
+          <button onClick={()=>setShowSettings(true)} className="px-2 py-1 rounded bg-[#16213a] hover:bg-[#1c2c4a] text-slate-200 text-xs">⚙</button>
+          <button onClick={toMenu} className="px-2 py-1 rounded bg-[#16213a] hover:bg-[#1c2c4a] text-slate-200 text-xs">☰ Menu</button>
+        </div>
+      </header>
+
+      <nav className="flex gap-1 px-3 py-2 overflow-x-auto bg-[#0b1220] border-b border-[#15203a] sticky top-[57px] z-10">
+        {TABS.map(([k,label])=>(
+          <button key={k} onClick={()=>setTab(k)}
+            className={"px-3 py-1.5 rounded-md text-sm whitespace-nowrap "+(tab===k?"bg-emerald-500 text-slate-900 font-semibold":"text-slate-300 hover:bg-[#16213a]")}>
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      <main className="p-4 max-w-6xl mx-auto">
+        {tab==="hub" && <Hub G={G} commit={commit} tShow={tShow} setTab={setTab} />}
+        {tab==="squad" && <Squad G={G} commit={commit} tShow={tShow} />}
+        {tab==="tactics" && <Tactics G={G} commit={commit} tShow={tShow} />}
+        {tab==="table" && <LeagueTable G={G} />}
+        {tab==="players" && <PlayersBrowser G={G} />}
+        {tab==="stats" && <Leaders G={G} />}
+        {tab==="cup" && <CupView G={G} />}
+        {tab==="fixtures" && <Fixtures G={G} />}
+        {tab==="transfers" && <Transfers G={G} commit={commit} tShow={tShow} />}
+        {tab==="fa" && <FreeAgents G={G} commit={commit} tShow={tShow} />}
+        {tab==="finances" && <Finances G={G} />}
+        {tab==="awards" && <AwardsView G={G} />}
+        {tab==="hof" && <HallOfFame G={G} />}
+        {tab==="news" && <NewsFeed G={G} />}
+        {tab==="offseason" && <Offseason G={G} commit={commit} tShow={tShow} setTab={setTab} />}
+      </main>
+
+      {toast && <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-emerald-500 text-slate-900 px-4 py-2 rounded-lg font-semibold shadow-lg z-50">{toast}</div>}
+      {globalPlayer && <PlayerModal p={globalPlayer} G={G} onClose={()=>setGlobalPlayer(null)} />}
+      {showSettings && <SettingsModal G={G} commit={commit} tShow={tShow} onClose={()=>setShowSettings(false)} />}
+    </div>
+    </PlayerCtx.Provider>
+  );
+}
+
+/* ----------------------------- shared bits ----------------------------- */
+function Badge({children}){ return <span className="px-2 py-1 rounded bg-[#16213a] text-slate-200 tnum text-xs">{children}</span>; }
+function Card({children, className=""}){ return <div className={"bg-[#101a30] border border-[#1d2940] rounded-xl p-4 "+className}>{children}</div>; }
+function OvrPill({v}){
+  const c = v>=80?"bg-emerald-500 text-slate-900":v>=70?"bg-lime-500 text-slate-900":v>=60?"bg-yellow-500 text-slate-900":v>=50?"bg-orange-500 text-slate-900":"bg-slate-600 text-slate-100";
+  return <span className={"inline-block w-8 text-center rounded font-bold text-xs py-0.5 "+c}>{v}</span>;
+}
+function PotPill({v}){ return <span className="inline-block w-8 text-center rounded font-semibold text-xs py-0.5 border border-amber-500/50 text-amber-300/90" title="Potential">{v}</span>; }
+function PName({p, className=""}){
+  const open = React.useContext(PlayerCtx);
+  return <button onClick={()=>open&&open(p)} className={"text-left hover:text-emerald-300 "+className}>{p.name}</button>;
+}
+function PosTag({p}){
+  return <span className="text-xs text-slate-400">
+    <span className="text-slate-200 font-semibold">{p.pos}</span>
+    {p.positions && p.positions.length>1 && <span className="text-slate-500"> · {p.positions.slice(1).join(",")}</span>}
+  </span>;
+}
+
+/* ----------------------------- menu / splash --------------------------- */
+function MainMenu({onLoad, onNew}){
+  const [slots, setSlots] = useState(listSlots());
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center p-6">
+      <div className="text-4xl font-black mb-1">⚽ POCKET <span className="text-emerald-400">GM</span></div>
+      <div className="text-slate-400 mb-6">Soccer — manage your club to glory</div>
+      <div className="w-full max-w-md space-y-3">
+        <button onClick={onNew} className="w-full py-3 rounded-xl bg-emerald-500 text-slate-900 font-bold">New Franchise</button>
+        {slots.length>0 && <div className="text-slate-400 text-sm mt-4 mb-1">Your saves</div>}
+        {slots.map(s=>(
+          <div key={s.id} className="flex items-center gap-2 bg-[#101a30] border border-[#1d2940] rounded-xl p-3">
+            <div className="flex-1">
+              <div className="font-semibold">{s.club}</div>
+              <div className="text-xs text-slate-400">{s.season} · {s.phase==="regular"?("MD "+s.day):s.phase}</div>
+            </div>
+            <button onClick={()=>onLoad(s.id)} className="px-3 py-1.5 rounded bg-emerald-500 text-slate-900 text-sm font-semibold">Load</button>
+            <button onClick={()=>{ if(confirm("Delete this save?")){ deleteSlot(s.id); setSlots(listSlots()); } }} className="px-2 py-1.5 rounded bg-[#16213a] text-slate-300 text-sm">🗑</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+function Splash({onStart, onBack}){
+  const [sel, setSel] = useState(0);
+  const [seed, setSeed] = useState("");
+  const prem = CLUB_DEFS.slice(0,TEAMS_PER_DIV);
+  const champ = CLUB_DEFS.slice(TEAMS_PER_DIV);
+  const ClubBtn = (def, i) => (
+    <button key={i} onClick={()=>setSel(i)}
+      className={"px-3 py-2 rounded-lg text-sm text-left "+(sel===i?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#101a30] border border-[#1d2940] text-slate-200")}>
+      {def[0]} {def[1]}
+    </button>
+  );
+  return (
+    <div className="min-h-screen p-6 max-w-3xl mx-auto">
+      <div className="text-2xl font-black mb-1">Choose your club</div>
+      <div className="text-slate-400 text-sm mb-4">Pick any club from either division. {DIV_NAMES[1]} clubs start in the second tier — earn promotion.</div>
+      <div className="text-emerald-300 text-sm font-semibold mb-2">{DIV_NAMES[0]} (top flight)</div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-5">{prem.map((d,i)=>ClubBtn(d,i))}</div>
+      <div className="text-emerald-300 text-sm font-semibold mb-2">{DIV_NAMES[1]} (second tier)</div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-5">{champ.map((d,i)=>ClubBtn(d,i+TEAMS_PER_DIV))}</div>
+      <div className="flex items-center gap-2 mb-4">
+        <input value={seed} onChange={e=>setSeed(e.target.value)} placeholder="Optional seed (number)"
+          className="bg-[#101a30] border border-[#1d2940] rounded-lg px-3 py-2 text-sm flex-1" />
+      </div>
+      <div className="flex gap-2">
+        {onBack && <button onClick={onBack} className="px-4 py-3 rounded-xl bg-[#16213a] text-slate-200">Back</button>}
+        <button onClick={()=>onStart(sel, { seed: seed.trim()? (parseInt(seed,10)||hashStr(seed)) : null })}
+          className="flex-1 py-3 rounded-xl bg-emerald-500 text-slate-900 font-bold">
+          Start as {CLUB_DEFS[sel][0]} {CLUB_DEFS[sel][1]}
+        </button>
+      </div>
+    </div>
+  );
+}
+function hashStr(s){ let h=2166136261; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); } return h>>>0; }
+
+/* ----------------------------- hub ------------------------------------- */
+function Hub({G, commit, tShow, setTab}){
+  const user = G.clubs[G.userTeamId];
+  const round = G.schedule[G.day] || [];
+  const userGame = round.find(g=>g.home===G.userTeamId||g.away===G.userTeamId);
+  const table = tableFor(G, user.div);
+  const pos = table.findIndex(c=>c.id===user.id)+1;
+  const doSim = fn => { fn(G); commit(G); };
+  const offseason = G.phase==="offseason";
+  return (
+    <div className="space-y-4">
+      <Card>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="text-xl font-bold">{user.name}</div>
+            <div className="text-sm text-slate-400">{DIV_NAMES[user.div]} · {pos>0?ordinal(pos):"—"} place · {user.pts} pts · GD {gd(user)>=0?"+":""}{gd(user)}</div>
+            <div className="text-xs text-amber-300/90 mt-1">Board: {G.expectation?G.expectation.text:"—"}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-3xl font-black">{clubStrength(user, G.players)}</div>
+            <div className="text-xs text-slate-400">squad rating</div>
+          </div>
+        </div>
+      </Card>
+
+      {!offseason && (
+        <Card>
+          <div className="text-sm text-slate-400 mb-2">Matchday {G.day+1}</div>
+          {userGame ? (
+            <div className="flex items-center justify-between">
+              <div className="font-semibold">
+                {userGame.home===G.userTeamId
+                  ? <span><span className="text-emerald-300">{user.abbr}</span> vs {G.clubs[userGame.away].abbr}</span>
+                  : <span>{G.clubs[userGame.home].abbr} vs <span className="text-emerald-300">{user.abbr}</span></span>}
+                <span className="text-slate-500 text-sm"> ({userGame.home===G.userTeamId?"H":"A"})</span>
+              </div>
+              <div className="text-sm text-slate-400">{userGame.home===G.userTeamId?G.clubs[userGame.away].name:G.clubs[userGame.home].name}</div>
+            </div>
+          ) : <div className="text-slate-400">No fixture this matchday (bye).</div>}
+          <div className="flex flex-wrap gap-2 mt-3">
+            <button onClick={()=>doSim(simRound)} className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold">Play Matchday</button>
+            <button onClick={()=>doSim(simToNextUserMatch)} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200">Sim to Next Match</button>
+            <button onClick={()=>{ for(let i=0;i<7 && G.phase==="regular";i++) simRound(G); commit(G); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200">Sim 7 MD</button>
+            <button onClick={()=>{ generateTransferOffers(G); commit(G); tShow("Checked the market"); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200">Check Market</button>
+          </div>
+        </Card>
+      )}
+      {offseason && (
+        <Card>
+          <div className="font-semibold mb-1">Season complete</div>
+          <div className="text-sm text-slate-400 mb-3">Review awards, the transfer market, your youth intake, then start the next season.</div>
+          <button onClick={()=>setTab("offseason")} className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold">Go to Offseason</button>
+        </Card>
+      )}
+
+      {G.lastMatch && <Card><div className="text-sm text-slate-400 mb-2">Your last result</div><BoxScore m={G.lastMatch} G={G} /></Card>}
+
+      <div className="grid sm:grid-cols-2 gap-4">
+        <Card>
+          <div className="flex items-center justify-between mb-2"><div className="font-semibold">{DIV_NAMES[user.div]} — top 6</div><button onClick={()=>setTab("table")} className="text-xs text-emerald-300">Full table →</button></div>
+          <MiniTable G={G} rows={table.slice(0,6)} highlight={user.id} />
+        </Card>
+        <Card>
+          <div className="flex items-center justify-between mb-2"><div className="font-semibold">Latest news</div><button onClick={()=>setTab("news")} className="text-xs text-emerald-300">All →</button></div>
+          <div className="space-y-1 text-sm">
+            {(G.news||[]).slice(0,7).map((n,i)=><div key={i} className="text-slate-300">{n.msg}</div>)}
+            {!(G.news||[]).length && <div className="text-slate-500">No news yet.</div>}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+const ordinal = n => { const s=["th","st","nd","rd"], v=n%100; return n+(s[(v-20)%10]||s[v]||s[0]); };
+const gd = c => c.gf - c.ga;
+function MiniTable({G, rows, highlight}){
+  return (
+    <table className="w-full text-sm tnum">
+      <thead><tr className="text-slate-500 text-xs"><th className="text-left">#</th><th className="text-left">Club</th><th>Pld</th><th>GD</th><th>Pts</th></tr></thead>
+      <tbody>{rows.map((c,i)=>(
+        <tr key={c.id} className={c.id===highlight?"text-emerald-300 font-semibold":""}>
+          <td>{i+1}</td><td className="text-left">{c.abbr}</td><td className="text-center">{c.pld}</td>
+          <td className="text-center">{gd(c)>=0?"+":""}{gd(c)}</td><td className="text-center font-semibold">{c.pts}</td>
+        </tr>))}
+      </tbody>
+    </table>
+  );
+}
+
+/* ----------------------------- squad ----------------------------------- */
+function Squad({G, commit, tShow}){
+  const user = G.clubs[G.userTeamId];
+  const [sort, setSort] = useState("ovr");
+  let squad = Object.values(G.players).filter(p=>p.teamId===user.id);
+  squad.sort((a,b)=> sort==="ovr"? b.ovr-a.ovr : sort==="pos"? BAND[a.pos]-BAND[b.pos]||b.ovr-a.ovr : sort==="age"? a.age-b.age : b.value-a.value);
+  const inXI = new Set(user.xi||[]);
+  const renew = p => { p.years = rint(2,4); p.salary = wageFor(p); commit(G); tShow(`Renewed ${p.name}`); };
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="font-semibold">{user.name} — {squad.length} players</div>
+          <div className="text-sm text-slate-400">Wage bill {money(wageBill(G,user.id))}/yr · Budget {money(user.budget)}</div>
+        </div>
+        <div className="flex gap-2 mt-2 text-xs">
+          {[["ovr","Rating"],["pos","Position"],["age","Age"],["val","Value"]].map(([k,l])=>(
+            <button key={k} onClick={()=>setSort(k)} className={"px-2 py-1 rounded "+(sort===k?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300")}>{l}</button>
+          ))}
+        </div>
+      </Card>
+      <Card className="p-0 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]">
+            <th className="text-left p-2">Player</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Pot</th>
+            <th className="p-2">Age</th><th className="p-2">Wage</th><th className="p-2">Yrs</th><th className="p-2">Value</th><th className="p-2"></th>
+          </tr></thead>
+          <tbody>
+            {squad.map(p=>(
+              <tr key={p.id} className="border-b border-[#15203a]">
+                <td className="p-2 text-left">
+                  {inXI.has(p.id) && <span className="text-emerald-400 mr-1" title="In starting XI">●</span>}
+                  <PName p={p} className="font-medium" />
+                  {isInjured(p) && <span className="ml-1 text-red-400 text-xs" title={p.injury.type}>✚{p.injury.weeks}w</span>}
+                  {p.youth && <span className="ml-1 text-amber-300 text-xs">YTH</span>}
+                </td>
+                <td className="p-2 text-center"><PosTag p={p} /></td>
+                <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
+                <td className="p-2 text-center"><PotPill v={p.pot} /></td>
+                <td className="p-2 text-center tnum">{p.age}</td>
+                <td className="p-2 text-center tnum">{money(p.salary)}</td>
+                <td className="p-2 text-center tnum">{p.years>0?p.years:<span className="text-red-400">exp</span>}</td>
+                <td className="p-2 text-center tnum">{money(p.value)}</td>
+                <td className="p-2 text-center">{p.years<=0 && <button onClick={()=>renew(p)} className="px-2 py-1 rounded bg-emerald-500 text-slate-900 text-xs font-semibold">Renew</button>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  );
+}
+
+/* ----------------------------- tactics / formation --------------------- */
+function Tactics({G, commit, tShow}){
+  const user = G.clubs[G.userTeamId];
+  const slots = FORMATIONS[user.formation] || FORMATIONS["4-3-3"];
+  const coords = pitchCoords(slots);
+  const [pickSlot, setPickSlot] = useState(null);   // slot index being assigned
+  ensureXI(user, G.players);
+  const squad = Object.values(G.players).filter(p=>p.teamId===user.id && !isInjured(p));
+  const setFormation = f => { user.formation=f; autoPickXI(user, G.players); commit(G); };
+  const setTactic = t => { user.tactic=t; commit(G); };
+  const assign = (slotIdx, pid) => {
+    const xi = (user.xi||[]).slice();
+    const existing = xi.indexOf(pid);
+    if(existing>=0){ const tmp=xi[slotIdx]; xi[slotIdx]=pid; xi[existing]=tmp; }  // swap
+    else xi[slotIdx]=pid;
+    user.xi = xi; autoFillBench(user, G.players); commit(G); setPickSlot(null);
+  };
+  const u = unitRatings(user, G.players);
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-slate-400">Formation</span>
+          <select value={user.formation} onChange={e=>setFormation(e.target.value)} className="bg-[#16213a] rounded px-2 py-1 text-sm">
+            {FORMATION_NAMES.map(f=><option key={f} value={f}>{f}</option>)}
+          </select>
+          <span className="text-sm text-slate-400 ml-2">Tactic</span>
+          {["defensive","balanced","attacking"].map(t=>(
+            <button key={t} onClick={()=>setTactic(t)} className={"px-2 py-1 rounded text-xs capitalize "+((user.tactic||"balanced")===t?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300")}>{t}</button>
+          ))}
+          <button onClick={()=>{ autoPickXI(user, G.players); commit(G); tShow("Auto-picked best XI"); }} className="ml-auto px-3 py-1 rounded bg-[#16213a] text-slate-200 text-xs">Auto-pick XI</button>
+        </div>
+        <div className="flex gap-4 mt-2 text-xs text-slate-400">
+          <span>DEF <b className="text-slate-200">{round(u.DEF)}</b></span>
+          <span>MID <b className="text-slate-200">{round(u.MID)}</b></span>
+          <span>ATT <b className="text-slate-200">{round(u.ATT)}</b></span>
+          <span>Overall <b className="text-emerald-300">{clubStrength(user, G.players)}</b></span>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="relative w-full rounded-lg overflow-hidden" style={{aspectRatio:"3/4", background:"linear-gradient(#0f3d24,#0c2e1b)"}}>
+          {/* pitch markings */}
+          <div className="absolute inset-2 border border-emerald-200/20 rounded"></div>
+          <div className="absolute left-2 right-2 top-1/2 border-t border-emerald-200/20"></div>
+          {slots.map((slot,i)=>{
+            const pid = (user.xi||[])[i]; const p = pid!=null?G.players[pid]:null;
+            const pen = p ? posPenalty(p, slot) : 0;
+            const c = coords[i];
+            return (
+              <button key={i} onClick={()=>setPickSlot(i)}
+                style={{ left:c.x+"%", top:c.y+"%", transform:"translate(-50%,-50%)" }}
+                className="absolute flex flex-col items-center">
+                <div className={"w-11 h-11 rounded-full flex items-center justify-center text-sm font-bold border-2 "+(p? (pen>0?"bg-orange-500/90 border-orange-300 text-slate-900":"bg-emerald-500 border-emerald-200 text-slate-900") : "bg-[#16213a] border-slate-500 text-slate-400")}>
+                  {p? p.ovr : slot}
+                </div>
+                <div className="text-[10px] mt-0.5 text-white/90 font-medium max-w-[64px] truncate">{p? p.name.split(" ").slice(-1)[0] : slot}</div>
+                <div className="text-[9px] text-emerald-200/80">{slot}{pen>0?" ⚠":""}</div>
+              </button>
+            );
+          })}
+        </div>
+        <div className="text-xs text-slate-400 mt-2">Tap a position to assign a player. <span className="text-orange-400">Orange = out of position</span> (rating penalty). A player can fill any of his listed positions with no penalty.</div>
+      </Card>
+
+      {pickSlot!=null && (
+        <SlotPicker G={G} slot={slots[pickSlot]} squad={squad} xi={user.xi||[]}
+          onPick={pid=>assign(pickSlot, pid)} onClose={()=>setPickSlot(null)} />
+      )}
+
+      <Card>
+        <div className="font-semibold mb-2">Bench</div>
+        <div className="flex flex-wrap gap-2">
+          {(user.bench||[]).map(id=>{ const p=G.players[id]; if(!p) return null; return (
+            <div key={id} className="px-2 py-1 rounded bg-[#16213a] text-sm flex items-center gap-2">
+              <OvrPill v={p.ovr} /><PName p={p} /><span className="text-xs text-slate-500">{p.pos}</span>
+            </div>
+          ); })}
+        </div>
+      </Card>
+    </div>
+  );
+}
+function autoFillBench(club, players){
+  const used = new Set(club.xi||[]);
+  const rest = Object.values(players).filter(p=>p.teamId===club.id && !used.has(p.id) && !isInjured(p)).sort((a,b)=>b.ovr-a.ovr);
+  club.bench = rest.slice(0,9).map(p=>p.id);
+}
+function SlotPicker({G, slot, squad, xi, onPick, onClose}){
+  const ranked = squad.slice().sort((a,b)=>effRating(b,slot)-effRating(a,slot));
+  return (
+    <div className="fixed inset-0 bg-black/60 z-40 flex items-end sm:items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-[#101a30] border border-[#1d2940] rounded-xl w-full max-w-md max-h-[70vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
+        <div className="p-3 border-b border-[#1d2940] flex items-center justify-between sticky top-0 bg-[#101a30]">
+          <div className="font-semibold">Assign at <span className="text-emerald-300">{slot}</span></div>
+          <button onClick={onClose} className="text-slate-400">✕</button>
+        </div>
+        <div className="p-2 space-y-1">
+          {ranked.map(p=>{
+            const pen = posPenalty(p, slot); const eff = effRating(p,slot);
+            const inXi = xi.includes(p.id);
+            return (
+              <button key={p.id} onClick={()=>onPick(p.id)} className="w-full flex items-center gap-2 p-2 rounded hover:bg-[#16213a] text-left">
+                <OvrPill v={p.ovr} />
+                <div className="flex-1">
+                  <div className="font-medium">{p.name} {inXi&&<span className="text-xs text-emerald-400">(in XI)</span>}</div>
+                  <div className="text-xs text-slate-400">{posLabel(p)} · {p.age}y</div>
+                </div>
+                <div className={"text-sm font-semibold "+(pen>0?"text-orange-400":"text-emerald-300")}>{pen>0?`${eff} (-${pen})`:"natural"}</div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- league table ---------------------------- */
+function LeagueTable({G}){
+  const [div, setDiv] = useState(G.clubs[G.userTeamId].div);
+  const table = tableFor(G, div);
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2">
+        {DIV_NAMES.map((d,i)=>(
+          <button key={i} onClick={()=>setDiv(i)} className={"px-3 py-1.5 rounded text-sm "+(div===i?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>{d}</button>
+        ))}
+      </div>
+      <Card className="p-0 overflow-x-auto">
+        <table className="w-full text-sm tnum">
+          <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]">
+            <th className="p-2">#</th><th className="text-left p-2">Club</th><th className="p-2">Pld</th><th className="p-2">W</th><th className="p-2">D</th><th className="p-2">L</th><th className="p-2">GF</th><th className="p-2">GA</th><th className="p-2">GD</th><th className="p-2">Pts</th>
+          </tr></thead>
+          <tbody>
+            {table.map((c,i)=>{
+              const promo = div===1 && i<3, releg = div===0 && i>=17, champ = div===0 && i===0;
+              return (
+                <tr key={c.id} className={"border-b border-[#15203a] "+(c.id===G.userTeamId?"bg-emerald-500/10":"")}>
+                  <td className="p-2 text-center">
+                    <span className={champ?"text-amber-300 font-bold":promo?"text-emerald-400":releg?"text-red-400":""}>{i+1}</span>
+                  </td>
+                  <td className="p-2 text-left font-medium">{c.name}{c.id===G.userTeamId&&<span className="text-emerald-400"> ★</span>}</td>
+                  <td className="p-2 text-center">{c.pld}</td><td className="p-2 text-center">{c.w}</td><td className="p-2 text-center">{c.d}</td><td className="p-2 text-center">{c.l}</td>
+                  <td className="p-2 text-center">{c.gf}</td><td className="p-2 text-center">{c.ga}</td><td className="p-2 text-center">{gd(c)>=0?"+":""}{gd(c)}</td>
+                  <td className="p-2 text-center font-bold">{c.pts}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </Card>
+      <div className="text-xs text-slate-400">{div===0?"Bottom 3 are relegated. Champions in gold.":"Top 3 are promoted."}</div>
+    </div>
+  );
+}
+
+/* ----------------------------- players browser ------------------------- */
+function PlayersBrowser({G}){
+  const [q, setQ] = useState("");
+  const [posF, setPosF] = useState("ALL");
+  const [sort, setSort] = useState("ovr");
+  let list = Object.values(G.players).filter(p=>p.teamId!=null);
+  if(q) list = list.filter(p=>p.name.toLowerCase().includes(q.toLowerCase()));
+  if(posF!=="ALL") list = list.filter(p=>(p.positions||[p.pos]).includes(posF));
+  list.sort((a,b)=> sort==="ovr"?b.ovr-a.ovr : sort==="pot"?b.pot-a.pot : sort==="age"?a.age-b.age : b.value-a.value);
+  list = list.slice(0,200);
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="flex flex-wrap gap-2 items-center">
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search players…" className="bg-[#16213a] rounded px-3 py-1.5 text-sm flex-1 min-w-[160px]" />
+          <select value={posF} onChange={e=>setPosF(e.target.value)} className="bg-[#16213a] rounded px-2 py-1.5 text-sm">
+            <option value="ALL">All positions</option>
+            {ALL_POS.map(p=><option key={p} value={p}>{p}</option>)}
+          </select>
+          {[["ovr","OVR"],["pot","POT"],["age","Age"],["val","Value"]].map(([k,l])=>(
+            <button key={k} onClick={()=>setSort(k)} className={"px-2 py-1 rounded text-xs "+(sort===k?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300")}>{l}</button>
+          ))}
+        </div>
+      </Card>
+      <Card className="p-0 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]">
+            <th className="text-left p-2">Player</th><th className="p-2">Club</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Pot</th><th className="p-2">Age</th><th className="p-2">Value</th>
+          </tr></thead>
+          <tbody>
+            {list.map(p=>(
+              <tr key={p.id} className="border-b border-[#15203a]">
+                <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
+                <td className="p-2 text-center text-slate-400">{G.clubs[p.teamId]?G.clubs[p.teamId].abbr:"—"}</td>
+                <td className="p-2 text-center"><PosTag p={p} /></td>
+                <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
+                <td className="p-2 text-center"><PotPill v={p.pot} /></td>
+                <td className="p-2 text-center tnum">{p.age}</td>
+                <td className="p-2 text-center tnum">{money(p.value)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  );
+}
+
+/* ----------------------------- leaders --------------------------------- */
+function Leaders({G}){
+  const [div, setDiv] = useState(G.clubs[G.userTeamId].div);
+  const pool = Object.values(G.players).filter(p=>p.teamId!=null && G.clubs[p.teamId] && G.clubs[p.teamId].div===div);
+  const board = (title, arr, val) => (
+    <Card>
+      <div className="font-semibold mb-2">{title}</div>
+      <table className="w-full text-sm">
+        <tbody>
+          {arr.slice(0,10).map((p,i)=>(
+            <tr key={p.id} className="border-b border-[#15203a]">
+              <td className="py-1 text-slate-500 w-6">{i+1}</td>
+              <td className="py-1"><PName p={p} className="font-medium" /> <span className="text-xs text-slate-500">{G.clubs[p.teamId].abbr} · {p.pos}</span></td>
+              <td className="py-1 text-right font-semibold tnum">{val(p)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Card>
+  );
+  const minApp = p => p.stats.App>=4;
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2">
+        {DIV_NAMES.map((d,i)=><button key={i} onClick={()=>setDiv(i)} className={"px-3 py-1.5 rounded text-sm "+(div===i?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>{d}</button>)}
+      </div>
+      <div className="grid sm:grid-cols-2 gap-3">
+        {board("⚽ Top Scorers", pool.slice().sort((a,b)=>b.stats.G-a.stats.G), p=>p.stats.G)}
+        {board("🅰️ Assists", pool.slice().sort((a,b)=>b.stats.A-a.stats.A), p=>p.stats.A)}
+        {board("🧤 Clean Sheets", pool.filter(p=>p.pos==="GK").sort((a,b)=>b.stats.CS-a.stats.CS), p=>p.stats.CS)}
+        {board("⭐ Avg Rating", pool.filter(minApp).sort((a,b)=>avgRating(b.stats)-avgRating(a.stats)), p=>avgRating(p.stats).toFixed(2))}
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- cup ------------------------------------- */
+function CupView({G}){
+  const cup = G.cup;
+  if(!cup) return <Card>No cup in progress.</Card>;
+  const order = ["R32","R16","QF","SF","Final"];
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="font-semibold">{CUP_NAME}</div>
+        <div className="text-sm text-slate-400">{cup.winner!=null? `Winner: ${G.clubs[cup.winner].name} 🏆` : `Current round: ${cup.round} · ${cup.alive.length} clubs left`}</div>
+      </Card>
+      {order.map(r=>{
+        const ties = (cup.results||{})[r];
+        if(!ties) return null;
+        return (
+          <Card key={r}>
+            <div className="font-semibold mb-2">{r==="Final"?"Final":r}</div>
+            <div className="space-y-1 text-sm tnum">
+              {ties.map((t,i)=>(
+                <div key={i} className={"flex items-center gap-2 "+((t.home===G.userTeamId||t.away===G.userTeamId)?"text-emerald-300":"")}>
+                  <span className={"flex-1 text-right "+(t.win===t.home?"font-bold":"")}>{G.clubs[t.home].abbr}</span>
+                  <span className="px-2">{t.hs}-{t.as}</span>
+                  <span className={"flex-1 "+(t.win===t.away?"font-bold":"")}>{G.clubs[t.away].abbr}</span>
+                </div>
+              ))}
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ----------------------------- fixtures -------------------------------- */
+function Fixtures({G}){
+  const [mode, setMode] = useState("user");   // user | all
+  const user = G.clubs[G.userTeamId];
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2">
+        <button onClick={()=>setMode("user")} className={"px-3 py-1.5 rounded text-sm "+(mode==="user"?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>My fixtures</button>
+        <button onClick={()=>setMode("all")} className={"px-3 py-1.5 rounded text-sm "+(mode==="all"?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>This matchday</button>
+      </div>
+      {mode==="user" ? (
+        <Card className="p-0 overflow-hidden">
+          {G.schedule.map((round, md)=>{
+            const g = round.find(x=>x.home===G.userTeamId||x.away===G.userTeamId);
+            if(!g) return null;
+            const home = g.home===G.userTeamId;
+            const opp = G.clubs[home?g.away:g.home];
+            return (
+              <div key={md} className={"flex items-center gap-2 px-3 py-2 border-b border-[#15203a] text-sm "+(md===G.day?"bg-emerald-500/10":"")}>
+                <span className="text-slate-500 w-10">MD{md+1}</span>
+                <span className="w-6 text-slate-400">{home?"H":"A"}</span>
+                <span className="flex-1">{opp.name}</span>
+                {g.played ? <span className="font-semibold tnum">{home?g.hs:g.as}-{home?g.as:g.hs} <ResultDot home={home} g={g} /></span> : <span className="text-slate-500">—</span>}
+              </div>
+            );
+          })}
+        </Card>
+      ) : (
+        <Card className="p-0 overflow-hidden">
+          {(G.schedule[Math.min(G.day,G.schedule.length-1)]||[]).map((g,i)=>(
+            <div key={i} className="flex items-center gap-2 px-3 py-2 border-b border-[#15203a] text-sm tnum">
+              <span className="text-slate-500 text-xs w-16">{DIV_NAMES[g.div].slice(0,4)}</span>
+              <span className="flex-1 text-right">{G.clubs[g.home].abbr}</span>
+              <span className="px-2 w-14 text-center">{g.played?`${g.hs}-${g.as}`:"v"}</span>
+              <span className="flex-1">{G.clubs[g.away].abbr}</span>
+            </div>
+          ))}
+        </Card>
+      )}
+    </div>
+  );
+}
+function ResultDot({home, g}){
+  const us = home?g.hs:g.as, them = home?g.as:g.hs;
+  const c = us>them?"bg-emerald-500":us<them?"bg-red-500":"bg-slate-500";
+  return <span className={"inline-block w-2 h-2 rounded-full ml-1 "+c}></span>;
+}
+
+/* ----------------------------- transfers ------------------------------- */
+function Transfers({G, commit, tShow}){
+  const user = G.clubs[G.userTeamId];
+  const [tab, setTab] = useState("buy");
+  const [q, setQ] = useState("");
+  // BUY: other clubs' players, affordable-ish
+  let market = Object.values(G.players).filter(p=>p.teamId!=null && p.teamId!==user.id);
+  if(q) market = market.filter(p=>p.name.toLowerCase().includes(q.toLowerCase()));
+  market.sort((a,b)=>b.ovr-a.ovr);
+  market = market.slice(0,80);
+  const squad = Object.values(G.players).filter(p=>p.teamId===user.id);
+  const offers = G.transferOffers||[];
+  const feeFor = p => round(p.value * 1.15 *10)/10;
+  const doBuy = p => { const fee=feeFor(p); const r=buyPlayer(G,p,fee); if(r.ok){ commit(G); tShow(`Signed ${p.name}`); } else tShow(r.msg); };
+  const doSell = p => { const fee=round(p.value*0.9*10)/10; sellPlayer(G,p,fee,null); commit(G); tShow(`Sold ${p.name} for ${money(fee)}`); };
+  const acceptOffer = o => { const p=G.players[o.playerId]; if(!p){ G.transferOffers=offers.filter(x=>x.id!==o.id); commit(G); return; } sellPlayer(G,p,o.fee,o.by); G.transferOffers=offers.filter(x=>x.id!==o.id); commit(G); tShow(`Accepted ${money(o.fee)} for ${p.name}`); };
+  const rejectOffer = o => { G.transferOffers=offers.filter(x=>x.id!==o.id); commit(G); };
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="font-semibold">Transfer Market</div>
+          <div className="text-sm text-slate-400">Budget {money(user.budget)} · Squad {squad.length}/30</div>
+        </div>
+        <div className="flex gap-2 mt-2 text-sm">
+          {[["buy","Buy"],["sell","Sell"],["offers","Offers"+(offers.length?` (${offers.length})`:"")]].map(([k,l])=>(
+            <button key={k} onClick={()=>setTab(k)} className={"px-3 py-1 rounded "+(tab===k?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>{l}</button>
+          ))}
+          <button onClick={()=>{ generateTransferOffers(G); commit(G); tShow("Market checked"); }} className="ml-auto px-3 py-1 rounded bg-[#16213a] text-slate-300 text-xs">Generate offer</button>
+        </div>
+      </Card>
+
+      {tab==="buy" && (
+        <>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search players…" className="w-full bg-[#16213a] rounded px-3 py-2 text-sm" />
+          <Card className="p-0 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="text-left p-2">Player</th><th className="p-2">Club</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Age</th><th className="p-2">Fee</th><th className="p-2"></th></tr></thead>
+              <tbody>
+                {market.map(p=>(
+                  <tr key={p.id} className="border-b border-[#15203a]">
+                    <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
+                    <td className="p-2 text-center text-slate-400">{G.clubs[p.teamId].abbr}</td>
+                    <td className="p-2 text-center"><PosTag p={p} /></td>
+                    <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
+                    <td className="p-2 text-center tnum">{p.age}</td>
+                    <td className="p-2 text-center tnum">{money(feeFor(p))}</td>
+                    <td className="p-2 text-center"><button onClick={()=>doBuy(p)} disabled={user.budget<feeFor(p)} className={"px-2 py-1 rounded text-xs font-semibold "+(user.budget<feeFor(p)?"bg-[#16213a] text-slate-500":"bg-emerald-500 text-slate-900")}>Buy</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Card>
+        </>
+      )}
+      {tab==="sell" && (
+        <Card className="p-0 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="text-left p-2">Player</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Age</th><th className="p-2">Sale</th><th className="p-2"></th></tr></thead>
+            <tbody>
+              {squad.slice().sort((a,b)=>b.value-a.value).map(p=>(
+                <tr key={p.id} className="border-b border-[#15203a]">
+                  <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
+                  <td className="p-2 text-center"><PosTag p={p} /></td>
+                  <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
+                  <td className="p-2 text-center tnum">{p.age}</td>
+                  <td className="p-2 text-center tnum">{money(round(p.value*0.9*10)/10)}</td>
+                  <td className="p-2 text-center"><button onClick={()=>{ if(squad.length<=14){ tShow("Squad too small to sell."); return; } doSell(p); }} className="px-2 py-1 rounded bg-[#16213a] text-slate-200 text-xs">Sell</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
+      {tab==="offers" && (
+        <div className="space-y-2">
+          {offers.length===0 && <Card><div className="text-slate-400 text-sm">No incoming offers. Tap “Generate offer” or play matches to attract interest.</div></Card>}
+          {offers.map(o=>{ const p=G.players[o.playerId]; const by=G.clubs[o.by]; if(!p) return null; return (
+            <Card key={o.id}>
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex-1">
+                  <div className="font-semibold">{by.name} bid {money(o.fee)}</div>
+                  <div className="text-sm text-slate-400">for <PName p={p} className="text-slate-200" /> ({p.pos} {p.ovr}, valued {money(p.value)})</div>
+                </div>
+                <button onClick={()=>acceptOffer(o)} className="px-3 py-1.5 rounded bg-emerald-500 text-slate-900 text-sm font-semibold">Accept</button>
+                <button onClick={()=>rejectOffer(o)} className="px-3 py-1.5 rounded bg-[#16213a] text-slate-200 text-sm">Reject</button>
+              </div>
+            </Card>
+          ); })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ----------------------------- free agents ----------------------------- */
+function FreeAgents({G, commit, tShow}){
+  const [q, setQ] = useState("");
+  let fa = (G.freeAgents||[]).slice();
+  if(q) fa = fa.filter(p=>p.name.toLowerCase().includes(q.toLowerCase()));
+  fa.sort((a,b)=>b.ovr-a.ovr);
+  const sign = p => { const r=signFreeAgent(G,p); if(r.ok){ commit(G); tShow(`Signed ${p.name}`); } else tShow(r.msg); };
+  return (
+    <div className="space-y-3">
+      <Card><div className="font-semibold">Free Agents</div><div className="text-sm text-slate-400">Out-of-contract players. No fee — you only pay wages.</div></Card>
+      <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search free agents…" className="w-full bg-[#16213a] rounded px-3 py-2 text-sm" />
+      <Card className="p-0 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="text-left p-2">Player</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Age</th><th className="p-2">Wage</th><th className="p-2"></th></tr></thead>
+          <tbody>
+            {fa.slice(0,120).map(p=>(
+              <tr key={p.id} className="border-b border-[#15203a]">
+                <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
+                <td className="p-2 text-center"><PosTag p={p} /></td>
+                <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
+                <td className="p-2 text-center tnum">{p.age}</td>
+                <td className="p-2 text-center tnum">{money(wageFor(p))}</td>
+                <td className="p-2 text-center"><button onClick={()=>sign(p)} className="px-2 py-1 rounded bg-emerald-500 text-slate-900 text-xs font-semibold">Sign</button></td>
+              </tr>
+            ))}
+            {!fa.length && <tr><td colSpan="6" className="p-4 text-center text-slate-500">No free agents available.</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  );
+}
+
+/* ----------------------------- finances -------------------------------- */
+function Finances({G}){
+  const user = G.clubs[G.userTeamId];
+  const bill = wageBill(G, user.id);
+  const squad = Object.values(G.players).filter(p=>p.teamId===user.id).sort((a,b)=>b.salary-a.salary);
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        <Card><div className="text-xs text-slate-400">Transfer Budget</div><div className="text-2xl font-bold">{money(user.budget)}</div></Card>
+        <Card><div className="text-xs text-slate-400">Wage Bill / yr</div><div className="text-2xl font-bold">{money(bill)}</div></Card>
+        <Card><div className="text-xs text-slate-400">Stadium</div><div className="text-lg font-semibold">{user.stadium}</div><div className="text-xs text-slate-400">{(user.capacity/1000).toFixed(0)}k seats</div></Card>
+      </div>
+      <Card className="p-0 overflow-x-auto">
+        <div className="p-3 font-semibold">Wages</div>
+        <table className="w-full text-sm">
+          <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="text-left p-2">Player</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Wage</th><th className="p-2">Years</th></tr></thead>
+          <tbody>
+            {squad.map(p=>(
+              <tr key={p.id} className="border-b border-[#15203a]">
+                <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
+                <td className="p-2 text-center text-slate-400">{p.pos}</td>
+                <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
+                <td className="p-2 text-center tnum">{money(p.salary)}</td>
+                <td className="p-2 text-center tnum">{p.years>0?p.years:<span className="text-red-400">exp</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  );
+}
+
+/* ----------------------------- awards / hof ---------------------------- */
+function AwardsView({G}){
+  const hist = G.awardHistory||[];
+  return (
+    <div className="space-y-3">
+      {!hist.length && <Card><div className="text-slate-400 text-sm">No awards yet — finish a season.</div></Card>}
+      {hist.map(a=>(
+        <Card key={a.season}>
+          <div className="font-semibold mb-2">{a.season} Awards</div>
+          <div className="grid sm:grid-cols-2 gap-2 text-sm">
+            <AwardRow label="🏅 Player of the Season" v={a.pots} extra={a.pots?`${a.pots.r} avg`:""} G={G} />
+            <AwardRow label="⚽ Golden Boot" v={a.boot} extra={a.boot?`${a.boot.g} goals`:""} G={G} />
+            <AwardRow label="🧤 Golden Glove" v={a.glove} extra={a.glove?`${a.glove.cs} CS`:""} G={G} />
+            <AwardRow label="🌟 Young Player" v={a.young} extra={a.young?`${a.young.r} avg`:""} G={G} />
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+function AwardRow({label, v, extra, G}){
+  return (
+    <div className="bg-[#16213a] rounded p-2">
+      <div className="text-xs text-slate-400">{label}</div>
+      {v ? <div className="font-medium">{v.name} <span className="text-xs text-slate-400">{v.team} · {extra}</span></div> : <div className="text-slate-500">—</div>}
+    </div>
+  );
+}
+function HallOfFame({G}){
+  const hof = G.hof||[];
+  return (
+    <div className="space-y-3">
+      <Card><div className="font-semibold">Hall of Fame</div><div className="text-sm text-slate-400">Club legends inducted on retirement.</div></Card>
+      {!hof.length && <Card><div className="text-slate-400 text-sm">No inductees yet.</div></Card>}
+      <div className="grid sm:grid-cols-2 gap-3">
+        {hof.map(h=>(
+          <Card key={h.id}>
+            <div className="flex items-center gap-2">
+              <OvrPill v={h.peak} />
+              <div>
+                <div className="font-semibold">{h.name}</div>
+                <div className="text-xs text-slate-400">{h.pos} · {h.G} goals · {h.A} assists · {h.App} apps · inducted {h.season}</div>
+              </div>
+            </div>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- news ------------------------------------ */
+function NewsFeed({G}){
+  const news = G.news||[];
+  return (
+    <Card className="p-0">
+      {news.length===0 && <div className="p-4 text-slate-400 text-sm">No news yet.</div>}
+      {news.map((n,i)=>(
+        <div key={i} className="px-3 py-2 border-b border-[#15203a] text-sm flex gap-2">
+          <span className="text-slate-500 text-xs w-20 shrink-0">{n.season} {n.phase==="regular"?("MD"+n.day):""}</span>
+          <span className="text-slate-200">{n.msg}</span>
+        </div>
+      ))}
+    </Card>
+  );
+}
+
+/* ----------------------------- offseason ------------------------------- */
+function Offseason({G, commit, tShow, setTab}){
+  const champ = (G.champions||[])[0];
+  const award = (G.awardHistory||[])[0];
+  const intake = G.youthIntake||[];
+  const user = G.clubs[G.userTeamId];
+  const expected = G.expectation;
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="text-xl font-bold">{G.season} season review</div>
+        {champ && <div className="text-sm text-amber-300 mt-1">🏆 Champions: {G.clubs[champ.id].name}</div>}
+        <div className="text-sm text-slate-400 mt-1">You finished {ordinal(leaguePos(G,user))} in the {DIV_NAMES[user.div]} ({user.w}-{user.d}-{user.l}, {user.pts} pts).</div>
+      </Card>
+      {award && (
+        <Card>
+          <div className="font-semibold mb-2">Season awards</div>
+          <div className="grid sm:grid-cols-2 gap-2 text-sm">
+            <AwardRow label="🏅 Player of the Season" v={award.pots} extra={award.pots?`${award.pots.r} avg`:""} G={G} />
+            <AwardRow label="⚽ Golden Boot" v={award.boot} extra={award.boot?`${award.boot.g} goals`:""} G={G} />
+            <AwardRow label="🧤 Golden Glove" v={award.glove} extra={award.glove?`${award.glove.cs} CS`:""} G={G} />
+            <AwardRow label="🌟 Young Player" v={award.young} extra={award.young?`${award.young.r} avg`:""} G={G} />
+          </div>
+        </Card>
+      )}
+      <Card>
+        <div className="font-semibold mb-1">Transfers & free agents are open</div>
+        <div className="text-sm text-slate-400 mb-2">Sign players and renew expiring contracts before the new season kicks off.</div>
+        <div className="flex gap-2 flex-wrap">
+          <button onClick={()=>setTab("transfers")} className="px-3 py-1.5 rounded bg-[#16213a] text-slate-200 text-sm">Transfer Market</button>
+          <button onClick={()=>setTab("fa")} className="px-3 py-1.5 rounded bg-[#16213a] text-slate-200 text-sm">Free Agents</button>
+          <button onClick={()=>setTab("squad")} className="px-3 py-1.5 rounded bg-[#16213a] text-slate-200 text-sm">Renew Contracts</button>
+        </div>
+      </Card>
+      <Card>
+        <div className="font-semibold mb-2">Start next season</div>
+        <div className="text-sm text-slate-400 mb-3">This ages & develops players, processes promotion/relegation, brings in your youth intake, settles finances, and generates new fixtures.</div>
+        <button onClick={()=>{ startNextSeason(G); commit(G); tShow("New season started ⚽"); setTab("hub"); }} className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-bold">Start {G.season+1} Season</button>
+      </Card>
+      {intake.length>0 && (
+        <Card>
+          <div className="font-semibold mb-2">🎓 Last youth intake</div>
+          <div className="space-y-1 text-sm">
+            {intake.map(p=>(<div key={p.id} className="flex items-center gap-2"><span className="text-slate-400 w-10">{p.pos}</span><span className="flex-1">{p.name}</span><OvrPill v={p.ovr} /><PotPill v={p.pot} /></div>))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+/* ----------------------------- box score ------------------------------- */
+function BoxScore({m, G}){
+  if(!m) return null;
+  return (
+    <div>
+      <div className="flex items-center justify-center gap-4 py-2">
+        <div className="text-right flex-1"><div className="font-bold">{m.homeName}</div></div>
+        <div className="text-3xl font-black tnum">{m.hs} - {m.as}</div>
+        <div className="flex-1"><div className="font-bold">{m.awayName}</div></div>
+      </div>
+      {m.cup && <div className="text-center text-xs text-amber-300 mb-1">{CUP_NAME}</div>}
+      <div className="grid grid-cols-2 gap-4 text-sm">
+        <div className="text-right">
+          {m.hScorers.map((s,i)=><div key={i} className="text-slate-300">{s.name} {s.min}'{s.assist?<span className="text-slate-500"> ({s.assist})</span>:""}</div>)}
+        </div>
+        <div>
+          {m.aScorers.map((s,i)=><div key={i} className="text-slate-300">{s.min}' {s.name}{s.assist?<span className="text-slate-500"> ({s.assist})</span>:""}</div>)}
+        </div>
+      </div>
+      {m.motm && <div className="text-center text-xs text-emerald-300 mt-2">⭐ Man of the Match: {m.motm}</div>}
+    </div>
+  );
+}
+
+/* ----------------------------- player modal ---------------------------- */
+function PlayerModal({p, G, onClose}){
+  const club = p.teamId!=null && G.clubs[p.teamId] ? G.clubs[p.teamId] : null;
+  const attrs = p.pos==="GK"
+    ? [["GK",p.gk],["Phy",p.phy],["Pas",p.pas],["Pac",p.pac]]
+    : [["Pac",p.pac],["Sho",p.sho],["Pas",p.pas],["Dri",p.dri],["Def",p.def],["Phy",p.phy]];
+  const st = p.stats, ca = p.career;
+  return (
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-[#101a30] border border-[#1d2940] rounded-xl w-full max-w-lg max-h-[85vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
+        <div className="p-4 border-b border-[#1d2940] flex items-start gap-3 sticky top-0 bg-[#101a30]">
+          <OvrPill v={p.ovr} />
+          <div className="flex-1">
+            <div className="font-bold text-lg">{p.name}</div>
+            <div className="text-sm text-slate-400">{posLabel(p)} · {p.age}y · {p.foot==="B"?"Both":p.foot==="L"?"Left":"Right"} footed{club?` · ${club.name}`:" · Free agent"}</div>
+            <div className="text-xs text-slate-500 mt-0.5">Potential {p.pot} · Value {money(p.value)} · Wage {money(p.salary)}/yr{p.years>0?` · ${p.years}y left`:""}</div>
+          </div>
+          <button onClick={onClose} className="text-slate-400">✕</button>
+        </div>
+        <div className="p-4 space-y-4">
+          <div className="grid grid-cols-3 gap-2">
+            {attrs.map(([k,v])=>(
+              <div key={k} className="bg-[#16213a] rounded p-2 text-center">
+                <div className="text-xs text-slate-400">{k}</div>
+                <div className="text-xl font-bold tnum">{v}</div>
+              </div>
+            ))}
+          </div>
+          <div>
+            <div className="text-sm font-semibold mb-1">This season</div>
+            <StatLine s={st} gk={p.pos==="GK"} />
+          </div>
+          <div>
+            <div className="text-sm font-semibold mb-1">Career</div>
+            <StatLine s={ca} gk={p.pos==="GK"} />
+          </div>
+          {p.history && p.history.length>0 && (
+            <div>
+              <div className="text-sm font-semibold mb-1">History</div>
+              <table className="w-full text-xs tnum">
+                <thead><tr className="text-slate-500"><th className="text-left">Yr</th><th>Club</th><th>App</th><th>G</th><th>A</th><th>CS</th><th>Rtg</th></tr></thead>
+                <tbody>
+                  {p.history.slice().reverse().map((h,i)=>(
+                    <tr key={i} className="border-t border-[#15203a]">
+                      <td className="text-left">{h.season}</td><td className="text-center">{h.team}</td><td className="text-center">{h.App}</td>
+                      <td className="text-center">{h.G}</td><td className="text-center">{h.A}</td><td className="text-center">{h.CS}</td><td className="text-center">{h.r}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+function StatLine({s, gk}){
+  const cells = [["App",s.App],["Goals",s.G],["Assists",s.A],gk?["Clean Sheets",s.CS]:["MOTM",s.MOTM],["Yellow",s.YC],["Rating",avgRating(s)?avgRating(s).toFixed(2):"—"]];
+  return (
+    <div className="grid grid-cols-3 gap-2 text-center">
+      {cells.map(([k,v])=>(
+        <div key={k} className="bg-[#16213a] rounded p-2">
+          <div className="text-[11px] text-slate-400">{k}</div>
+          <div className="font-bold tnum">{v}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ----------------------------- settings -------------------------------- */
+function SettingsModal({G, commit, tShow, onClose}){
+  const [inj, setInj] = useState(G.settings?G.settings.injuries!==false:true);
+  return (
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-[#101a30] border border-[#1d2940] rounded-xl w-full max-w-sm" onClick={e=>e.stopPropagation()}>
+        <div className="p-4 border-b border-[#1d2940] flex items-center justify-between"><div className="font-semibold">Settings</div><button onClick={onClose} className="text-slate-400">✕</button></div>
+        <div className="p-4 space-y-3 text-sm">
+          <label className="flex items-center justify-between">
+            <span>Injuries</span>
+            <input type="checkbox" checked={inj} onChange={e=>{ setInj(e.target.checked); G.settings=G.settings||{}; G.settings.injuries=e.target.checked; commit(G); }} />
+          </label>
+          <div className="text-xs text-slate-500">Save version {SAVE_VERSION}. Saves persist on this device. Use Save File for backups.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- mount ----------------------------------- */
+const _root = ReactDOM.createRoot(document.getElementById("root"));
+_root.render(<App />);
+</script>
+<script>
+  // Transpile the JSX source with Babel standalone, then run it. (Same offline
+  // approach as the rest of the bundle — no network needed.)
+  (function(){
+    try {
+      var src = document.getElementById("app-src").textContent;
+      var out = Babel.transform(src, { presets: [["react", { runtime: "classic" }]] }).code;
+      (0, eval)(out);
+    } catch (e) {
+      document.getElementById("root").innerHTML =
+        '<pre style="color:#f87171;padding:16px;white-space:pre-wrap">App failed to start:\n' +
+        (e && (e.message || e)) + '</pre>';
+      console.error(e);
+    }
+  })();
+</script>
+</body>
+</html>
