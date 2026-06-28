@@ -234,6 +234,19 @@ function wageFor(p){
   if(p.age < 23) s *= 0.5; else if(p.age < 27) s *= 0.82;
   return clamp(round(s*10)/10, 0.2, 30);
 }
+// What a player demands per year to re-sign: his market wage, plus an ambition
+// premium for young talent with headroom, plus a form premium from last season.
+function wageDemand(p){
+  let s = wageFor(p);
+  const room = (p.pot||p.ovr) - p.ovr;
+  if(p.age<=24 && room>4) s *= 1.15;                  // wonderkid ambition
+  const st = p.stats, app = (st && st.App) || 0;
+  if(app>=8){                                         // reward a strong campaign
+    const perG = (st.G + 0.5*st.A) / app;
+    s *= clamp(1 + perG*0.30 + (avgRating(st)-6.6)*0.10, 0.85, 1.7);
+  }
+  return clamp(round(s*10)/10, 0.2, 40);
+}
 function abilityValue(o){ return Math.pow(Math.max(0, o-35)/45, 2.6) * 90; }
 function playerValue(p){
   const pot = p.pot || p.ovr;
@@ -732,13 +745,15 @@ function startNextSeason(G){
   Object.values(G.players).forEach(p=>{
     if(p.teamId==null) return;
     p.years = (p.years||1) - 1;
+    const club = G.clubs[p.teamId];
     if(p.years<=0){
-      // AI clubs re-sign most of their useful players; the rest hit the market
-      const club = G.clubs[p.teamId];
-      if(club && club.userControlled){ p.years=0; }   // user must decide (renew in squad)
-      else if(p.ovr>=58 && chance(0.78)){ p.years=rint(2,4); p.salary=wageFor(p); }
+      // AI clubs re-sign most of their useful players (at the player's demand); the rest hit the market
+      if(club && club.userControlled){ p.years=0; p.unhappy=true; }   // user must decide (renew in squad)
+      else if(p.ovr>=58 && chance(0.78)){ p.years=rint(2,4); p.salary=wageDemand(p); p.unhappy=false; }
       else { releaseToFA(G, p); }
-    }
+    } else if(p.years<=1 && club && club.userControlled && p.ovr>=60){
+      p.unhappy=true;   // wants a new deal before running down (Bosman risk next year)
+    } else { p.unhappy=false; }
   });
   // retirements (old, low-rated)
   Object.values(G.players).forEach(p=>{
@@ -752,13 +767,15 @@ function startNextSeason(G){
   const down = prem.slice(-3), up = champ.slice(0,3);
   down.forEach(c=>{ c.div=1; logNews(G,"releg",`⬇️ ${c.name} are relegated to the ${DIV_NAMES[1]}`, c.id); });
   up.forEach(c=>{ c.div=0; logNews(G,"promo",`⬆️ ${c.name} are promoted to the ${DIV_NAMES[0]}`, c.id); addHonour(c, G.season, "promo", `Promoted to ${DIV_NAMES[0]}`); });
-  // finances: gate revenue from final position + cup run, pay nothing here (wages tracked live)
+  // finances: income (TV base + league prize + gate) MINUS the annual wage bill,
+  // so contracts actually cost money and budgets reflect how well the club is run.
   G.clubs.forEach(c=>{
     const pos = leaguePos(G,c);
-    const base = c.div===0 ? 70 : 18;
-    const prize = c.div===0 ? clamp((21-pos)*3.0, 6, 60) : clamp((21-pos)*1.0, 2, 22);
-    const gate = round(c.capacity/1000 * (c.div===0?0.55:0.30));
-    c.budget = round((c.budget + base + prize + gate) * 10)/10;
+    const base = c.div===0 ? 30 : 13;                                         // TV / central distribution
+    const prize = c.div===0 ? clamp((21-pos)*1.7, 4, 34) : clamp((21-pos)*0.6, 1, 13);  // merit payment
+    const gate = round(c.capacity/1000 * (c.div===0?0.52:0.32));             // matchday income
+    const wages = wageBill(G, c.id);
+    c.budget = round((c.budget + base + prize + gate - wages) * 10)/10;
     c.pld=0;c.w=0;c.d=0;c.l=0;c.gf=0;c.ga=0;c.pts=0;
   });
   // youth intake into every club, refill thin squads
@@ -778,22 +795,33 @@ function startNextSeason(G){
 }
 function developPlayer(p){
   p.age++;
+  // `delta` is the intended OVR change this year. Young players with headroom to
+  // their potential grow; older players decline. (Growth is capped by remaining room.)
+  const room = (p.pot||p.ovr) - p.ovr;
   let delta = 0;
-  if(p.age<=23) delta = (p.pot - p.ovr) > 0 ? rint(1, 4) : rint(0,1);
-  else if(p.age<=27) delta = (p.pot - p.ovr) > 0 ? rint(0, 2) : 0;
+  if(p.age<=23) delta = room>0 ? rint(2,5) : rint(0,1);
+  else if(p.age<=27) delta = room>0 ? rint(0,3) : 0;
   else if(p.age<=30) delta = -rint(0,1);
   else delta = -rint(1,3);
-  // nudge the underlying attributes so OVR shifts coherently
+  if(delta>0) delta = Math.min(delta, room);   // never overshoot potential
+  // OVR is a weighted average of attributes, so bump attributes until the OVR
+  // actually moves by ~delta (the old code added raw points that averaged away to ~0).
   const keys = ["pac","sho","pas","dri","def","phy","gk"];
   const w = POS_W[p.pos]||{};
   const relevant = keys.filter(k=>(w[k]||0)>0.05);
-  for(let i=0;i<Math.abs(delta);i++){
-    const k = relevant.length?pick(relevant):pick(keys);
-    p[k] = clamp(p[k] + (delta>0?1:-1), 20, 99);
+  const target = clamp(p.ovr + delta, 20, 99);
+  const dir = delta>0 ? 1 : -1;
+  let guard = 0;
+  while(delta!==0 && guard++ < 120){
+    if(dir>0 ? p.ovr>=target : p.ovr<=target) break;
+    let k = relevant.length?pick(relevant):pick(keys);
+    let nv = clamp(p[k] + dir, 20, 99);
+    if(nv===p[k]){ k = pick(keys); nv = clamp(p[k] + dir, 20, 99); }   // attr capped — try another
+    p[k] = nv;
+    computeOvr(p);
   }
   // pace fades fastest with age
-  if(p.age>=30) p.pac = clamp(p.pac - rint(0,2), 20, 99);
-  computeOvr(p);
+  if(p.age>=30){ p.pac = clamp(p.pac - rint(0,2), 20, 99); computeOvr(p); }
   p.peakOvr = Math.max(p.peakOvr||p.ovr, p.ovr);
   p.salary = wageFor(p); p.value = playerValue(p);
 }
@@ -810,7 +838,7 @@ function youthIntake(G, club){
   for(let i=0;i<n;i++){
     const pos = pick(ALL_POS);
     const p = makePlayer(pos, [16,18], -10 + lvl*1.5);
-    p.pot = clamp(Math.max(p.pot, p.ovr + rint(8, 14+lvl*3)), p.ovr, 99); setPotential(p);
+    // give academy prospects real headroom (better academies -> higher ceilings)
     p.pot = clamp(Math.max(p.pot, p.ovr + rint(8, 14+lvl*3)), p.ovr, 99);
     p.teamId = club.id; p.salary = Math.min(p.salary, 0.4); p.years = rint(2,4); p.youth = true;
     G.players[p.id] = p; intake.push(p);
@@ -1277,10 +1305,10 @@ function MiniTable({G, rows, highlight}){
 function Squad({G, commit, tShow}){
   const user = G.clubs[G.userTeamId];
   const [sort, setSort] = useState("ovr");
+  const [renewP, setRenewP] = useState(null);
   let squad = Object.values(G.players).filter(p=>p.teamId===user.id);
   squad.sort((a,b)=> sort==="ovr"? b.ovr-a.ovr : sort==="pos"? BAND[a.pos]-BAND[b.pos]||b.ovr-a.ovr : sort==="age"? a.age-b.age : b.value-a.value);
   const inXI = new Set(user.xi||[]);
-  const renew = p => { p.years = rint(2,4); p.salary = wageFor(p); commit(G); tShow(`Renewed ${p.name}`); };
   return (
     <div className="space-y-3">
       <Card>
@@ -1308,20 +1336,62 @@ function Squad({G, commit, tShow}){
                   <PName p={p} className="font-medium" />
                   {isInjured(p) && <span className="ml-1 text-red-400 text-xs" title={p.injury.type}>✚{p.injury.weeks}w</span>}
                   {p.youth && <span className="ml-1 text-amber-300 text-xs">YTH</span>}
+                  {p.unhappy && p.years>0 && <span className="ml-1 text-orange-400 text-xs" title="Wants a new contract before it runs down">⚠</span>}
                 </td>
                 <td className="p-2 text-center"><PosTag p={p} /></td>
                 <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
                 <td className="p-2 text-center"><PotPill v={p.pot} /></td>
                 <td className="p-2 text-center tnum">{p.age}</td>
                 <td className="p-2 text-center tnum">{money(p.salary)}</td>
-                <td className="p-2 text-center tnum">{p.years>0?p.years:<span className="text-red-400">exp</span>}</td>
+                <td className={"p-2 text-center tnum "+(p.years<=0?"":p.years<=1?"text-orange-300":"")}>{p.years>0?p.years:<span className="text-red-400">exp</span>}</td>
                 <td className="p-2 text-center tnum">{money(p.value)}</td>
-                <td className="p-2 text-center">{p.years<=0 && <button onClick={()=>renew(p)} className="px-2 py-1 rounded bg-emerald-500 text-slate-900 text-xs font-semibold">Renew</button>}</td>
+                <td className="p-2 text-center">{(p.years<=0 || p.unhappy) && <button onClick={()=>setRenewP(p)} className={"px-2 py-1 rounded text-xs font-semibold "+(p.years<=0?"bg-emerald-500 text-slate-900":"bg-orange-500 text-slate-900")}>{p.years<=0?"Re-sign":"Renew"}</button>}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </Card>
+      {renewP && <RenewModal G={G} p={renewP} commit={commit} tShow={tShow} onClose={()=>setRenewP(null)} />}
+    </div>
+  );
+}
+// Contract negotiation: the player names a wage demand (ability + ambition + form);
+// the user picks a term length. Longer deals carry a small per-year premium for security.
+function RenewModal({G, p, commit, tShow, onClose}){
+  const user = G.clubs[G.userTeamId];
+  const demand = wageDemand(p);
+  const termPremium = { 1:1.0, 2:1.0, 3:1.05, 4:1.10 };
+  const sign = yrs => {
+    p.salary = clamp(round(demand*termPremium[yrs]*10)/10, 0.2, 40);
+    p.years = yrs; p.unhappy = false;
+    commit(G); tShow(`${p.name} signed for ${yrs}y at ${money(p.salary)}/yr`); onClose();
+  };
+  const bill = wageBill(G, user.id);
+  return (
+    <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-[#101a30] border border-[#1d2940] rounded-2xl p-5 w-full max-w-md" onClick={e=>e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-1">
+          <div className="font-bold text-lg">{p.name}</div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-200">✕</button>
+        </div>
+        <div className="text-sm text-slate-400 mb-3">{p.pos} · {p.age}y · OVR {p.ovr} · Pot {p.pot}</div>
+        <div className="grid grid-cols-2 gap-2 text-sm mb-4">
+          <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-xs text-slate-500">Current wage</div><div className="font-semibold tnum">{money(p.salary)}/yr</div></div>
+          <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-xs text-slate-500">Wage demand</div><div className="font-semibold tnum text-amber-300">{money(demand)}/yr</div></div>
+          <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-xs text-slate-500">Club wage bill</div><div className="font-semibold tnum">{money(bill)}/yr</div></div>
+          <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-xs text-slate-500">Transfer budget</div><div className="font-semibold tnum">{money(user.budget)}</div></div>
+        </div>
+        <div className="text-xs text-slate-400 mb-2">Offer a contract length:</div>
+        <div className="grid grid-cols-4 gap-2">
+          {[1,2,3,4].map(yrs=>(
+            <button key={yrs} onClick={()=>sign(yrs)}
+              className="px-2 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold text-sm">
+              {yrs}y<div className="text-[10px] font-normal">{money(round(demand*termPremium[yrs]*10)/10)}/yr</div>
+            </button>
+          ))}
+        </div>
+        <div className="text-[11px] text-slate-500 mt-3">Wages are paid from your budget each season. Let a deal run down and a rival can poach the player on a free transfer.</div>
+      </div>
     </div>
   );
 }
