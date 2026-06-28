@@ -195,24 +195,52 @@ function pitchCoords(slots){
 /* ----------------------------- clubs ----------------------------------- */
 // [city, nickname, abbr]. First 20 start in the Premier division, next 20 in the
 // Championship (second tier). Promotion/relegation swaps clubs between them each year.
-const CLUB_DEFS = [
-  ["Kingsbridge","United","KBU"],["Harrowgate","City","HGC"],["Ashford","Rovers","ASH"],
-  ["Blackmoor","Athletic","BLA"],["Crownhill","FC","CRH"],["Easton","Wanderers","EAS"],
-  ["Fenwick","Albion","FEN"],["Granville","Town","GRA"],["Hollowell","United","HOL"],
-  ["Ironbridge","City","IRB"],["Jarrow","Rovers","JAR"],["Kelvindale","FC","KEL"],
-  ["Langmere","Athletic","LAN"],["Marsden","United","MRS"],["Northwood","City","NOR"],
-  ["Oakvale","Wanderers","OAK"],["Pemberton","Albion","PEM"],["Ravenscar","Town","RAV"],
-  ["Stonegate","FC","STO"],["Thornbury","United","THB"],
-  ["Underwood","City","UND"],["Valeford","Rovers","VAL"],["Westcliff","Athletic","WES"],
-  ["Yarmouth","Wanderers","YAR"],["Aldermoor","FC","ALD"],["Brackenhill","United","BRK"],
-  ["Carrowmore","City","CAR"],["Dunfield","Rovers","DUN"],["Ellerby","Athletic","ELL"],
-  ["Foxholme","Town","FOX"],["Gosforth","Wanderers","GOS"],["Hartcliffe","United","HRT"],
-  ["Inglewood","FC","ING"],["Kestonbury","City","KES"],["Lynmouth","Rovers","LYN"],
-  ["Millbrook","Athletic","MIL"],["Norbeck","Town","NRB"],["Otterburn","United","OTT"],
-  ["Pinevale","City","PIN"],["Quarrydale","FC","QUA"],
-];
-const DIV_NAMES = ["Premier","Championship"];
 const TEAMS_PER_DIV = 20;
+const NUM_DIVS = 2;
+const CLUBS_PER_COUNTRY = TEAMS_PER_DIV * NUM_DIVS;   // 40
+// The world: four footballing nations, each with a two-tier pyramid (top flight +
+// second tier, 20 clubs each). Club names are generated deterministically from each
+// country's city + suffix lists, so the splash can list them before a game exists.
+const COUNTRIES = [
+  { name:"Albion", flag:"🦁", divNames:["Premier League","Championship"],
+    nicks:["United","City","Rovers","Athletic","FC","Wanderers","Albion","Town"],
+    cities:["Kingsbridge","Harrowgate","Ashford","Blackmoor","Crownhill","Easton","Fenwick","Granville","Hollowell","Ironbridge","Jarrow","Kelvindale","Langmere","Marsden","Northwood","Oakvale","Pemberton","Ravenscar","Stonegate","Thornbury","Underwood","Valeford","Westcliff","Yarmouth","Aldermoor","Brackenhill","Carrowmore","Dunfield","Ellerby","Foxholme","Gosforth","Hartcliffe","Inglewood","Kestonbury","Lynmouth","Millbrook","Norbeck","Otterburn","Pinevale","Quarrydale"] },
+  { name:"Iberia", flag:"🐂", divNames:["Primera Liga","Segunda"],
+    nicks:["CF","Atlético","Real","Deportivo","Unión","Sporting","CD","Racing"],
+    cities:["Alcazar","Bellamar","Castroreal","Duranta","Espinar","Fuendel","Granela","Huescar","Ibarreta","Jaravia","Lorquin","Maralba","Navedo","Olivar","Portela","Quesada","Robledo","Salbera","Toralba","Ventosa","Almazan","Briones","Cardena","Donalva","Estrela","Figuera","Gandul","Herrera","Illescas","Jumilla","Lebrija","Montoro","Niebla","Ondara","Pedroche","Requena","Sarine","Tordera","Utrera","Velez"] },
+  { name:"Rhineland", flag:"🦅", divNames:["Bundesliga","2. Liga"],
+    nicks:["SV","FC","Borussia","Eintracht","SC","VfB","Union","1.FC"],
+    cities:["Adlersberg","Brandhof","Konigstadt","Drachenfels","Eisenburg","Falkenau","Grunwald","Hochberg","Immenstadt","Jagersee","Kaltenbach","Lindenau","Morgental","Nordheim","Oberfeld","Pforzen","Quellburg","Rheinau","Steinbach","Tannberg","Ulmenhof","Vogtland","Wartburg","Adlerhorst","Birkenau","Donaueck","Erlenbach","Fichtenau","Goldbach","Hugelheim","Isarstein","Karlsfeld","Lichtenau","Moosburg","Neustein","Ostertal","Reutberg","Sonnberg","Talheim","Waldkirch"] },
+  { name:"Padania", flag:"🐺", divNames:["Serie A","Serie B"],
+    nicks:["Calcio","AC","FC","US","Inter","Sporting","Pro","Nuova"],
+    cities:["Monterosso","Valsanta","Castelmare","Borgovecchio","Rivalta","Sangiorgio","Belmonte","Corteluna","Daltavilla","Fiorenzo","Grottamare","Luccara","Marenzio","Norcello","Oltrera","Portovico","Quintano","Roccabruna","Saleruno","Terralba","Valverde","Albareto","Brentano","Caldera","Donnara","Empolino","Fontevia","Genzano","Imperola","Lavagno","Montalto","Novaria","Ortano","Pietrasanta","Riomaggio","Sestola","Trevisana","Urbiano","Vercella","Zenello"] },
+];
+const NUM_COUNTRIES = COUNTRIES.length;
+// Build a country's 40 club definitions deterministically: [city, nick, abbr].
+function buildCountryDefs(ci){
+  const C = COUNTRIES[ci];
+  const defs = [], used = new Set();
+  for(let i=0;i<CLUBS_PER_COUNTRY;i++){
+    const city = C.cities[i % C.cities.length];
+    const nick = C.nicks[i % C.nicks.length];
+    let abbr = city.slice(0,3).toUpperCase(), k=3;
+    while(used.has(abbr) && k<city.length){ abbr = (city.slice(0,2)+city[k]).toUpperCase(); k++; }
+    while(used.has(abbr)){ abbr = (city.slice(0,2)+(i%10)).toUpperCase(); k++; if(k>40) break; }
+    used.add(abbr);
+    defs.push([city, nick, abbr]);
+  }
+  return defs;
+}
+// Flat list of all 160 clubs; global club id == index here. Country = floor(id/40),
+// local index within country < 20 => top flight (div 0), else second tier (div 1).
+const ALL_CLUB_DEFS = [].concat(...COUNTRIES.map((_,ci)=>buildCountryDefs(ci)));
+const countryOfIdx = id => Math.floor(id / CLUBS_PER_COUNTRY);
+const localIdx = id => id % CLUBS_PER_COUNTRY;
+const divOfIdx = id => localIdx(id) < TEAMS_PER_DIV ? 0 : 1;
+// Per-country division name, e.g. divName(0,0) -> "Premier League".
+function divName(country, div){ return (COUNTRIES[country]||COUNTRIES[0]).divNames[div]; }
+// Back-compat for older single-country references.
+const DIV_NAMES = COUNTRIES[0].divNames;
 
 /* ----------------------------- player gen ------------------------------ */
 function emptyStats(){ return { App:0, Min:0, G:0, A:0, CS:0, YC:0, RC:0, MOTM:0, ratingSum:0, ratingN:0 }; }
@@ -233,6 +261,19 @@ function wageFor(p){
   let s = Math.pow(Math.max(0, p.ovr-40)/59, 2.1) * 22;
   if(p.age < 23) s *= 0.5; else if(p.age < 27) s *= 0.82;
   return clamp(round(s*10)/10, 0.2, 30);
+}
+// What a player demands per year to re-sign: his market wage, plus an ambition
+// premium for young talent with headroom, plus a form premium from last season.
+function wageDemand(p){
+  let s = wageFor(p);
+  const room = (p.pot||p.ovr) - p.ovr;
+  if(p.age<=24 && room>4) s *= 1.15;                  // wonderkid ambition
+  const st = p.stats, app = (st && st.App) || 0;
+  if(app>=8){                                         // reward a strong campaign
+    const perG = (st.G + 0.5*st.A) / app;
+    s *= clamp(1 + perG*0.30 + (avgRating(st)-6.6)*0.10, 0.85, 1.7);
+  }
+  return clamp(round(s*10)/10, 0.2, 40);
 }
 function abilityValue(o){ return Math.pow(Math.max(0, o-35)/45, 2.6) * 90; }
 function playerValue(p){
@@ -273,14 +314,14 @@ function makePlayer(pos, ageRange, meanAdj=0){
 
 /* ----------------------------- league gen ------------------------------ */
 const STADIUM_NAMES = ["Riverside","Highbury Park","The Den","Elm Road","Victoria Park","Stonebridge","Old Mill Ground","Kingsmeadow","Fortress Park","Saxon Field","The Crucible","Moorland Stadium","Tunstall Park","Greenfield","Castle Road","Harbour End","Abbey Stadium","Brookvale","Sandhill Park","Penrose Ground","Whitmore Park","Cathedral Ground","Eastlands","The Vale","Brightside Park","Lowfields","Mariners Park","Cliffe End","Ashwood Stadium","Foundry Park","Northgate","Belmont Ground","Carrow End","Deepdale Park","Goldstone Ground","Hillsborough Park","Loftus Field","Maine Ground","New Den","Priory Park"];
-function makeClub(def, idx, div){
+function makeClub(def, idx, div, country){
   const [city, nick, abbr] = def;
   return {
-    id: idx, city, nick, abbr, name: city + " " + nick, div,
+    id: idx, city, nick, abbr, name: city + " " + nick, div, country,
     stadium: STADIUM_NAMES[idx % STADIUM_NAMES.length], capacity: rint(18,62)*1000,
     pld:0, w:0, d:0, l:0, gf:0, ga:0, pts:0,
     budget: rint(20,140) + (div===0?60:0), formation: "4-3-3", xi: [], bench: [],
-    academy: { level: 1 }, history: [],
+    academy: { level: 1 }, history: [], honours: [],
     userControlled: false,
   };
 }
@@ -297,7 +338,7 @@ function buildSquad(clubId, div){
 function generateLeague(userTeamId, opts={}){
   const { seed=null } = opts;
   if(seed!=null && !Number.isNaN(seed)) setRng(mulberry32(seed >>> 0));
-  const clubs = CLUB_DEFS.map((d,i)=>makeClub(d, i, i < TEAMS_PER_DIV ? 0 : 1));
+  const clubs = ALL_CLUB_DEFS.map((d,i)=>makeClub(d, i, divOfIdx(i), countryOfIdx(i)));
   clubs[userTeamId].userControlled = true;
   const players = {};
   clubs.forEach(c => buildSquad(c.id, c.div).forEach(p => players[p.id] = p));
@@ -332,17 +373,19 @@ function divRounds(clubIds){
   return firstLeg.concat(secondLeg);
 }
 function buildSchedule(clubs){
-  const divs = [[],[]];
-  clubs.forEach(c => divs[c.div].push(c.id));
-  const r0 = divRounds(divs[0]), r1 = divRounds(divs[1]);
-  const nRounds = Math.max(r0.length, r1.length);
+  // Each of the (countries x divisions) leagues plays its own double round-robin;
+  // all leagues share the same 38 matchdays, merged into one round per matchday.
+  const leagues = {};   // key country*10+div -> [clubIds]
+  clubs.forEach(c => { const k=c.country*10+c.div; (leagues[k]=leagues[k]||[]).push(c.id); });
   const rounds = [];
-  for(let i=0;i<nRounds;i++){
-    const games = [];
-    (r0[i]||[]).forEach(g => games.push({ home:g.home, away:g.away, div:0, played:false, hs:0, as:0 }));
-    (r1[i]||[]).forEach(g => games.push({ home:g.home, away:g.away, div:1, played:false, hs:0, as:0 }));
-    rounds.push(games);
-  }
+  Object.keys(leagues).forEach(k=>{
+    const country = Math.floor(k/10), div = k%10;
+    const lr = divRounds(leagues[k]);
+    lr.forEach((games, i)=>{
+      const r = rounds[i] || (rounds[i]=[]);
+      games.forEach(g => r.push({ home:g.home, away:g.away, div, country, played:false, hs:0, as:0 }));
+    });
+  });
   return rounds;
 }
 
@@ -485,72 +528,187 @@ function maybeInjure(club, players, settings){
 /* ----------------------------- XI selection ---------------------------- */
 // Auto-pick the best available XI for a club's current formation, honoring each
 // player's position eligibility (least penalty + highest rating wins each slot).
+// Pick the best XI for a club's formation, strongly favouring players in a NATURAL
+// position (avoiding out-of-position selections) and never fielding an outfielder in
+// goal if a keeper is available.
 function autoPickXI(club, players){
   const slots = FORMATIONS[club.formation] || FORMATIONS["4-3-3"];
-  const squad = Object.values(players).filter(p => p.teamId===club.id && !isInjured(p));
+  let squad = Object.values(players).filter(p => p.teamId===club.id && !isInjured(p));
+  if(squad.length < 11) squad = Object.values(players).filter(p => p.teamId===club.id);   // emergency: ignore injuries
   const used = new Set();
-  const xi = [];
-  slots.forEach(slot=>{
-    let best=null, bestScore=-1;
-    squad.forEach(p=>{
-      if(used.has(p.id)) return;
-      const score = effRating(p, slot);
-      if(score>bestScore){ bestScore=score; best=p; }
-    });
-    if(best){ used.add(best.id); xi.push(best.id); }
+  const xi = new Array(slots.length).fill(null);
+  const isKeeper = p => p.pos==="GK" || (p.positions||[]).includes("GK");
+  const canPlay = (p, slot) => (p.positions||[p.pos]).includes(slot);
+  const avail = () => squad.filter(p=>!used.has(p.id));
+
+  // 1) Goalkeeper(s): only ever from actual keepers (best handling); outfielder only as last resort.
+  slots.forEach((slot,i)=>{
+    if(slot!=="GK") return;
+    const keepers = avail().filter(isKeeper).sort((a,b)=>b.gk-a.gk);
+    const pick = keepers[0] || avail().sort((a,b)=>effRating(b,slot)-effRating(a,slot))[0];
+    if(pick){ used.add(pick.id); xi[i]=pick.id; }
   });
-  club.xi = xi;
-  // bench: best remaining, keeping a keeper first
-  const rest = squad.filter(p=>!used.has(p.id)).sort((a,b)=>b.ovr-a.ovr);
-  const benchGK = rest.find(p=>p.pos==="GK");
+
+  // 2) Outfield slots filled scarcity-first (slots with the fewest natural candidates
+  //    go first) so rare specialists land in their natural role before versatile players
+  //    are used up. Each slot takes the best natural fit, else the best by effRating.
+  const naturalCount = i => squad.filter(p=>!used.has(p.id) && canPlay(p, slots[i])).length;
+  const outIdx = slots.map((s,i)=>i).filter(i=>slots[i]!=="GK").sort((a,b)=>naturalCount(a)-naturalCount(b));
+  outIdx.forEach(i=>{
+    const slot = slots[i], pool = avail();
+    const naturals = pool.filter(p=>canPlay(p, slot));
+    const pick = naturals.length ? naturals.sort((a,b)=>b.ovr-a.ovr)[0]
+                                 : pool.sort((a,b)=>effRating(b,slot)-effRating(a,slot))[0];
+    if(pick){ used.add(pick.id); xi[i]=pick.id; }
+  });
+
+  club.xi = xi.filter(x=>x!=null);
+  // bench: a backup keeper first, then the best remaining outfielders
+  const rest = squad.filter(p=>!used.has(p.id));
+  const benchGK = rest.filter(isKeeper).sort((a,b)=>b.gk-a.gk)[0];
   const bench = [];
   if(benchGK) bench.push(benchGK.id);
-  rest.forEach(p=>{ if(bench.length<9 && p.id!==(benchGK&&benchGK.id)) bench.push(p.id); });
+  rest.filter(p=>!benchGK || p.id!==benchGK.id).sort((a,b)=>b.ovr-a.ovr).forEach(p=>{ if(bench.length<9) bench.push(p.id); });
   club.bench = bench;
 }
 function ensureXI(club, players){ if(!club.xi || club.xi.length<11) autoPickXI(club, players); }
 
 /* ----------------------------- standings ------------------------------- */
-function tableFor(G, div){
-  return G.clubs.filter(c=>c.div===div).slice().sort((a,b)=>
+// Standings for one league (a country's division). `country` defaults to country 0
+// so any legacy single-arg callers still resolve to the original top nation.
+function tableFor(G, div, country=0){
+  return G.clubs.filter(c=>c.div===div && (c.country||0)===country).slice().sort((a,b)=>
     b.pts-a.pts || (b.gf-b.ga)-(a.gf-a.ga) || b.gf-a.gf || a.name.localeCompare(b.name));
 }
-function leaguePos(G, club){ return tableFor(G, club.div).findIndex(c=>c.id===club.id) + 1; }
+function leaguePos(G, club){ return tableFor(G, club.div, club.country||0).findIndex(c=>c.id===club.id) + 1; }
 
-/* ----------------------------- domestic cup ---------------------------- */
-// 32-team knockout: all 20 top-flight clubs + the 12 highest-rated second-tier clubs.
-// Rounds resolve on set matchdays. Single match; a draw is decided by strength coin-flip.
-const CUP_NAME = "Pocket Cup";
-const CUP_MD = { 6:"R32", 13:"R16", 21:"QF", 29:"SF", 36:"Final" };
-function initCup(G){
-  const top = G.clubs.filter(c=>c.div===0).map(c=>c.id);
-  const second = G.clubs.filter(c=>c.div===1)
-    .sort((a,b)=>clubStrength(b,G.players)-clubStrength(a,G.players)).slice(0,12).map(c=>c.id);
-  let pool = top.concat(second);
-  for(let i=pool.length-1;i>0;i--){ const j=Math.floor(_rng()*(i+1)); [pool[i],pool[j]]=[pool[j],pool[i]]; }
-  G.cup = { alive: pool, round: "R32", ties: [], history: [], winner: null, results: {} };
+/* ----------------------------- club honours ---------------------------- */
+// A simple trophy record on each club: { season, type, label }. type is one of
+// "league" | "cup" | "continental" | "promo" so a future trophy-cabinet UI can group them.
+function addHonour(club, season, type, label){
+  if(!club) return;
+  if(!Array.isArray(club.honours)) club.honours = [];
+  club.honours.push({ season, type, label });
 }
-function playCupRound(G){
-  const cup = G.cup; if(!cup || cup.winner) return;
+
+/* ----------------------------- knockout core --------------------------- */
+// Resolve one round of any single-leg knockout cup, in place. `order` lists the
+// round names smallest-first (..., "SF", "Final"); the last entry plays neutral.
+// Sets cup.winner (+ cup.runnerUp) once one club remains.
+function playKnockoutRound(G, cup, order){
+  if(!cup || cup.winner!=null) return;
   const ids = cup.alive.slice();
   const winners = [], ties = [];
+  const isFinal = cup.round === order[order.length-1];
   for(let i=0;i<ids.length;i+=2){
     const a = G.clubs[ids[i]], b = G.clubs[ids[i+1]];
     if(!b){ winners.push(ids[i]); continue; }
     ensureXI(a, G.players); ensureXI(b, G.players);
-    const box = simMatch(a, b, G.players, { cup:true, neutral: cup.round==="Final", mustDecide:true });
+    const box = simMatch(a, b, G.players, { cup:true, neutral: isFinal, mustDecide:true });
     const w = box.hs>=box.as ? a.id : b.id;   // mustDecide guarantees no draw
     winners.push(w);
     ties.push({ home:a.id, away:b.id, hs:box.hs, as:box.as, win:w });
   }
   cup.results[cup.round] = ties;
   cup.history.unshift({ round: cup.round, ties });
-  if(winners.length===1){ cup.winner = winners[0]; cup.alive = winners; }
-  else {
+  if(winners.length===1){
+    cup.winner = winners[0];
+    const fin = ties[0];
+    cup.runnerUp = fin ? (fin.win===fin.home ? fin.away : fin.home) : null;
     cup.alive = winners;
-    const order = ["R32","R16","QF","SF","Final"];
-    cup.round = order[order.indexOf(cup.round)+1] || "Final";
+  } else {
+    cup.alive = winners;
+    cup.round = order[order.indexOf(cup.round)+1] || order[order.length-1];
   }
+}
+
+/* ----------------------------- domestic cups --------------------------- */
+// One 32-team knockout PER COUNTRY: that nation's 20 top-flight clubs + its 12
+// best second-tier clubs. Rounds resolve on set matchdays; a draw is decided by
+// a strength coin-flip. G.cups is an array indexed by country.
+const CUP_NAME = "National Cup";
+const CUP_ORDER = ["R32","R16","QF","SF","Final"];
+const CUP_MD = { 6:"R32", 13:"R16", 21:"QF", 29:"SF", 36:"Final" };
+function cupName(country){ return (COUNTRIES[country]||COUNTRIES[0]).name + " Cup"; }
+function initCountryCup(G, country){
+  const top = G.clubs.filter(c=>c.country===country && c.div===0).map(c=>c.id);
+  const second = G.clubs.filter(c=>c.country===country && c.div===1)
+    .sort((a,b)=>clubStrength(b,G.players)-clubStrength(a,G.players)).slice(0,12).map(c=>c.id);
+  let pool = top.concat(second);
+  for(let i=pool.length-1;i>0;i--){ const j=Math.floor(_rng()*(i+1)); [pool[i],pool[j]]=[pool[j],pool[i]]; }
+  return { country, alive: pool, round: "R32", history: [], winner: null, runnerUp: null, results: {} };
+}
+function initCups(G){ G.cups = COUNTRIES.map((_,ci)=>initCountryCup(G, ci)); }
+function playCupRound(G){
+  (G.cups||[]).forEach(cup=>{
+    const wasOver = cup.winner!=null;
+    playKnockoutRound(G, cup, CUP_ORDER);
+    if(!wasOver && cup.winner!=null){
+      const wc = G.clubs[cup.winner];
+      logNews(G, "cup", `🏆 ${wc.name} win the ${cupName(cup.country)}!`, wc.id);
+      addHonour(wc, G.season, "cup", `${cupName(cup.country)} winners`);
+    }
+  });
+}
+// The user's own national cup (for the Cup tab default).
+function userCup(G){ const c=G.clubs[G.userTeamId]; return (G.cups||[]).find(x=>x.country===(c?c.country:0)) || (G.cups||[])[0]; }
+
+/* ------------------------- continental champions cup ------------------- */
+// A 16-team seeded knockout (R16 -> QF -> SF -> Final, neutral final) running
+// alongside the leagues. Qualifiers: each country's top 3 by LAST season's finish
+// PLUS a 4th "cup route" berth (national cup winner -> runner-up -> next finisher).
+const CONT_CUP_NAME = "Continental Champions Cup";
+const CONT_ORDER = ["R16","QF","SF","Final"];
+const CONT_MD = { 9:"R16", 17:"QF", 25:"SF", 33:"Final" };
+// Rank one country's top-flight clubs by last completed season's finish (best first);
+// newly promoted clubs (no top-flight history) and ties fall back to current strength.
+function contRankCountry(G, country){
+  const lastFinish = c => {
+    const h = c.history || [];
+    for(let i=h.length-1;i>=0;i--){ if(h[i].div===0) return h[i].pos; }
+    return 999;
+  };
+  return G.clubs.filter(c=>c.country===country && c.div===0).slice().sort((a,b)=>{
+    const fa=lastFinish(a), fb=lastFinish(b);
+    if(fa!==fb) return fa-fb;
+    return clubStrength(b,G.players)-clubStrength(a,G.players);
+  });
+}
+// Four continental berths for one country: top 3 + cup route.
+function countryContQualifiers(G, country){
+  const ranked = contRankCountry(G, country);
+  const top3 = ranked.slice(0,3).map(c=>c.id);
+  let cupRoute = null;
+  const cup = (G.cups||[]).find(x=>x.country===country);
+  if(cup){
+    if(cup.winner!=null && !top3.includes(cup.winner)) cupRoute = cup.winner;
+    else if(cup.runnerUp!=null && !top3.includes(cup.runnerUp)) cupRoute = cup.runnerUp;
+  }
+  if(cupRoute==null){ const x = ranked.slice(3).find(c=>!top3.includes(c.id)); cupRoute = x?x.id:null; }
+  const four = cupRoute!=null ? top3.concat([cupRoute]) : top3.slice();
+  for(let i=3; four.length<4 && i<ranked.length; i++){ if(!four.includes(ranked[i].id)) four.push(ranked[i].id); }
+  return { ids: four.slice(0,4), cupRoute };
+}
+// Standard 16-team seeding so the top seeds can only meet in later rounds.
+function seedBracket16(pool){
+  const order = [1,16,8,9,5,12,4,13,3,14,6,11,7,10,2,15];
+  return order.map(s=>pool[s-1]).filter(x=>x!=null);
+}
+function initContCup(G){
+  // Gather each country's four qualifiers grouped by qualification rank, so the
+  // four national champions are the top seeds (1-4), the four runners-up next, etc.
+  const perCountry = COUNTRIES.map((_,ci)=>countryContQualifiers(G, ci));
+  const pool = [], cupRoutes = [];
+  perCountry.forEach(q=>{ if(q.cupRoute!=null) cupRoutes.push(q.cupRoute); });
+  for(let qp=0; qp<4; qp++){
+    perCountry.forEach(q=>{ if(q.ids[qp]!=null) pool.push(q.ids[qp]); });
+  }
+  const seeds = {}; pool.forEach((id,i)=>seeds[id]=i+1);
+  G.contCup = {
+    alive: seedBracket16(pool), round: "R16", results: {}, history: [],
+    winner: null, runnerUp: null, seeds, qualifiers: pool.slice(),
+    cupRoutes, season: G.season,
+  };
 }
 
 /* ----------------------------- sim loop -------------------------------- */
@@ -571,8 +729,19 @@ function simRound(G){
   });
   // injuries heal a week
   Object.values(G.players).forEach(p=>{ if(isInjured(p)) p.injury.weeks--; });
-  // domestic cup round on its matchday
-  if(CUP_MD[G.day+1] && G.cup && !G.cup.winner){ playCupRound(G); if(G.cup.winner!=null && CUP_MD[G.day+1]==="Final"){ const wc=G.clubs[G.cup.winner]; logNews(G,"cup",`🏆 ${wc.name} win the ${CUP_NAME}!`, wc.id); } }
+  // domestic cup round (all national cups) on its matchday
+  if(CUP_MD[G.day+1] && G.cups){ playCupRound(G); }
+  // continental champions cup round on its matchday
+  if(CONT_MD[G.day+1] && G.contCup && G.contCup.winner==null){
+    playKnockoutRound(G, G.contCup, CONT_ORDER);
+    if(G.contCup.winner!=null){
+      const wc=G.clubs[G.contCup.winner];
+      logNews(G,"cup",`🏆 ${wc.name} are crowned champions of ${CONT_CUP_NAME}!`, wc.id);
+      addHonour(wc, G.season, "continental", `${CONT_CUP_NAME} winners`);
+      G.contChampions = G.contChampions || [];
+      G.contChampions.unshift({ season:G.season, id:wc.id, abbr:wc.abbr });
+    }
+  }
   G.day++;
   if(G.day >= G.schedule.length){ G.phase = "offseason"; finalizeSeason(G); }
 }
@@ -597,29 +766,38 @@ function simToNextUserMatch(G){
 
 /* ----------------------------- offseason ------------------------------- */
 function finalizeSeason(G){
-  // champion + awards
-  const top = tableFor(G, 0);
-  const champ = top[0];
+  // league champion of every country
   G.champions = G.champions || [];
-  G.champions.unshift({ season:G.season, id:champ.id, abbr:champ.abbr });
-  logNews(G, "title", `🏆 ${champ.name} are champions of the ${DIV_NAMES[0]}!`, champ.id);
+  COUNTRIES.forEach((C,ci)=>{
+    const champ = tableFor(G, 0, ci)[0];
+    if(!champ) return;
+    G.champions.unshift({ season:G.season, id:champ.id, abbr:champ.abbr, country:ci });
+    logNews(G, "title", `🏆 ${champ.name} are champions of the ${divName(ci,0)}!`, champ.id);
+    addHonour(G.clubs[champ.id], G.season, "league", `${divName(ci,0)} champions`);
+  });
   computeAwards(G);
   G.phase = "offseason";
 }
 function computeAwards(G){
-  const all = Object.values(G.players).filter(p=>p.teamId!=null && G.clubs[p.teamId] && G.clubs[p.teamId].div===0 && p.stats.App>=10);
-  const boot = all.slice().sort((a,b)=>b.stats.G-a.stats.G)[0];
-  const glove = all.filter(p=>p.pos==="GK").sort((a,b)=>b.stats.CS-a.stats.CS)[0];
-  const pots = all.slice().sort((a,b)=>(avgRating(b.stats)+b.stats.G*0.03+b.stats.A*0.02)-(avgRating(a.stats)+a.stats.G*0.03+a.stats.A*0.02))[0];
-  const yng = all.filter(p=>p.age<=21).sort((a,b)=>avgRating(b.stats)-avgRating(a.stats))[0];
-  const a = { season:G.season,
-    pots: pots?{id:pots.id,name:pots.name,team:G.clubs[pots.teamId].abbr,r:+avgRating(pots.stats).toFixed(2)}:null,
-    boot: boot?{id:boot.id,name:boot.name,team:G.clubs[boot.teamId].abbr,g:boot.stats.G}:null,
-    glove: glove?{id:glove.id,name:glove.name,team:G.clubs[glove.teamId].abbr,cs:glove.stats.CS}:null,
-    young: yng?{id:yng.id,name:yng.name,team:G.clubs[yng.teamId].abbr,r:+avgRating(yng.stats).toFixed(2)}:null };
-  G.awardHistory = G.awardHistory || []; G.awardHistory.unshift(a);
-  if(pots){ pots.awards=(pots.awards||0)+1; }
-  if(boot){ boot.golden=(boot.golden||0)+1; }
+  // a per-country award set (top flight only)
+  G.awardHistory = G.awardHistory || [];
+  const entry = { season:G.season, countries: [] };
+  COUNTRIES.forEach((C,ci)=>{
+    const all = Object.values(G.players).filter(p=>p.teamId!=null && G.clubs[p.teamId] && G.clubs[p.teamId].country===ci && G.clubs[p.teamId].div===0 && p.stats.App>=10);
+    if(!all.length){ entry.countries.push({ country:ci, pots:null, boot:null, glove:null, young:null }); return; }
+    const boot = all.slice().sort((a,b)=>b.stats.G-a.stats.G)[0];
+    const glove = all.filter(p=>p.pos==="GK").sort((a,b)=>b.stats.CS-a.stats.CS)[0];
+    const pots = all.slice().sort((a,b)=>(avgRating(b.stats)+b.stats.G*0.03+b.stats.A*0.02)-(avgRating(a.stats)+a.stats.G*0.03+a.stats.A*0.02))[0];
+    const yng = all.filter(p=>p.age<=21).sort((a,b)=>avgRating(b.stats)-avgRating(a.stats))[0];
+    entry.countries.push({ country:ci,
+      pots: pots?{id:pots.id,name:pots.name,team:G.clubs[pots.teamId].abbr,r:+avgRating(pots.stats).toFixed(2)}:null,
+      boot: boot?{id:boot.id,name:boot.name,team:G.clubs[boot.teamId].abbr,g:boot.stats.G}:null,
+      glove: glove?{id:glove.id,name:glove.name,team:G.clubs[glove.teamId].abbr,cs:glove.stats.CS}:null,
+      young: yng?{id:yng.id,name:yng.name,team:G.clubs[yng.teamId].abbr,r:+avgRating(yng.stats).toFixed(2)}:null });
+    if(pots){ pots.awards=(pots.awards||0)+1; }
+    if(boot){ boot.golden=(boot.golden||0)+1; }
+  });
+  G.awardHistory.unshift(entry);
 }
 // Roll the franchise into the next season: archive stats, age & develop players, expire
 // contracts, promotion/relegation, youth intake, finances, fresh fixtures + cup.
@@ -651,13 +829,15 @@ function startNextSeason(G){
   Object.values(G.players).forEach(p=>{
     if(p.teamId==null) return;
     p.years = (p.years||1) - 1;
+    const club = G.clubs[p.teamId];
     if(p.years<=0){
-      // AI clubs re-sign most of their useful players; the rest hit the market
-      const club = G.clubs[p.teamId];
-      if(club && club.userControlled){ p.years=0; }   // user must decide (renew in squad)
-      else if(p.ovr>=58 && chance(0.78)){ p.years=rint(2,4); p.salary=wageFor(p); }
+      // AI clubs re-sign most of their useful players (at the player's demand); the rest hit the market
+      if(club && club.userControlled){ p.years=0; p.unhappy=true; }   // user must decide (renew in squad)
+      else if(p.ovr>=58 && chance(0.78)){ p.years=rint(2,4); p.salary=wageDemand(p); p.unhappy=false; }
       else { releaseToFA(G, p); }
-    }
+    } else if(p.years<=1 && club && club.userControlled && p.ovr>=60){
+      p.unhappy=true;   // wants a new deal before running down (Bosman risk next year)
+    } else { p.unhappy=false; }
   });
   // retirements (old, low-rated)
   Object.values(G.players).forEach(p=>{
@@ -666,29 +846,34 @@ function startNextSeason(G){
       delete G.players[p.id];
     }
   });
-  // promotion / relegation: bottom 3 of Premier <-> top 3 of Championship
-  const prem = tableFor(G,0), champ = tableFor(G,1);
-  const down = prem.slice(-3), up = champ.slice(0,3);
-  down.forEach(c=>{ c.div=1; logNews(G,"releg",`⬇️ ${c.name} are relegated to the ${DIV_NAMES[1]}`, c.id); });
-  up.forEach(c=>{ c.div=0; logNews(G,"promo",`⬆️ ${c.name} are promoted to the ${DIV_NAMES[0]}`, c.id); });
-  // finances: gate revenue from final position + cup run, pay nothing here (wages tracked live)
+  // promotion / relegation WITHIN each country: bottom 3 of the top flight swap
+  // with the top 3 of the second tier.
+  COUNTRIES.forEach((C,ci)=>{
+    const prem = tableFor(G,0,ci), champ = tableFor(G,1,ci);
+    prem.slice(-3).forEach(c=>{ c.div=1; logNews(G,"releg",`⬇️ ${c.name} are relegated to the ${divName(ci,1)}`, c.id); });
+    champ.slice(0,3).forEach(c=>{ c.div=0; logNews(G,"promo",`⬆️ ${c.name} are promoted to the ${divName(ci,0)}`, c.id); addHonour(c, G.season, "promo", `Promoted to ${divName(ci,0)}`); });
+  });
+  // finances: income (TV base + league prize + gate) MINUS the annual wage bill,
+  // so contracts actually cost money and budgets reflect how well the club is run.
   G.clubs.forEach(c=>{
     const pos = leaguePos(G,c);
-    const base = c.div===0 ? 70 : 18;
-    const prize = c.div===0 ? clamp((21-pos)*3.0, 6, 60) : clamp((21-pos)*1.0, 2, 22);
-    const gate = round(c.capacity/1000 * (c.div===0?0.55:0.30));
-    c.budget = round((c.budget + base + prize + gate) * 10)/10;
+    const base = c.div===0 ? 30 : 13;                                         // TV / central distribution
+    const prize = c.div===0 ? clamp((21-pos)*1.7, 4, 34) : clamp((21-pos)*0.6, 1, 13);  // merit payment
+    const gate = round(c.capacity/1000 * (c.div===0?0.52:0.32));             // matchday income
+    const wages = wageBill(G, c.id);
+    c.budget = round((c.budget + base + prize + gate - wages) * 10)/10;
     c.pld=0;c.w=0;c.d=0;c.l=0;c.gf=0;c.ga=0;c.pts=0;
   });
   // youth intake into every club, refill thin squads
   G.clubs.forEach(c=>youthIntake(G, c));
   G.clubs.forEach(c=>refillSquad(G, c));
   // thin the free-agent pool (already aged above)
-  G.freeAgents = G.freeAgents.filter(p=>p.ovr>=48 || p.age<=23).slice(0,160);
-  // fresh fixtures + cup + reset XIs
+  G.freeAgents = G.freeAgents.filter(p=>p.ovr>=48 || p.age<=23).slice(0,300);
+  // fresh fixtures + cups + reset XIs
   G.season++; G.day=0; G.phase="regular";
   G.schedule = buildSchedule(G.clubs);
-  initCup(G);
+  initContCup(G);   // seed continental cup from LAST season's standings + national cups (still on G.cups)
+  initCups(G);      // then reset the national cups for the new season
   G.clubs.forEach(c=>autoPickXI(c, G.players));
   G.transferOffers = [];
   G.lastMatch = null;
@@ -696,22 +881,33 @@ function startNextSeason(G){
 }
 function developPlayer(p){
   p.age++;
+  // `delta` is the intended OVR change this year. Young players with headroom to
+  // their potential grow; older players decline. (Growth is capped by remaining room.)
+  const room = (p.pot||p.ovr) - p.ovr;
   let delta = 0;
-  if(p.age<=23) delta = (p.pot - p.ovr) > 0 ? rint(1, 4) : rint(0,1);
-  else if(p.age<=27) delta = (p.pot - p.ovr) > 0 ? rint(0, 2) : 0;
+  if(p.age<=23) delta = room>0 ? rint(2,5) : rint(0,1);
+  else if(p.age<=27) delta = room>0 ? rint(0,3) : 0;
   else if(p.age<=30) delta = -rint(0,1);
   else delta = -rint(1,3);
-  // nudge the underlying attributes so OVR shifts coherently
+  if(delta>0) delta = Math.min(delta, room);   // never overshoot potential
+  // OVR is a weighted average of attributes, so bump attributes until the OVR
+  // actually moves by ~delta (the old code added raw points that averaged away to ~0).
   const keys = ["pac","sho","pas","dri","def","phy","gk"];
   const w = POS_W[p.pos]||{};
   const relevant = keys.filter(k=>(w[k]||0)>0.05);
-  for(let i=0;i<Math.abs(delta);i++){
-    const k = relevant.length?pick(relevant):pick(keys);
-    p[k] = clamp(p[k] + (delta>0?1:-1), 20, 99);
+  const target = clamp(p.ovr + delta, 20, 99);
+  const dir = delta>0 ? 1 : -1;
+  let guard = 0;
+  while(delta!==0 && guard++ < 120){
+    if(dir>0 ? p.ovr>=target : p.ovr<=target) break;
+    let k = relevant.length?pick(relevant):pick(keys);
+    let nv = clamp(p[k] + dir, 20, 99);
+    if(nv===p[k]){ k = pick(keys); nv = clamp(p[k] + dir, 20, 99); }   // attr capped — try another
+    p[k] = nv;
+    computeOvr(p);
   }
   // pace fades fastest with age
-  if(p.age>=30) p.pac = clamp(p.pac - rint(0,2), 20, 99);
-  computeOvr(p);
+  if(p.age>=30){ p.pac = clamp(p.pac - rint(0,2), 20, 99); computeOvr(p); }
   p.peakOvr = Math.max(p.peakOvr||p.ovr, p.ovr);
   p.salary = wageFor(p); p.value = playerValue(p);
 }
@@ -728,7 +924,7 @@ function youthIntake(G, club){
   for(let i=0;i<n;i++){
     const pos = pick(ALL_POS);
     const p = makePlayer(pos, [16,18], -10 + lvl*1.5);
-    p.pot = clamp(Math.max(p.pot, p.ovr + rint(8, 14+lvl*3)), p.ovr, 99); setPotential(p);
+    // give academy prospects real headroom (better academies -> higher ceilings)
     p.pot = clamp(Math.max(p.pot, p.ovr + rint(8, 14+lvl*3)), p.ovr, 99);
     p.teamId = club.id; p.salary = Math.min(p.salary, 0.4); p.years = rint(2,4); p.youth = true;
     G.players[p.id] = p; intake.push(p);
@@ -738,11 +934,20 @@ function youthIntake(G, club){
     if(intake.length) logNews(G,"youth",`🎓 Youth intake: ${intake.map(p=>p.name+" ("+p.pos+" "+p.ovr+"→"+p.pot+")").join(", ")}`, club.id);
   }
 }
+// Refill a thin squad, targeting positional NEEDS (so every club keeps enough
+// keepers, defenders, midfielders and forwards to field its formation naturally).
 function refillSquad(G, club){
   let squad = Object.values(G.players).filter(p=>p.teamId===club.id);
-  const need = pos => squad.filter(p=>p.pos===pos).length;
-  while(squad.filter(p=>p.pos==="GK").length<2){ const p=makePlayer("GK",[19,28],club.div===0?-2:-8); p.teamId=club.id; p.years=rint(1,3); G.players[p.id]=p; squad.push(p); }
-  while(squad.length<22){ const p=makePlayer(pick(ALL_POS),[19,29],club.div===0?-2:-8); p.teamId=club.id; p.years=rint(1,3); G.players[p.id]=p; squad.push(p); }
+  const adj = club.div===0 ? -2 : -8;
+  const add = pos => { const p=makePlayer(pos,[18,29],adj); p.teamId=club.id; p.years=rint(1,3); G.players[p.id]=p; squad.push(p); };
+  const has = arr => squad.filter(p=>arr.includes(p.pos)).length;
+  const DEF=["RB","LB","CB","RWB","LWB"], MID=["CDM","CM","CAM","RM","LM"], ATT=["RW","LW","ST"];
+  let guard=0;
+  while(has(["GK"])<3 && guard++<40) add("GK");
+  guard=0; while(has(DEF)<7 && guard++<40) add(pick(["CB","CB","RB","LB"]));
+  guard=0; while(has(MID)<7 && guard++<40) add(pick(["CM","CM","CDM","CAM"]));
+  guard=0; while(has(ATT)<5 && guard++<40) add(pick(["ST","RW","LW"]));
+  guard=0; while(squad.length<23 && guard++<40) add(pick(ALL_POS));
   autoPickXI(club, G.players);
 }
 
@@ -814,7 +1019,7 @@ function wageBill(G, clubId){
 /* ----------------------------- owner ----------------------------------- */
 function setOwnerExpectation(G){
   const c = G.clubs[G.userTeamId];
-  if(c.div===1){ G.expectation = { text:"Win promotion back to the "+DIV_NAMES[0], target:"promo" }; return; }
+  if(c.div===1){ G.expectation = { text:"Win promotion back to the "+divName(c.country||0,0), target:"promo" }; return; }
   const last = (c.history||[]).slice(-1)[0];
   const lastPos = last ? last.pos : 12;
   if(lastPos<=4) G.expectation = { text:"Challenge for the title (top 3)", target:"top3" };
@@ -831,7 +1036,7 @@ function logNews(G, type, msg, teamId){
 }
 
 /* ----------------------------- save / load ----------------------------- */
-const SAVE_VERSION = 1;
+const SAVE_VERSION = 3;
 const SLOT_INDEX = "pgsoccer_slots";
 const slotKey = id => "pgsoccer_slot_" + id;
 function listSlots(){
@@ -865,11 +1070,16 @@ function migrate(G){
     if(!Array.isArray(G.freeAgents)) G.freeAgents=[];
     if(!Array.isArray(G.transferOffers)) G.transferOffers=[];
     if(!Array.isArray(G.champions)) G.champions=[];
+    if(!Array.isArray(G.contChampions)) G.contChampions=[];
     if(!Array.isArray(G.awardHistory)) G.awardHistory=[];
     if(!Array.isArray(G.hof)) G.hof=[];
     if(!G.settings) G.settings={ injuries:true };
-    if(!G.cup) initCup(G);
-    G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; ensureXI(c, G.players); });
+    // multi-country migration: default legacy clubs to country 0, build per-country cups
+    G.clubs.forEach(c=>{ if(c.country==null) c.country=0; });
+    if(!Array.isArray(G.cups)){ if(G.cup){ G.cup.country=0; G.cups=[G.cup]; } else initCups(G); delete G.cup; }
+    G.cups.forEach(cup=>{ if(cup.country==null) cup.country=0; if(cup.runnerUp===undefined) cup.runnerUp=null; });
+    if(!G.contCup) initContCup(G);
+    G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureXI(c, G.players); });
     if(!G.expectation) setOwnerExpectation(G);
     G.version = SAVE_VERSION;
   }catch(e){}
@@ -900,12 +1110,13 @@ function newGame(userTeamId, opts={}){
     seed: (opts && opts.seed!=null && !Number.isNaN(opts.seed)) ? (opts.seed>>>0) : null,
     userTeamId, clubs, players,
     schedule: buildSchedule(clubs),
-    freeAgents: [], transferOffers: [], news: [], champions: [], awardHistory: [], hof: [],
-    cup: null, lastMatch: null, settings: { injuries:true },
+    freeAgents: [], transferOffers: [], news: [], champions: [], contChampions: [], awardHistory: [], hof: [],
+    cups: null, contCup: null, lastMatch: null, settings: { injuries:true },
   };
-  // seed a small free-agent pool
-  for(let i=0;i<40;i++){ const p=makePlayer(pick(ALL_POS),[20,33],-4); p.teamId=null; G.freeAgents.push(p); }
-  initCup(G);
+  // seed a free-agent pool sized for a bigger world
+  for(let i=0;i<90;i++){ const p=makePlayer(pick(ALL_POS),[20,33],-4); p.teamId=null; G.freeAgents.push(p); }
+  initCups(G);
+  initContCup(G);
   setOwnerExpectation(G);
   return G;
 }
@@ -933,7 +1144,7 @@ function App(){
 
   const TABS = [
     ["hub","Hub"],["squad","Squad"],["tactics","Tactics"],["table","Table"],
-    ["players","Players"],["stats","Leaders"],["cup","Cup"],["fixtures","Fixtures"],
+    ["players","Players"],["stats","Leaders"],["cup","Cup"],["contcup","Champions Cup"],["fixtures","Fixtures"],
     ["transfers","Transfers"],["fa","Free Agents"],["finances","Finances"],
     ["awards","Awards"],["hof","Hall of Fame"],["news","News"],
   ];
@@ -947,7 +1158,7 @@ function App(){
         <div className="text-sm text-slate-400">{user.name}</div>
         <div className="ml-auto flex items-center gap-2 text-sm">
           <Badge>{G.season}</Badge>
-          <Badge>{DIV_NAMES[user.div]}</Badge>
+          <Badge>{COUNTRIES[user.country||0].flag} {divName(user.country||0, user.div)}</Badge>
           <Badge>{G.phase==="regular"?`MD ${G.day+1}/${G.schedule.length}`:G.phase.toUpperCase()}</Badge>
           <Badge>{user.w}-{user.d}-{user.l}</Badge>
           <button onClick={()=>{ if(exportSave(G)) tShow("💾 Save file downloaded"); }}
@@ -979,6 +1190,7 @@ function App(){
         {tab==="players" && <PlayersBrowser G={G} />}
         {tab==="stats" && <Leaders G={G} />}
         {tab==="cup" && <CupView G={G} />}
+        {tab==="contcup" && <ContCupView G={G} />}
         {tab==="fixtures" && <Fixtures G={G} />}
         {tab==="transfers" && <Transfers G={G} commit={commit} tShow={tShow} />}
         {tab==="fa" && <FreeAgents G={G} commit={commit} tShow={tShow} />}
@@ -1042,23 +1254,34 @@ function MainMenu({onLoad, onNew}){
 }
 function Splash({onStart, onBack}){
   const [sel, setSel] = useState(0);
+  const [country, setCountry] = useState(0);
   const [seed, setSeed] = useState("");
-  const prem = CLUB_DEFS.slice(0,TEAMS_PER_DIV);
-  const champ = CLUB_DEFS.slice(TEAMS_PER_DIV);
-  const ClubBtn = (def, i) => (
-    <button key={i} onClick={()=>setSel(i)}
-      className={"px-3 py-2 rounded-lg text-sm text-left "+(sel===i?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#101a30] border border-[#1d2940] text-slate-200")}>
+  // global club id = country*CLUBS_PER_COUNTRY + local index
+  const base = country * CLUBS_PER_COUNTRY;
+  const prem = ALL_CLUB_DEFS.slice(base, base+TEAMS_PER_DIV);
+  const champ = ALL_CLUB_DEFS.slice(base+TEAMS_PER_DIV, base+CLUBS_PER_COUNTRY);
+  const ClubBtn = (def, gid) => (
+    <button key={gid} onClick={()=>setSel(gid)}
+      className={"px-3 py-2 rounded-lg text-sm text-left "+(sel===gid?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#101a30] border border-[#1d2940] text-slate-200")}>
       {def[0]} {def[1]}
     </button>
   );
   return (
     <div className="min-h-screen p-6 max-w-3xl mx-auto">
       <div className="text-2xl font-black mb-1">Choose your club</div>
-      <div className="text-slate-400 text-sm mb-4">Pick any club from either division. {DIV_NAMES[1]} clubs start in the second tier — earn promotion.</div>
-      <div className="text-emerald-300 text-sm font-semibold mb-2">{DIV_NAMES[0]} (top flight)</div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-5">{prem.map((d,i)=>ClubBtn(d,i))}</div>
-      <div className="text-emerald-300 text-sm font-semibold mb-2">{DIV_NAMES[1]} (second tier)</div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-5">{champ.map((d,i)=>ClubBtn(d,i+TEAMS_PER_DIV))}</div>
+      <div className="text-slate-400 text-sm mb-3">Four nations, eight leagues, 160 clubs. Pick any club — second-tier sides start a tier down and must earn promotion.</div>
+      <div className="flex gap-2 mb-4 flex-wrap">
+        {COUNTRIES.map((C,ci)=>(
+          <button key={ci} onClick={()=>setCountry(ci)}
+            className={"px-3 py-1.5 rounded-lg text-sm "+(country===ci?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#101a30] border border-[#1d2940] text-slate-200")}>
+            {C.flag} {C.name}
+          </button>
+        ))}
+      </div>
+      <div className="text-emerald-300 text-sm font-semibold mb-2">{divName(country,0)} (top flight)</div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-5">{prem.map((d,i)=>ClubBtn(d,base+i))}</div>
+      <div className="text-emerald-300 text-sm font-semibold mb-2">{divName(country,1)} (second tier)</div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-5">{champ.map((d,i)=>ClubBtn(d,base+TEAMS_PER_DIV+i))}</div>
       <div className="flex items-center gap-2 mb-4">
         <input value={seed} onChange={e=>setSeed(e.target.value)} placeholder="Optional seed (number)"
           className="bg-[#101a30] border border-[#1d2940] rounded-lg px-3 py-2 text-sm flex-1" />
@@ -1067,7 +1290,7 @@ function Splash({onStart, onBack}){
         {onBack && <button onClick={onBack} className="px-4 py-3 rounded-xl bg-[#16213a] text-slate-200">Back</button>}
         <button onClick={()=>onStart(sel, { seed: seed.trim()? (parseInt(seed,10)||hashStr(seed)) : null })}
           className="flex-1 py-3 rounded-xl bg-emerald-500 text-slate-900 font-bold">
-          Start as {CLUB_DEFS[sel][0]} {CLUB_DEFS[sel][1]}
+          Start as {ALL_CLUB_DEFS[sel][0]} {ALL_CLUB_DEFS[sel][1]}
         </button>
       </div>
     </div>
@@ -1080,7 +1303,7 @@ function Hub({G, commit, tShow, setTab}){
   const user = G.clubs[G.userTeamId];
   const round = G.schedule[G.day] || [];
   const userGame = round.find(g=>g.home===G.userTeamId||g.away===G.userTeamId);
-  const table = tableFor(G, user.div);
+  const table = tableFor(G, user.div, user.country||0);
   const pos = table.findIndex(c=>c.id===user.id)+1;
   const doSim = fn => { fn(G); commit(G); };
   const offseason = G.phase==="offseason";
@@ -1090,7 +1313,7 @@ function Hub({G, commit, tShow, setTab}){
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div>
             <div className="text-xl font-bold">{user.name}</div>
-            <div className="text-sm text-slate-400">{DIV_NAMES[user.div]} · {pos>0?ordinal(pos):"—"} place · {user.pts} pts · GD {gd(user)>=0?"+":""}{gd(user)}</div>
+            <div className="text-sm text-slate-400">{COUNTRIES[user.country||0].flag} {divName(user.country||0,user.div)} · {pos>0?ordinal(pos):"—"} place · {user.pts} pts · GD {gd(user)>=0?"+":""}{gd(user)}</div>
             <div className="text-xs text-amber-300/90 mt-1">Board: {G.expectation?G.expectation.text:"—"}</div>
           </div>
           <div className="text-right">
@@ -1132,9 +1355,31 @@ function Hub({G, commit, tShow, setTab}){
 
       {G.lastMatch && <Card><div className="text-sm text-slate-400 mb-2">Your last result</div><BoxScore m={G.lastMatch} G={G} /></Card>}
 
+      {G.contCup && (()=>{
+        const cc=G.contCup;
+        const qualified=(cc.qualifiers||[]).includes(user.id);
+        const alive=(cc.alive||[]).includes(user.id);
+        const roundLabel={ R16:"Round of 16", QF:"Quarter-finals", SF:"Semi-finals", Final:"Final" };
+        let status;
+        if(cc.winner===user.id) status=<span className="text-amber-300 font-semibold">Champions of {CONT_CUP_NAME}! 🏆</span>;
+        else if(!qualified) status=<span className="text-slate-400">Not qualified this season — finish top 3 or win the {cupName(user.country||0)}.</span>;
+        else if(cc.winner!=null) status=<span className="text-slate-400">Eliminated · won by {G.clubs[cc.winner]?G.clubs[cc.winner].abbr:"—"}.</span>;
+        else if(alive) status=<span className="text-emerald-300">In the hunt · {roundLabel[cc.round]||cc.round} ({cc.alive.length} left)</span>;
+        else status=<span className="text-slate-400">Knocked out of the {roundLabel[cc.round]||cc.round}.</span>;
+        return (
+          <Card>
+            <div className="flex items-center justify-between mb-1">
+              <div className="font-semibold">🌍 {CONT_CUP_NAME}</div>
+              <button onClick={()=>setTab("contcup")} className="text-xs text-emerald-300">Bracket →</button>
+            </div>
+            <div className="text-sm">{status}</div>
+          </Card>
+        );
+      })()}
+
       <div className="grid sm:grid-cols-2 gap-4">
         <Card>
-          <div className="flex items-center justify-between mb-2"><div className="font-semibold">{DIV_NAMES[user.div]} — top 6</div><button onClick={()=>setTab("table")} className="text-xs text-emerald-300">Full table →</button></div>
+          <div className="flex items-center justify-between mb-2"><div className="font-semibold">{divName(user.country||0,user.div)} — top 6</div><button onClick={()=>setTab("table")} className="text-xs text-emerald-300">Full table →</button></div>
           <MiniTable G={G} rows={table.slice(0,6)} highlight={user.id} />
         </Card>
         <Card>
@@ -1168,10 +1413,10 @@ function MiniTable({G, rows, highlight}){
 function Squad({G, commit, tShow}){
   const user = G.clubs[G.userTeamId];
   const [sort, setSort] = useState("ovr");
+  const [renewP, setRenewP] = useState(null);
   let squad = Object.values(G.players).filter(p=>p.teamId===user.id);
   squad.sort((a,b)=> sort==="ovr"? b.ovr-a.ovr : sort==="pos"? BAND[a.pos]-BAND[b.pos]||b.ovr-a.ovr : sort==="age"? a.age-b.age : b.value-a.value);
   const inXI = new Set(user.xi||[]);
-  const renew = p => { p.years = rint(2,4); p.salary = wageFor(p); commit(G); tShow(`Renewed ${p.name}`); };
   return (
     <div className="space-y-3">
       <Card>
@@ -1199,20 +1444,62 @@ function Squad({G, commit, tShow}){
                   <PName p={p} className="font-medium" />
                   {isInjured(p) && <span className="ml-1 text-red-400 text-xs" title={p.injury.type}>✚{p.injury.weeks}w</span>}
                   {p.youth && <span className="ml-1 text-amber-300 text-xs">YTH</span>}
+                  {p.unhappy && p.years>0 && <span className="ml-1 text-orange-400 text-xs" title="Wants a new contract before it runs down">⚠</span>}
                 </td>
                 <td className="p-2 text-center"><PosTag p={p} /></td>
                 <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
                 <td className="p-2 text-center"><PotPill v={p.pot} /></td>
                 <td className="p-2 text-center tnum">{p.age}</td>
                 <td className="p-2 text-center tnum">{money(p.salary)}</td>
-                <td className="p-2 text-center tnum">{p.years>0?p.years:<span className="text-red-400">exp</span>}</td>
+                <td className={"p-2 text-center tnum "+(p.years<=0?"":p.years<=1?"text-orange-300":"")}>{p.years>0?p.years:<span className="text-red-400">exp</span>}</td>
                 <td className="p-2 text-center tnum">{money(p.value)}</td>
-                <td className="p-2 text-center">{p.years<=0 && <button onClick={()=>renew(p)} className="px-2 py-1 rounded bg-emerald-500 text-slate-900 text-xs font-semibold">Renew</button>}</td>
+                <td className="p-2 text-center">{(p.years<=0 || p.unhappy) && <button onClick={()=>setRenewP(p)} className={"px-2 py-1 rounded text-xs font-semibold "+(p.years<=0?"bg-emerald-500 text-slate-900":"bg-orange-500 text-slate-900")}>{p.years<=0?"Re-sign":"Renew"}</button>}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </Card>
+      {renewP && <RenewModal G={G} p={renewP} commit={commit} tShow={tShow} onClose={()=>setRenewP(null)} />}
+    </div>
+  );
+}
+// Contract negotiation: the player names a wage demand (ability + ambition + form);
+// the user picks a term length. Longer deals carry a small per-year premium for security.
+function RenewModal({G, p, commit, tShow, onClose}){
+  const user = G.clubs[G.userTeamId];
+  const demand = wageDemand(p);
+  const termPremium = { 1:1.0, 2:1.0, 3:1.05, 4:1.10 };
+  const sign = yrs => {
+    p.salary = clamp(round(demand*termPremium[yrs]*10)/10, 0.2, 40);
+    p.years = yrs; p.unhappy = false;
+    commit(G); tShow(`${p.name} signed for ${yrs}y at ${money(p.salary)}/yr`); onClose();
+  };
+  const bill = wageBill(G, user.id);
+  return (
+    <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-[#101a30] border border-[#1d2940] rounded-2xl p-5 w-full max-w-md" onClick={e=>e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-1">
+          <div className="font-bold text-lg">{p.name}</div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-200">✕</button>
+        </div>
+        <div className="text-sm text-slate-400 mb-3">{p.pos} · {p.age}y · OVR {p.ovr} · Pot {p.pot}</div>
+        <div className="grid grid-cols-2 gap-2 text-sm mb-4">
+          <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-xs text-slate-500">Current wage</div><div className="font-semibold tnum">{money(p.salary)}/yr</div></div>
+          <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-xs text-slate-500">Wage demand</div><div className="font-semibold tnum text-amber-300">{money(demand)}/yr</div></div>
+          <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-xs text-slate-500">Club wage bill</div><div className="font-semibold tnum">{money(bill)}/yr</div></div>
+          <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-xs text-slate-500">Transfer budget</div><div className="font-semibold tnum">{money(user.budget)}</div></div>
+        </div>
+        <div className="text-xs text-slate-400 mb-2">Offer a contract length:</div>
+        <div className="grid grid-cols-4 gap-2">
+          {[1,2,3,4].map(yrs=>(
+            <button key={yrs} onClick={()=>sign(yrs)}
+              className="px-2 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold text-sm">
+              {yrs}y<div className="text-[10px] font-normal">{money(round(demand*termPremium[yrs]*10)/10)}/yr</div>
+            </button>
+          ))}
+        </div>
+        <div className="text-[11px] text-slate-500 mt-3">Wages are paid from your budget each season. Let a deal run down and a rival can poach the player on a free transfer.</div>
+      </div>
     </div>
   );
 }
@@ -1337,12 +1624,19 @@ function SlotPicker({G, slot, squad, xi, onPick, onClose}){
 
 /* ----------------------------- league table ---------------------------- */
 function LeagueTable({G}){
-  const [div, setDiv] = useState(G.clubs[G.userTeamId].div);
-  const table = tableFor(G, div);
+  const u = G.clubs[G.userTeamId];
+  const [country, setCountry] = useState(u.country||0);
+  const [div, setDiv] = useState(u.div);
+  const table = tableFor(G, div, country);
   return (
     <div className="space-y-3">
+      <div className="flex gap-2 flex-wrap">
+        {COUNTRIES.map((C,ci)=>(
+          <button key={ci} onClick={()=>setCountry(ci)} className={"px-3 py-1.5 rounded text-sm "+(country===ci?"bg-indigo-500 text-white font-semibold":"bg-[#16213a] text-slate-300")}>{C.flag} {C.name}</button>
+        ))}
+      </div>
       <div className="flex gap-2">
-        {DIV_NAMES.map((d,i)=>(
+        {COUNTRIES[country].divNames.map((d,i)=>(
           <button key={i} onClick={()=>setDiv(i)} className={"px-3 py-1.5 rounded text-sm "+(div===i?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>{d}</button>
         ))}
       </div>
@@ -1424,8 +1718,10 @@ function PlayersBrowser({G}){
 
 /* ----------------------------- leaders --------------------------------- */
 function Leaders({G}){
-  const [div, setDiv] = useState(G.clubs[G.userTeamId].div);
-  const pool = Object.values(G.players).filter(p=>p.teamId!=null && G.clubs[p.teamId] && G.clubs[p.teamId].div===div);
+  const u = G.clubs[G.userTeamId];
+  const [country, setCountry] = useState(u.country||0);
+  const [div, setDiv] = useState(u.div);
+  const pool = Object.values(G.players).filter(p=>p.teamId!=null && G.clubs[p.teamId] && G.clubs[p.teamId].div===div && G.clubs[p.teamId].country===country);
   const board = (title, arr, val) => (
     <Card>
       <div className="font-semibold mb-2">{title}</div>
@@ -1445,8 +1741,11 @@ function Leaders({G}){
   const minApp = p => p.stats.App>=4;
   return (
     <div className="space-y-3">
+      <div className="flex gap-2 flex-wrap">
+        {COUNTRIES.map((C,ci)=><button key={ci} onClick={()=>setCountry(ci)} className={"px-3 py-1.5 rounded text-sm "+(country===ci?"bg-indigo-500 text-white font-semibold":"bg-[#16213a] text-slate-300")}>{C.flag} {C.name}</button>)}
+      </div>
       <div className="flex gap-2">
-        {DIV_NAMES.map((d,i)=><button key={i} onClick={()=>setDiv(i)} className={"px-3 py-1.5 rounded text-sm "+(div===i?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>{d}</button>)}
+        {COUNTRIES[country].divNames.map((d,i)=><button key={i} onClick={()=>setDiv(i)} className={"px-3 py-1.5 rounded text-sm "+(div===i?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>{d}</button>)}
       </div>
       <div className="grid sm:grid-cols-2 gap-3">
         {board("⚽ Top Scorers", pool.slice().sort((a,b)=>b.stats.G-a.stats.G), p=>p.stats.G)}
@@ -1460,13 +1759,19 @@ function Leaders({G}){
 
 /* ----------------------------- cup ------------------------------------- */
 function CupView({G}){
-  const cup = G.cup;
-  if(!cup) return <Card>No cup in progress.</Card>;
+  const [country, setCountry] = useState(G.clubs[G.userTeamId].country||0);
+  const cup = (G.cups||[]).find(c=>c.country===country);
   const order = ["R32","R16","QF","SF","Final"];
   return (
     <div className="space-y-3">
+      <div className="flex gap-2 flex-wrap">
+        {COUNTRIES.map((C,ci)=>(
+          <button key={ci} onClick={()=>setCountry(ci)} className={"px-3 py-1.5 rounded text-sm "+(country===ci?"bg-indigo-500 text-white font-semibold":"bg-[#16213a] text-slate-300")}>{C.flag} {C.name}</button>
+        ))}
+      </div>
+      {!cup ? <Card>No cup in progress.</Card> : <>
       <Card>
-        <div className="font-semibold">{CUP_NAME}</div>
+        <div className="font-semibold">{cupName(country)}</div>
         <div className="text-sm text-slate-400">{cup.winner!=null? `Winner: ${G.clubs[cup.winner].name} 🏆` : `Current round: ${cup.round} · ${cup.alive.length} clubs left`}</div>
       </Card>
       {order.map(r=>{
@@ -1487,6 +1792,93 @@ function CupView({G}){
           </Card>
         );
       })}
+      </>}
+    </div>
+  );
+}
+
+/* ------------------------- continental champions cup ------------------- */
+function ContCupView({G}){
+  const cup = G.contCup;
+  if(!cup) return <Card>The {CONT_CUP_NAME} has not started yet.</Card>;
+  const roundLabel = { R16:"Round of 16", QF:"Quarter-finals", SF:"Semi-finals", Final:"Final" };
+  const seedOf = id => (cup.seeds||{})[id];
+  const clubLine = (id, win) => {
+    const c = G.clubs[id]; if(!c) return null;
+    const s = seedOf(id);
+    return <span className={"flex-1 "+(win?"font-bold":"")}>
+      {s!=null && <span className="text-slate-500 mr-1">{s}</span>}{c.abbr}
+    </span>;
+  };
+  const qualifiers = (cup.qualifiers||[]).slice().sort((a,b)=>(seedOf(a)||99)-(seedOf(b)||99));
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="font-semibold">🌍 {CONT_CUP_NAME}</div>
+        <div className="text-sm text-slate-400">
+          {cup.winner!=null
+            ? <>Winner: <span className="text-amber-300 font-semibold">{G.clubs[cup.winner].name}</span> 🏆</>
+            : `Current round: ${roundLabel[cup.round]||cup.round} · ${cup.alive.length} clubs left`}
+        </div>
+      </Card>
+
+      {CONT_ORDER.map(r=>{
+        const ties = (cup.results||{})[r];
+        if(!ties) return null;
+        return (
+          <Card key={r}>
+            <div className="font-semibold mb-2">{roundLabel[r]||r}</div>
+            <div className="space-y-1 text-sm tnum">
+              {ties.map((t,i)=>(
+                <div key={i} className={"flex items-center gap-2 "+((t.home===G.userTeamId||t.away===G.userTeamId)?"text-emerald-300":"")}>
+                  <span className="flex-1 text-right">
+                    {(()=>{ const c=G.clubs[t.home]; const s=seedOf(t.home); return <span className={t.win===t.home?"font-bold":""}>{c.abbr}{s!=null && <span className="text-slate-500 ml-1">{s}</span>}</span>; })()}
+                  </span>
+                  <span className="px-2">{t.hs}-{t.as}</span>
+                  {clubLine(t.away, t.win===t.away)}
+                </div>
+              ))}
+            </div>
+          </Card>
+        );
+      })}
+
+      <Card>
+        <div className="font-semibold mb-2">Qualified clubs ({qualifiers.length})</div>
+        <div className="text-xs text-slate-500 mb-3">Each nation sends its top 3 finishers plus a cup-route berth (national cup winner → runner-up → next finisher).</div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+          {COUNTRIES.map((C,ci)=>{
+            const cl = qualifiers.filter(id=>G.clubs[id] && G.clubs[id].country===ci);
+            if(!cl.length) return null;
+            return <div key={ci}>
+              <div className="text-xs font-semibold text-slate-300 mb-1">{C.flag} {C.name}</div>
+              {cl.map(id=>{
+                const c=G.clubs[id];
+                const isRoute = (cup.cupRoutes||[]).includes(id);
+                return <div key={id} className={"flex items-center gap-2 "+(id===G.userTeamId?"text-emerald-300":"")}>
+                  <span className="text-slate-500 w-5 text-right">{seedOf(id)}</span>
+                  <span className="flex-1">{c.abbr}</span>
+                  {isRoute && <span className="text-[10px] text-amber-300/80">cup</span>}
+                </div>;
+              })}
+            </div>;
+          })}
+        </div>
+      </Card>
+
+      {(G.contChampions||[]).length>0 && (
+        <Card>
+          <div className="font-semibold mb-2">Past winners</div>
+          <div className="space-y-1 text-sm">
+            {G.contChampions.map((w,i)=>(
+              <div key={i} className="flex gap-3">
+                <span className="text-slate-500 w-12 tnum">{w.season}</span>
+                <span>{G.clubs[w.id]?G.clubs[w.id].name:w.abbr} 🏆</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
@@ -1520,9 +1912,11 @@ function Fixtures({G}){
         </Card>
       ) : (
         <Card className="p-0 overflow-hidden">
-          {(G.schedule[Math.min(G.day,G.schedule.length-1)]||[]).map((g,i)=>(
+          {(G.schedule[Math.min(G.day,G.schedule.length-1)]||[])
+            .slice().sort((a,b)=>(a.country-b.country)||(a.div-b.div))
+            .map((g,i)=>(
             <div key={i} className="flex items-center gap-2 px-3 py-2 border-b border-[#15203a] text-sm tnum">
-              <span className="text-slate-500 text-xs w-16">{DIV_NAMES[g.div].slice(0,4)}</span>
+              <span className="text-slate-500 text-xs w-20">{COUNTRIES[g.country||0].flag} {divName(g.country||0,g.div).slice(0,4)}</span>
               <span className="flex-1 text-right">{G.clubs[g.home].abbr}</span>
               <span className="px-2 w-14 text-center">{g.played?`${g.hs}-${g.as}`:"v"}</span>
               <span className="flex-1">{G.clubs[g.away].abbr}</span>
@@ -1703,20 +2097,35 @@ function Finances({G}){
 /* ----------------------------- awards / hof ---------------------------- */
 function AwardsView({G}){
   const hist = G.awardHistory||[];
+  const [country, setCountry] = useState(G.clubs[G.userTeamId].country||0);
+  const awardSet = (a, ci) => {
+    // new shape: a.countries[]; legacy shape: flat a.pots/boot/... (treat as country 0)
+    if(a.countries) return a.countries.find(x=>x.country===ci) || null;
+    return ci===0 ? a : null;
+  };
   return (
     <div className="space-y-3">
+      <div className="flex gap-2 flex-wrap">
+        {COUNTRIES.map((C,ci)=>(
+          <button key={ci} onClick={()=>setCountry(ci)} className={"px-3 py-1.5 rounded text-sm "+(country===ci?"bg-indigo-500 text-white font-semibold":"bg-[#16213a] text-slate-300")}>{C.flag} {C.name}</button>
+        ))}
+      </div>
       {!hist.length && <Card><div className="text-slate-400 text-sm">No awards yet — finish a season.</div></Card>}
-      {hist.map(a=>(
+      {hist.map(a=>{
+        const s = awardSet(a, country);
+        if(!s) return null;
+        return (
         <Card key={a.season}>
-          <div className="font-semibold mb-2">{a.season} Awards</div>
+          <div className="font-semibold mb-2">{a.season} {divName(country,0)} Awards</div>
           <div className="grid sm:grid-cols-2 gap-2 text-sm">
-            <AwardRow label="🏅 Player of the Season" v={a.pots} extra={a.pots?`${a.pots.r} avg`:""} G={G} />
-            <AwardRow label="⚽ Golden Boot" v={a.boot} extra={a.boot?`${a.boot.g} goals`:""} G={G} />
-            <AwardRow label="🧤 Golden Glove" v={a.glove} extra={a.glove?`${a.glove.cs} CS`:""} G={G} />
-            <AwardRow label="🌟 Young Player" v={a.young} extra={a.young?`${a.young.r} avg`:""} G={G} />
+            <AwardRow label="🏅 Player of the Season" v={s.pots} extra={s.pots?`${s.pots.r} avg`:""} G={G} />
+            <AwardRow label="⚽ Golden Boot" v={s.boot} extra={s.boot?`${s.boot.g} goals`:""} G={G} />
+            <AwardRow label="🧤 Golden Glove" v={s.glove} extra={s.glove?`${s.glove.cs} CS`:""} G={G} />
+            <AwardRow label="🌟 Young Player" v={s.young} extra={s.young?`${s.young.r} avg`:""} G={G} />
           </div>
         </Card>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -1779,7 +2188,7 @@ function Offseason({G, commit, tShow, setTab}){
       <Card>
         <div className="text-xl font-bold">{G.season} season review</div>
         {champ && <div className="text-sm text-amber-300 mt-1">🏆 Champions: {G.clubs[champ.id].name}</div>}
-        <div className="text-sm text-slate-400 mt-1">You finished {ordinal(leaguePos(G,user))} in the {DIV_NAMES[user.div]} ({user.w}-{user.d}-{user.l}, {user.pts} pts).</div>
+        <div className="text-sm text-slate-400 mt-1">You finished {ordinal(leaguePos(G,user))} in the {divName(user.country||0,user.div)} ({user.w}-{user.d}-{user.l}, {user.pts} pts).</div>
       </Card>
       {award && (
         <Card>
@@ -1828,7 +2237,7 @@ function BoxScore({m, G}){
         <div className="text-3xl font-black tnum">{m.hs} - {m.as}</div>
         <div className="flex-1"><div className="font-bold">{m.awayName}</div></div>
       </div>
-      {m.cup && <div className="text-center text-xs text-amber-300 mb-1">{CUP_NAME}</div>}
+      {m.cup && <div className="text-center text-xs text-amber-300 mb-1">Cup tie</div>}
       <div className="grid grid-cols-2 gap-4 text-sm">
         <div className="text-right">
           {m.hScorers.map((s,i)=><div key={i} className="text-slate-300">{s.name} {s.min}'{s.assist?<span className="text-slate-500"> ({s.assist})</span>:""}</div>)}
