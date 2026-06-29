@@ -706,6 +706,11 @@ function playKnockoutRound(G, cup, order){
     if(!b){ winners.push(ids[i]); continue; }
     ensureXI(a, G.players); ensureXI(b, G.players);
     const box = simMatch(a, b, G.players, { cup:true, neutral: isFinal, mustDecide:true, G });
+    if(isFinal){
+      const userCountry = (G.clubs[G.userTeamId]||{}).country||0;
+      const isCont = cup.country==null;   // continental cup has no country field
+      if(isCont || cup.country===userCountry) archiveFinal(G, isCont?CONT_CUP_NAME:cupName(cup.country), box);
+    }
     const w = box.hs>=box.as ? a.id : b.id;   // mustDecide guarantees no draw
     winners.push(w);
     ties.push({ home:a.id, away:b.id, hs:box.hs, as:box.as, win:w });
@@ -865,6 +870,16 @@ function simRound(G){
     ensureXI(home, G.players); ensureXI(away, G.players);
     const box = simMatch(home, away, G.players, { G });
     g.played = true; g.hs = box.hs; g.as = box.as;
+    // all-time biggest league win (margin, then goals)
+    const margin = Math.abs(box.hs-box.as);
+    const bw = G.records && G.records.biggestWin;
+    if(margin>=4 && (!bw || margin>bw.margin || (margin===bw.margin && Math.max(box.hs,box.as)>Math.max(bw.hs,bw.as)))){
+      G.records = G.records || { players:{}, biggestWin:null };
+      const winHome = box.hs>box.as;
+      G.records.biggestWin = { season:G.season, margin,
+        winner:(winHome?home:away).name, loser:(winHome?away:home).name,
+        hs:Math.max(box.hs,box.as), as:Math.min(box.hs,box.as) };
+    }
     if(home.id===G.userTeamId || away.id===G.userTeamId){
       G.lastMatch = serializeBox(box, G);
       logNews(G, "match", `${home.abbr} ${box.hs}-${box.as} ${away.abbr}`, G.userTeamId);
@@ -901,6 +916,33 @@ function serializeBox(box, G){
     hScorers: box.hScorers, aScorers: box.aScorers, motm: box.motm,
     stat: box.stat, timeline: box.timeline,
   };
+}
+// Permanently store a cup/continental FINAL's full box score so it can be reopened
+// later from the Records hub. Kept for the user's national cup + the continental cup.
+function archiveFinal(G, comp, box){
+  G.finalsArchive = G.finalsArchive || [];
+  const m = serializeBox(box, G);
+  m.comp = comp;
+  G.finalsArchive.unshift(m);
+  if(G.finalsArchive.length>120) G.finalsArchive.length = 120;
+}
+// All-time records that must survive player retirement (deleted players would
+// otherwise vanish). Snapshots notable players' careers into a persistent map.
+function updateRecords(G){
+  G.records = G.records || { players:{}, biggestWin:null };
+  const pool = G.records.players = G.records.players || {};
+  // anyone already recorded who is no longer in the world has retired
+  for(const id in pool){ if(!G.players[id]) pool[id].retired = true; }
+  Object.values(G.players).forEach(p=>{
+    const ca = p.career||{};
+    if((ca.App||0)>=40 || (p.peakOvr||0)>=80){
+      pool[p.id] = { id:p.id, name:p.name, pos:p.pos, nat:p.nat,
+        G:ca.G||0, A:ca.A||0, App:ca.App||0, CS:ca.CS||0, MOTM:ca.MOTM||0,
+        peak:p.peakOvr||p.ovr, hof:!!p.hof,
+        club: p.teamId!=null && G.clubs[p.teamId] ? G.clubs[p.teamId].abbr : "—",
+        season:G.season, retired:false };
+    }
+  });
 }
 // sim forward until the user's next league match is about to be played (or season end)
 function simToNextUserMatch(G){
@@ -994,6 +1036,7 @@ function startNextSeason(G){
     }
   });
   hallOfFameCheck(G);
+  updateRecords(G);   // snapshot careers into the persistent all-time records (before retirements delete anyone)
   // contracts: decrement, expiries become free agents
   G.freeAgents = G.freeAgents || [];
   Object.values(G.players).forEach(p=>{
@@ -1399,6 +1442,13 @@ function migrate(G){
     (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); fillP(p); });
     G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureXI(c, G.players); });
     if(!G.expectation) setOwnerExpectation(G);
+    // history/records + feature-toggle backfill
+    if(!Array.isArray(G.finalsArchive)) G.finalsArchive = [];
+    if(!G.records || typeof G.records!=="object") G.records = { players:{}, biggestWin:null };
+    if(!G.records.players) G.records.players = {};
+    G.settings = G.settings || {};
+    const defs = { injuries:true, jobSecurity:true, morale:true, internationals:true, watchMatches:false };
+    for(const k in defs){ if(G.settings[k]==null) G.settings[k]=defs[k]; }
     G.version = SAVE_VERSION;
   }catch(e){}
   return G;
@@ -1429,7 +1479,9 @@ function newGame(userTeamId, opts={}){
     userTeamId, clubs, players,
     schedule: buildSchedule(clubs),
     freeAgents: [], transferOffers: [], news: [], champions: [], contChampions: [], awardHistory: [], hof: [],
-    cups: null, contCup: null, lastMatch: null, settings: { injuries:true },
+    cups: null, contCup: null, lastMatch: null,
+    finalsArchive: [], records: { players:{}, biggestWin:null },
+    settings: { injuries:true, jobSecurity:true, morale:true, internationals:true, watchMatches:false },
   };
   // seed a free-agent pool sized for a bigger world
   for(let i=0;i<90;i++){ const p=makePlayer(pick(ALL_POS),[20,33],-4); p.teamId=null; G.freeAgents.push(p); }
