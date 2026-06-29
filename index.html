@@ -424,7 +424,7 @@ function fieldedXI(club, players){
   const slots = FORMATIONS[club.formation] || FORMATIONS["4-3-3"];
   const xi = club.xi || [];
   const used = new Set();
-  const subs = Object.values(players).filter(p=>p.teamId===club.id && isAvailable(p));
+  const subs = Object.values(players).filter(p=>p.teamId===club.id && !p.youth && isAvailable(p));
   const out = [];
   slots.forEach((slot,i)=>{
     let p = players[xi[i]];
@@ -632,8 +632,10 @@ function maybeInjure(club, players, settings){
 // goal if a keeper is available.
 function autoPickXI(club, players){
   const slots = FORMATIONS[club.formation] || FORMATIONS["4-3-3"];
-  let squad = Object.values(players).filter(p => p.teamId===club.id && isAvailable(p));
-  if(squad.length < 11) squad = Object.values(players).filter(p => p.teamId===club.id);   // emergency: ignore injuries/bans
+  // Senior XI never includes academy (youth) players — they have to be promoted first.
+  let squad = Object.values(players).filter(p => p.teamId===club.id && !p.youth && isAvailable(p));
+  if(squad.length < 11) squad = Object.values(players).filter(p => p.teamId===club.id && !p.youth);   // emergency: ignore injuries/bans
+  if(squad.length < 11) squad = Object.values(players).filter(p => p.teamId===club.id);   // last resort: pull academy
   const used = new Set();
   const xi = new Array(slots.length).fill(null);
   const isKeeper = p => p.pos==="GK" || (p.positions||[]).includes("GK");
@@ -981,6 +983,16 @@ function startNextSeason(G){
   // do FAs here BEFORE expiries add new names so the just-released don't age twice)
   Object.values(G.players).forEach(p=>developPlayer(p));
   (G.freeAgents||[]).forEach(p=>developPlayer(p));
+  // Academy players auto-graduate to the senior squad once they're 20+ (they've
+  // aged out of youth football) so prospects never get stuck in the academy.
+  Object.values(G.players).forEach(p=>{
+    if(p.youth && p.age>=20){
+      p.youth = false;
+      if(p.teamId!=null && G.clubs[p.teamId] && G.clubs[p.teamId].userControlled){
+        logNews(G,"youth",`🎓 ${p.name} (${p.pos} ${p.ovr}) graduates from the academy to the senior squad`, p.teamId);
+      }
+    }
+  });
   hallOfFameCheck(G);
   // contracts: decrement, expiries become free agents
   G.freeAgents = G.freeAgents || [];
@@ -1072,10 +1084,23 @@ function developPlayer(p){
   else if(p.age<=27) delta = room>0 ? rint(0,3) : 0;
   else if(p.age<=30) delta = -rint(0,1);
   else delta = -rint(1,3);
-  // youth game time accelerates teenage development
-  if(p.age<=20 && room>0){ const ya=p.youthApps||0; delta += ya>=18?2 : ya>=8?1 : 0; }
+  // Academy players develop FAST while they're young — they don't earn senior
+  // appearances (so they get no in-season growth), so the rollover does the work.
+  // The boost is age-gated: big at 16-18, fading out, gone by ~22.
+  const inAcademy = !!p.youth;
+  if(p.age<=21 && room>0){
+    const ya = p.youthApps||0;
+    if(inAcademy){
+      delta += p.age<=18 ? 4 : p.age<=20 ? 3 : 1;       // intensive academy training
+      delta += ya>=24 ? 2 : ya>=12 ? 1 : 0;             // plus game time in the youth league
+    } else {
+      delta += ya>=18 ? 2 : ya>=8 ? 1 : 0;
+    }
+  }
   p.youthApps = 0; p.youthG = 0;
-  if(delta>0) delta = Math.max(1, Math.round(delta*0.45));   // most growth now happens IN-SEASON (inSeasonDev)
+  // Senior players have most growth happen in-season, so the rollover is damped (×0.45).
+  // Academy youngsters get no in-season growth, so keep almost all of theirs here.
+  if(delta>0) delta = (inAcademy && p.age<=21) ? Math.max(2, Math.round(delta*0.9)) : Math.max(1, Math.round(delta*0.45));
   if(delta>0) delta = Math.min(delta, room);   // never overshoot potential
   // OVR is a weighted average of attributes, so bump attributes until the OVR
   // actually moves by ~delta (the old code added raw points that averaged away to ~0).
@@ -1124,7 +1149,7 @@ function youthIntake(G, club){
 // Refill a thin squad, targeting positional NEEDS (so every club keeps enough
 // keepers, defenders, midfielders and forwards to field its formation naturally).
 function refillSquad(G, club){
-  let squad = Object.values(G.players).filter(p=>p.teamId===club.id);
+  let squad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth);
   const adj = club.div===0 ? -2 : -8;
   const add = pos => { const p=makePlayer(pos,[18,29],adj); p.teamId=club.id; p.years=rint(1,3); G.players[p.id]=p; squad.push(p); };
   const has = arr => squad.filter(p=>arr.includes(p.pos)).length;
@@ -1143,8 +1168,10 @@ function refillSquad(G, club){
 // academy prospects (age <= 19). Game time accrues (youthApps) and accelerates
 // their development at the season rollover. The user's youth game is simmed in
 // detail each matchday for flavour; AI clubs just bank the game time.
+// Academy membership is the p.youth flag (NOT age) so a player is only ever in
+// the youth squad OR the senior squad, never both.
 function youthProspects(G, clubId){
-  return Object.values(G.players).filter(p=>p.teamId===clubId && p.age<=19)
+  return Object.values(G.players).filter(p=>p.teamId===clubId && p.youth)
     .sort((a,b)=> b.pot-a.pot || b.ovr-a.ovr);
 }
 // The 5-a-side youth XI: best keeper + four best outfielders.
@@ -1231,7 +1258,7 @@ function generateTransferOffers(G){
   G.transferOffers = G.transferOffers || [];
   if(!transferWindowOpen(G)) return;
   if(G.transferOffers.length>=4) return;
-  const squad = Object.values(G.players).filter(p=>p.teamId===G.userTeamId);
+  const squad = Object.values(G.players).filter(p=>p.teamId===G.userTeamId && !p.youth);
   if(squad.length<=18) return;
   const target = wpick(squad, p=>p.value);
   if(!target) return;
@@ -1245,8 +1272,8 @@ function generateTransferOffers(G){
 // Sign an out-of-contract free agent (no fee; wage only). Squad cap keeps it sane.
 function signFreeAgent(G, p){
   const club = G.clubs[G.userTeamId];
-  const squad = Object.values(G.players).filter(x=>x.teamId===G.userTeamId);
-  if(squad.length>=30) return { ok:false, msg:"Squad is full (30)." };
+  const squad = Object.values(G.players).filter(x=>x.teamId===G.userTeamId && !x.youth);
+  if(squad.length>=30) return { ok:false, msg:"Senior squad is full (30)." };
   G.freeAgents = (G.freeAgents||[]).filter(x=>x.id!==p.id);
   p.teamId = club.id; p.years = rint(1,3); p.salary = wageFor(p);
   G.players[p.id] = p;
@@ -1266,7 +1293,8 @@ function loanOut(G, p, toClubId){
   if(!transferWindowOpen(G)) return { ok:false, msg:"Loans only happen in the transfer window." };
   if(p.teamId!==G.userTeamId || isLoaned(p)) return { ok:false, msg:"Can't loan that player out." };
   const to = G.clubs[toClubId]; if(!to || to.id===G.userTeamId) return { ok:false, msg:"No club to loan to." };
-  if(Object.values(G.players).filter(x=>x.teamId===G.userTeamId).length<=16) return { ok:false, msg:"Squad too thin to loan anyone out." };
+  if(p.youth) return { ok:false, msg:"Promote him to the senior squad before loaning him out." };
+  if(Object.values(G.players).filter(x=>x.teamId===G.userTeamId && !x.youth).length<=16) return { ok:false, msg:"Senior squad too thin to loan anyone out." };
   p.loanOwner = G.userTeamId; p.loanUntil = G.season; p.teamId = to.id;
   autoPickXI(G.clubs[G.userTeamId], G.players); autoPickXI(to, G.players);
   logNews(G,"loan",`📤 Loaned ${p.pos} ${p.name} (${p.ovr}) to ${to.name} for the season`, G.userTeamId);
@@ -1274,7 +1302,7 @@ function loanOut(G, p, toClubId){
 }
 // pick a sensible destination — a weaker club that will actually play him
 function loanOutAuto(G, p){
-  const cands = G.clubs.filter(c=>c.id!==G.userTeamId && Object.values(G.players).filter(x=>x.teamId===c.id).length<30);
+  const cands = G.clubs.filter(c=>c.id!==G.userTeamId && Object.values(G.players).filter(x=>x.teamId===c.id && !x.youth).length<30);
   if(!cands.length) return { ok:false, msg:"No club available to take him." };
   cands.sort((a,b)=>clubStrength(a,G.players)-clubStrength(b,G.players));
   const to = cands[rint(0, Math.min(7, cands.length-1))];
@@ -1283,7 +1311,7 @@ function loanOutAuto(G, p){
 function loanIn(G, p){
   if(!transferWindowOpen(G)) return { ok:false, msg:"Loans only happen in the transfer window." };
   if(p.teamId==null || p.teamId===G.userTeamId || isLoaned(p)) return { ok:false, msg:"Can't loan that player in." };
-  if(Object.values(G.players).filter(x=>x.teamId===G.userTeamId).length>=30) return { ok:false, msg:"Squad is full (30)." };
+  if(Object.values(G.players).filter(x=>x.teamId===G.userTeamId && !x.youth).length>=30) return { ok:false, msg:"Senior squad is full (30)." };
   const from = G.clubs[p.teamId];
   p.loanOwner = p.teamId; p.loanUntil = G.season; p.teamId = G.userTeamId;
   autoPickXI(G.clubs[G.userTeamId], G.players); if(from) autoPickXI(from, G.players);
@@ -1366,7 +1394,7 @@ function migrate(G){
     if(!G.contCup || !G.contCup.phase) initContCup(G);   // (re)build into the group-stage format
     // backfill newer per-player stat fields (shots, key passes, xG, saves, bans)
     const fill = s => { if(s){ ["SH","SOT","KP","xG","Sv"].forEach(k=>{ if(s[k]==null) s[k]=0; }); } };
-    const fillP = p => { if(p.nat==null) p.nat=rint(0,NUM_COUNTRIES-1); if(!Array.isArray(p.history)) p.history=[]; };
+    const fillP = p => { if(p.nat==null) p.nat=rint(0,NUM_COUNTRIES-1); if(!Array.isArray(p.history)) p.history=[]; if(p.youth && p.age>=20) p.youth=false; };
     Object.values(G.players||{}).forEach(p=>{ fill(p.stats); fill(p.career); if(p.susp==null) p.susp=0; if(p.ycCount==null) p.ycCount=0; fillP(p); });
     (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); fillP(p); });
     G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureXI(c, G.players); });
@@ -1716,7 +1744,8 @@ function Squad({G, commit, tShow}){
   const user = G.clubs[G.userTeamId];
   const [sort, setSort] = useState("ovr");
   const [renewP, setRenewP] = useState(null);
-  let squad = Object.values(G.players).filter(p=>p.teamId===user.id);
+  // Senior squad only — academy players live in the Youth tab.
+  let squad = Object.values(G.players).filter(p=>p.teamId===user.id && !p.youth);
   squad.sort((a,b)=> sort==="ovr"? b.ovr-a.ovr : sort==="pos"? BAND[a.pos]-BAND[b.pos]||b.ovr-a.ovr : sort==="age"? a.age-b.age : b.value-a.value);
   const inXI = new Set(user.xi||[]);
   const release = p => {
@@ -1725,6 +1754,14 @@ function Squad({G, commit, tShow}){
     autoPickXI(user, G.players);
     logNews(G, "transfer", `❌ Released ${p.pos} ${p.name} (${p.ovr})`, user.id);
     commit(G); tShow(`${p.name} released`);
+  };
+  const sendDown = p => {
+    if(p.age>21){ tShow("Only players aged 21 or under can drop to the academy."); return; }
+    if(squad.length<=16){ tShow("Senior squad too thin to send anyone down."); return; }
+    p.youth = true;
+    autoPickXI(user, G.players);
+    logNews(G, "youth", `🔽 ${p.name} (${p.pos} ${p.ovr}) sent down to the academy`, user.id);
+    commit(G); tShow(`${p.name} sent to the academy`);
   };
   return (
     <div className="space-y-3">
@@ -1743,7 +1780,7 @@ function Squad({G, commit, tShow}){
         <table className="w-full text-sm">
           <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]">
             <th className="text-left p-2">Player</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Pot</th>
-            <th className="p-2">Age</th><th className="p-2">Wage</th><th className="p-2">Yrs</th><th className="p-2">Value</th><th className="p-2"></th><th className="p-2"></th>
+            <th className="p-2">Age</th><th className="p-2">Wage</th><th className="p-2">Yrs</th><th className="p-2">Value</th><th className="p-2"></th><th className="p-2"></th><th className="p-2"></th>
           </tr></thead>
           <tbody>
             {squad.map(p=>(
@@ -1766,6 +1803,7 @@ function Squad({G, commit, tShow}){
                 <td className="p-2 text-center tnum">{money(p.value)}</td>
                 <td className="p-2 text-center"><button onClick={()=>setRenewP(p)} className={"px-2 py-1 rounded text-xs font-semibold "+(p.years<=0?"bg-emerald-500 text-slate-900":p.unhappy?"bg-orange-500 text-slate-900":"bg-[#16213a] text-slate-300 hover:bg-[#1d2940]")}>{p.years<=0?"Re-sign":"Renew"}</button></td>
                 <td className="p-2 text-center"><button onClick={()=>release(p)} className="px-2 py-1 rounded text-xs font-semibold bg-[#16213a] text-red-400 hover:bg-red-900/40">Release</button></td>
+                <td className="p-2 text-center">{p.age<=21 && <button onClick={()=>sendDown(p)} className="px-2 py-1 rounded text-xs font-semibold bg-[#16213a] text-amber-300 hover:bg-[#1d2940]" title="Move to the academy to develop faster">↓ Youth</button>}</td>
               </tr>
             ))}
           </tbody>
@@ -2459,6 +2497,7 @@ function FreeAgents({G, commit, tShow}){
 /* ----------------------------- youth (5v5) ----------------------------- */
 function YouthView({G, commit, tShow}){
   const user = G.clubs[G.userTeamId];
+  const [renewP, setRenewP] = useState(null);
   const pros = youthProspects(G, user.id);
   const five = youthFive(G, user.id);
   const fiveIds = new Set(five.map(p=>p.id));
@@ -2471,11 +2510,17 @@ function YouthView({G, commit, tShow}){
     logNews(G, "youth", `🎓 ${p.name} (${p.pos} ${p.ovr}) promoted to the senior squad`, user.id);
     commit(G); tShow(`${p.name} promoted to senior squad`);
   };
+  const release = p => {
+    if(!confirm(`Release ${p.name} from the academy? They'll become a free agent.`)) return;
+    releaseToFA(G, p);
+    logNews(G, "youth", `❌ Released academy player ${p.pos} ${p.name}`, user.id);
+    commit(G); tShow(`${p.name} released`);
+  };
   return (
     <div className="space-y-3">
       <Card>
         <div className="font-semibold">🎓 {user.name} Academy — 5-a-side</div>
-        <div className="text-sm text-slate-400">Your prospects (age ≤19) play a small-sided youth match each matchday. Game time develops them faster — promote them to the senior squad when they're ready.</div>
+        <div className="text-sm text-slate-400">Academy players are on contracts and play a small-sided youth match each matchday — they develop fastest here while young. Promote them to the senior squad when ready; they auto-graduate at age 20. (Senior players 21 and under can be sent back down from the Squad tab.)</div>
       </Card>
 
       {last && (
@@ -2514,24 +2559,28 @@ function YouthView({G, commit, tShow}){
         <Card className="p-0 overflow-x-auto">
           <div className="p-3 font-semibold">All prospects</div>
           <table className="w-full text-sm">
-            <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="text-left p-2">Player</th><th className="p-2">Pos</th><th className="p-2">Age</th><th className="p-2">OVR</th><th className="p-2">Pot</th><th className="p-2">Apps</th><th className="p-2">G</th><th className="p-2"></th></tr></thead>
+            <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="text-left p-2">Player</th><th className="p-2">Pos</th><th className="p-2">Age</th><th className="p-2">OVR</th><th className="p-2">Pot</th><th className="p-2">Wage</th><th className="p-2">Yrs</th><th className="p-2">Apps</th><th className="p-2"></th><th className="p-2"></th><th className="p-2"></th></tr></thead>
             <tbody>
               {pros.map(p=>(
                 <tr key={p.id} className={"border-b border-[#15203a]"+(fiveIds.has(p.id)?" text-emerald-300":"")}>
-                  <td className="p-2 text-left"><PName p={p} className="font-medium" />{fiveIds.has(p.id)&&<span className="ml-1 text-[10px] text-emerald-400">XI</span>}</td>
+                  <td className="p-2 text-left"><PName p={p} className="font-medium" />{fiveIds.has(p.id)&&<span className="ml-1 text-[10px] text-emerald-400">XI</span>}{p.unhappy&&p.years>0&&<span className="ml-1 text-orange-400 text-xs" title="Wants a new deal">⚠</span>}</td>
                   <td className="p-2 text-center text-slate-400">{p.pos}</td>
                   <td className="p-2 text-center tnum">{p.age}</td>
                   <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
                   <td className="p-2 text-center"><PotPill v={p.pot} /></td>
+                  <td className="p-2 text-center tnum">{money(p.salary)}</td>
+                  <td className={"p-2 text-center tnum "+(p.years<=0?"text-red-400":p.years<=1?"text-orange-300":"")}>{p.years>0?p.years:"exp"}</td>
                   <td className="p-2 text-center tnum">{p.youthApps||0}</td>
-                  <td className="p-2 text-center tnum">{p.youthG||0}</td>
                   <td className="p-2 text-center"><button onClick={()=>promote(p)} className="px-2 py-0.5 rounded text-xs bg-emerald-600 text-white font-semibold">Promote</button></td>
+                  <td className="p-2 text-center"><button onClick={()=>setRenewP(p)} className={"px-2 py-0.5 rounded text-xs font-semibold "+(p.years<=0?"bg-emerald-500 text-slate-900":p.unhappy?"bg-orange-500 text-slate-900":"bg-[#16213a] text-slate-300")}>{p.years<=0?"Re-sign":"Renew"}</button></td>
+                  <td className="p-2 text-center"><button onClick={()=>release(p)} className="px-2 py-0.5 rounded text-xs font-semibold bg-[#16213a] text-red-400 hover:bg-red-900/40">Release</button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         </Card>
       )}
+      {renewP && <RenewModal G={G} p={renewP} commit={commit} tShow={tShow} onClose={()=>setRenewP(null)} />}
     </div>
   );
 }
