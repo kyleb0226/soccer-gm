@@ -914,6 +914,7 @@ function simRound(G){
   const round = G.schedule[G.day]; if(!round) return;
   // tactic context for the user's club (its chosen formation/tactic already on the club)
   round.forEach(g=>{
+    if(g.played) return;   // already played (e.g. the user's match was watched live)
     const home = G.clubs[g.home], away = G.clubs[g.away];
     ensureXI(home, G.players); ensureXI(away, G.players);
     const box = simMatch(home, away, G.players, { G });
@@ -989,9 +990,10 @@ function updateRecords(G){
   const pool = G.records.players = G.records.players || {};
   // anyone already recorded who is no longer in the world has retired
   for(const id in pool){ if(!G.players[id]) pool[id].retired = true; }
+  // Only genuinely notable careers, so the store stays bounded over many decades.
   Object.values(G.players).forEach(p=>{
     const ca = p.career||{};
-    if((ca.App||0)>=40 || (p.peakOvr||0)>=80){
+    if((ca.App||0)>=150 || (ca.G||0)>=60 || (ca.A||0)>=60 || (p.peakOvr||0)>=84 || p.hof){
       pool[p.id] = { id:p.id, name:p.name, pos:p.pos, nat:p.nat,
         G:ca.G||0, A:ca.A||0, App:ca.App||0, CS:ca.CS||0, MOTM:ca.MOTM||0,
         peak:p.peakOvr||p.ovr, hof:!!p.hof,
@@ -999,6 +1001,12 @@ function updateRecords(G){
         season:G.season, retired:false };
     }
   });
+  // hard cap: keep the most notable ~600 by a simple impact score
+  const keys = Object.keys(pool);
+  if(keys.length>600){
+    const score = r => (r.G||0)*2 + (r.A||0) + (r.App||0)*0.15 + (r.peak||0) + (r.hof?100:0);
+    keys.sort((a,b)=>score(pool[b])-score(pool[a])).slice(600).forEach(id=>{ delete pool[id]; });
+  }
 }
 // sim forward until the user's next league match is about to be played (or season end)
 function simToNextUserMatch(G){
@@ -1009,6 +1017,86 @@ function simToNextUserMatch(G){
     const next = G.schedule[G.day];
     if(next && next.some(g=>g.home===G.userTeamId || g.away===G.userTeamId)) break;
   }
+}
+
+/* ----------------------------- live match ------------------------------ */
+// "Watch my matches": the user's fixture is played in two halves with a chance
+// to make substitutions and change tactic at the break. The engine fully owns
+// the user's match stats (no applyMatch) to avoid double-crediting; the rest of
+// the matchday is then played by simRound (which skips the already-played game).
+function watchOn(G){ return !!(G.settings && G.settings.watchMatches===true); }
+function liveInit(G){
+  if(G.phase!=="regular") return null;
+  const round=G.schedule[G.day]; if(!round) return null;
+  const g=round.find(x=>(x.home===G.userTeamId||x.away===G.userTeamId) && !x.played);
+  if(!g) return null;
+  return { gref:g, homeId:g.home, awayId:g.away, half:0, hs:0, as:0, events:[],
+    appeared:{}, minutes:{}, sideOf:{}, slotOf:{}, gBy:{}, aBy:{},
+    shH:0, shA:0, sotH:0, sotA:0, done:false };
+}
+function livePlayHalf(G, M){
+  M.half++;
+  const players=G.players, home=G.clubs[M.homeId], away=G.clubs[M.awayId];
+  ensureXI(home, players); ensureXI(away, players);
+  const H=fieldedXI(home, players), A=fieldedXI(away, players);
+  MORALE_ON = !G.settings || G.settings.morale!==false;
+  const uH=unitRatings(home, players), uA=unitRatings(away, players);
+  const note=(lineup,side)=>lineup.forEach(({p,slot})=>{ M.appeared[p.id]=true; M.minutes[p.id]=(M.minutes[p.id]||0)+45; M.sideOf[p.id]=side; M.slotOf[p.id]=slot; });
+  note(H,"H"); note(A,"A");
+  const hAtt=(0.55*n01(uH.ATT)+0.30*n01(uH.MID)+0.15*n01(uH.DEF));
+  const hDef=(0.55*n01(uH.DEF)+0.30*n01(uH.MID)+0.15*n01(uH.ATT));
+  const aAtt=(0.55*n01(uA.ATT)+0.30*n01(uA.MID)+0.15*n01(uA.DEF));
+  const aDef=(0.55*n01(uA.DEF)+0.30*n01(uA.MID)+0.15*n01(uA.ATT));
+  const tH=TACTIC_MOD[home.tactic||"balanced"], tA=TACTIC_MOD[away.tactic||"balanced"];
+  const xgH=clamp(1.32*Math.exp(1.7*(hAtt-aDef))*tH.xgFor*tA.xgAgainst*1.12,0.15,5.5)/2;
+  const xgA=clamp(1.32*Math.exp(1.7*(aAtt-hDef))*tA.xgFor*tH.xgAgainst*0.92,0.15,5.5)/2;
+  const gh=poisson(xgH), ga=poisson(xgA), base=(M.half-1)*45;
+  const scoreSide=(lineup,n,key)=>{ for(let i=0;i<n;i++){ const sc=wpick(lineup,o=>(SCORE_W[o.slot]||0)*(0.5+n01(o.p.sho))*(hasTrait(o.p,"poacher")?1.6:1)); if(!sc)continue; sc.p.stats.G++; M.gBy[sc.p.id]=(M.gBy[sc.p.id]||0)+1; const min=base+rint(1,45); let assist=null; if(chance(0.72)){ const a2=wpick(lineup.filter(o=>o!==sc),o=>(CREATE_W[o.slot]||0)*(0.5+n01(o.p.pas*0.6+o.p.dri*0.4))*(hasTrait(o.p,"playmaker")?1.6:1)); if(a2){ a2.p.stats.A++; a2.p.stats.KP++; M.aBy[a2.p.id]=(M.aBy[a2.p.id]||0)+1; assist=a2.p.name; } } M.events.push({min,side:key,name:sc.p.name,assist}); if(key==="H")M.hs++; else M.as++; } };
+  scoreSide(H,gh,"H"); scoreSide(A,ga,"A");
+  const shH=clamp(round(xgH/0.11+gauss(0,1)),gh,18), shA=clamp(round(xgA/0.11+gauss(0,1)),ga,18);
+  const sotH=clamp(round(shH*(0.30+0.12*n01(uH.ATT))),gh,shH), sotA=clamp(round(shA*(0.30+0.12*n01(uA.ATT))),ga,shA);
+  M.shH+=shH; M.shA+=shA; M.sotH+=sotH; M.sotA+=sotA;
+  const spread=(lineup,shots,sot,xg)=>{ for(let i=0;i<shots;i++){ const o=wpick(lineup,q=>(SCORE_W[q.slot]||0)*(0.5+n01(q.p.sho))); if(!o)continue; o.p.stats.SH++; if(i<sot)o.p.stats.SOT++; o.p.stats.xG+=+(xg/Math.max(1,shots)).toFixed(2);} const kp=Math.max(0,round(shots*0.55)); for(let i=0;i<kp;i++){ const o=wpick(lineup,q=>(CREATE_W[q.slot]||0)*(0.5+n01(q.p.pas))*(hasTrait(q.p,"playmaker")?1.5:1)); if(o)o.p.stats.KP++; } };
+  spread(H,shH,sotH,xgH); spread(A,shA,sotA,xgA);
+  if(M.half>=2) M.done=true;
+}
+function liveFinish(G, M){
+  const players=G.players, home=G.clubs[M.homeId], away=G.clubs[M.awayId];
+  const ids=Object.keys(M.appeared);
+  ids.forEach(id=>{ const p=players[id]; if(!p)return; p.stats.App++; const mins=M.minutes[id]||90; p.stats.Min+=mins; const loss=Math.round(mins/90*rint(18,26)*(hasTrait(p,"engine")?0.6:1)); p.fitness=clamp((p.fitness!=null?p.fitness:100)-loss,0,100); });
+  const gkOf=side=>ids.find(id=>M.sideOf[id]===side && M.slotOf[id]==="GK");
+  const gh=gkOf("H"), ga=gkOf("A");
+  if(gh&&players[gh]) players[gh].stats.Sv+=Math.max(0,(M.sotA||0)-M.as);
+  if(ga&&players[ga]) players[ga].stats.Sv+=Math.max(0,(M.sotH||0)-M.hs);
+  ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id], conceded=M.sideOf[id]==="H"?M.as:M.hs; if(conceded===0&&(BAND[slot]<=2||slot==="GK")) p.stats.CS++; });
+  ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id]; const yc=clamp(0.10+(BAND[slot]<=2?0.06:0)-n01(p.phy)*0.04,0.04,0.22); if(chance(yc)){ p.stats.YC++; p.ycCount=(p.ycCount||0)+1; if(p.ycCount>=YC_BAN_THRESHOLD){ p.ycCount=0; banPlayer(G,p,1,"yellow-card accumulation"); } } if(chance(0.01)){ p.stats.RC++; injure(p,rint(2,4)); banPlayer(G,p,rint(2,3),"a red card"); } });
+  let motm=null, motmR=0;
+  ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id], side=M.sideOf[id]; const scored=side==="H"?M.hs:M.as, conceded=side==="H"?M.as:M.hs; const result=scored>conceded?1:scored<conceded?-1:0; let r=6.3+(result>0?0.4:result<0?-0.3:0)+0.95*(M.gBy[id]||0)+0.55*(M.aBy[id]||0); if(slot==="GK")r+=clamp(Math.min(p.stats.Sv||0,6)*0.03,0,0.4); if(conceded===0&&(BAND[slot]<=2||slot==="GK"))r+=0.6; if(conceded>=3&&(BAND[slot]<=2||slot==="GK"))r-=0.5; r=clamp(r+gauss(0,0.35),4,10); p.stats.ratingSum+=r; p.stats.ratingN++; p.form=p.form==null?r:+(p.form*0.7+r*0.3).toFixed(2); if(r>motmR){motmR=r;motm=p;} });
+  if(motm) motm.stats.MOTM++;
+  if(!G.settings||G.settings.morale!==false){ ids.forEach(id=>{ const p=players[id]; if(!p)return; const side=M.sideOf[id]; const result=(side==="H"?M.hs-M.as:M.as-M.hs); p.morale=clamp((p.morale==null?70:p.morale)+(result>0?2.5:result<0?-2.5:0.5),0,100); }); }
+  home.pld++; away.pld++; home.gf+=M.hs; home.ga+=M.as; away.gf+=M.as; away.ga+=M.hs;
+  if(M.hs>M.as){home.w++;home.pts+=3;away.l++;} else if(M.hs<M.as){away.w++;away.pts+=3;home.l++;} else {home.d++;away.d++;home.pts++;away.pts++;}
+  M.gref.played=true; M.gref.hs=M.hs; M.gref.as=M.as;
+  const margin=Math.abs(M.hs-M.as), bw=G.records&&G.records.biggestWin;
+  if(margin>=4&&(!bw||margin>bw.margin)){ G.records=G.records||{players:{},biggestWin:null}; const wh=M.hs>M.as; G.records.biggestWin={season:G.season,margin,winner:(wh?home:away).name,loser:(wh?away:home).name,hs:Math.max(M.hs,M.as),as:Math.min(M.hs,M.as)}; }
+  const uHome=home.id===G.userTeamId; bumpConfidenceForResult(G, uHome?M.hs>M.as:M.as>M.hs, M.hs===M.as);
+  const tl=[]; let rh=0,ra=0; M.events.slice().sort((a,b)=>a.min-b.min).forEach(e=>{ if(e.side==="H")rh++; else ra++; tl.push({min:e.min,side:e.side,name:e.name,assist:e.assist,hs:rh,as:ra}); });
+  const poss=clamp(round(50+(n01(unitRatings(home,players).MID)-n01(unitRatings(away,players).MID))*45+2),28,72);
+  G.lastMatch={ season:G.season, day:G.day+1, home:home.abbr, away:away.abbr, homeName:home.name, awayName:away.name, hs:M.hs, as:M.as, neutral:false, cup:false,
+    hScorers:M.events.filter(e=>e.side==="H").map(e=>({name:e.name,min:e.min,assist:e.assist})),
+    aScorers:M.events.filter(e=>e.side==="A").map(e=>({name:e.name,min:e.min,assist:e.assist})),
+    motm:motm?motm.name:null, stat:{possH:poss,possA:100-poss,shH:M.shH,shA:M.shA,sotH:M.sotH,sotA:M.sotA,xgH:0,xgA:0}, timeline:tl };
+  logNews(G,"match",`${home.abbr} ${M.hs}-${M.as} ${away.abbr}`,G.userTeamId);
+  maybeInjure(home,players,G.settings); maybeInjure(away,players,G.settings);
+  simRound(G);   // plays the rest of the round (skips the already-played user game) + upkeep
+}
+// Swap a starter (xi index) for a bench player on the user's club, mid-match.
+function liveSub(club, players, outId, inId){
+  const xi=(club.xi||[]).slice(), bench=(club.bench||[]).slice();
+  const xiPos=xi.indexOf(outId), bPos=bench.indexOf(inId);
+  if(xiPos<0||bPos<0) return false;
+  xi[xiPos]=inId; bench[bPos]=outId;
+  club.xi=xi; club.bench=bench; return true;
 }
 
 /* ----------------------------- offseason ------------------------------- */
@@ -1083,12 +1171,16 @@ function startNextSeason(G){
       // sliced by competition later. ratingSum/ratingN are kept so per-league
       // averages and rating-value can be recomputed from any subset of seasons.
       p.history.push({ season:G.season,
-        team: club ? club.abbr : "—", teamName: club ? club.name : "Free agent", teamId: p.teamId,
+        team: club ? club.abbr : "—", teamId: p.teamId,
         country: club ? club.country : null, div: club ? club.div : null,
         league: club ? divName(club.country, club.div) : "—",
         age: p.age, ovr: p.ovr,
         ...p.stats, r:+avgRating(p.stats).toFixed(2) });
-      if(p.history.length>40) p.history = p.history.slice(-40);
+      // Keep a long history for players the user cares about; trim the AI filler
+      // to a few recent seasons so saves stay small over many decades.
+      const notable = (club && club.userControlled) || (p.peakOvr||0)>=80 || (p.caps||0)>0 || (p.career.G||0)>=40;
+      const capH = notable ? 22 : 3;
+      if(p.history.length>capH) p.history = p.history.slice(-capH);
       for(const k in p.stats) p.career[k] = (p.career[k]||0) + p.stats[k];
     }
     p.stats = emptyStats();
@@ -1159,7 +1251,16 @@ function startNextSeason(G){
   // youth intake into every club, refill thin squads
   G.clubs.forEach(c=>youthIntake(G, c));
   G.clubs.forEach(c=>refillSquad(G, c));
-  // thin the free-agent pool (already aged above)
+  // trim bloated AI squads so the world (and the save) stays bounded over decades:
+  // surplus seniors go to free agency, surplus youth are released entirely.
+  G.clubs.forEach(c=>{
+    if(c.userControlled) return;
+    const sen = Object.values(G.players).filter(p=>p.teamId===c.id && !p.youth).sort((a,b)=>b.ovr-a.ovr);
+    sen.slice(24).forEach(p=>releaseToFA(G, p));
+    const yth = Object.values(G.players).filter(p=>p.teamId===c.id && p.youth).sort((a,b)=>(b.pot||b.ovr)-(a.pot||a.ovr));
+    yth.slice(7).forEach(p=>{ delete G.players[p.id]; });
+  });
+  // thin the free-agent pool (already aged above + the just-released surplus)
   G.freeAgents = G.freeAgents.filter(p=>p.ovr>=48 || p.age<=23).slice(0,300);
   // fresh fixtures + cups + reset XIs
   G.season++; G.day=0; G.phase="regular";
@@ -1891,6 +1992,98 @@ function Splash({onStart, onBack}){
 function hashStr(s){ let h=2166136261; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); } return h>>>0; }
 
 /* ----------------------------- hub ------------------------------------- */
+function LiveMatch({G, commit, tShow, onClose}){
+  const Mref = useRef(null);
+  if(!Mref.current) Mref.current = liveInit(G);
+  const M = Mref.current;
+  const [phase, setPhase] = useState("pre");
+  const [selOut, setSelOut] = useState(null);
+  const [subs, setSubs] = useState(0);
+  const [, force] = useState(0);
+  if(!M){ return (<div className="fixed inset-0 bg-black/70 z-[55] flex items-center justify-center p-4" onClick={onClose}><div className="bg-[#101a30] border border-[#1d2940] rounded-xl p-6" onClick={e=>e.stopPropagation()}>No match to watch. <button onClick={onClose} className="ml-2 text-emerald-300">Close</button></div></div>); }
+  const user = G.clubs[G.userTeamId];
+  const home = G.clubs[M.homeId], away = G.clubs[M.awayId];
+  const kickoff = () => { livePlayHalf(G, M); setPhase("ht"); force(x=>x+1); };
+  const secondHalf = () => { livePlayHalf(G, M); liveFinish(G, M); commit(G); setPhase("ft"); force(x=>x+1); };
+  const doSub = inId => { if(selOut==null) return; if(subs>=3){ tShow("Max 3 substitutions."); return; } if(liveSub(user, G.players, selOut, inId)){ setSubs(subs+1); setSelOut(null); force(x=>x+1); } };
+  const setTactic = t => { user.tactic=t; force(x=>x+1); };
+  const xiIds = (user.xi||[]);
+  const bench = (user.bench||[]);
+  return (
+    <div className="fixed inset-0 bg-black/70 z-[55] flex items-end sm:items-center justify-center p-3">
+      <div className="bg-[#101a30] border border-[#1d2940] rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
+        <div className="p-4 border-b border-[#1d2940] sticky top-0 bg-[#101a30]">
+          <div className="flex items-center justify-center gap-4">
+            <div className="flex-1 text-right font-bold">{home.abbr}</div>
+            <div className="text-3xl font-black tnum">{M.hs} - {M.as}</div>
+            <div className="flex-1 font-bold">{away.abbr}</div>
+          </div>
+          <div className="text-center text-xs text-slate-500 mt-1">{phase==="pre"?"Kick-off":phase==="ht"?"Half time":"Full time"} · {home.name} v {away.name}</div>
+        </div>
+        <div className="p-4 space-y-3">
+          {M.events.length>0 && (
+            <div className="space-y-0.5 text-xs">
+              {M.events.slice().sort((a,b)=>a.min-b.min).map((e,i)=>(
+                <div key={i} className={"flex gap-2 "+(e.side==="H"?"":"justify-end text-right")}>
+                  <span className="text-slate-500 w-8">{e.min}'</span>
+                  <span className="text-slate-300">⚽ {e.name}{e.assist?<span className="text-slate-500"> ({e.assist})</span>:""}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {phase==="pre" && (
+            <div className="text-center">
+              <div className="text-sm text-slate-400 mb-3">Your XI and tactic are set from the Tactics tab. Kick off when ready.</div>
+              <button onClick={kickoff} className="px-5 py-2.5 rounded-lg bg-emerald-500 text-slate-900 font-bold">Kick Off ▶</button>
+            </div>
+          )}
+
+          {phase==="ht" && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-slate-400">Tactic:</span>
+                {["attacking","balanced","defensive"].map(t=>(
+                  <button key={t} onClick={()=>setTactic(t)} className={"px-2 py-1 rounded "+((user.tactic||"balanced")===t?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>{t}</button>
+                ))}
+              </div>
+              <div>
+                <div className="text-xs text-slate-400 mb-1">Substitutions ({subs}/3){selOut!=null?" — pick a bench player to bring on":" — tap a starter to take off"}</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <div className="text-[11px] text-slate-500 mb-1">On pitch</div>
+                    <div className="space-y-1">
+                      {xiIds.map(id=>{ const p=G.players[id]; if(!p)return null; return (
+                        <button key={id} onClick={()=>setSelOut(selOut===id?null:id)} className={"w-full text-left text-xs px-2 py-1 rounded "+(selOut===id?"bg-emerald-600 text-white":"bg-[#16213a] text-slate-300")}>{p.pos} {p.name} <span className="text-slate-500">{p.ovr}</span></button>
+                      ); })}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] text-slate-500 mb-1">Bench</div>
+                    <div className="space-y-1">
+                      {bench.map(id=>{ const p=G.players[id]; if(!p)return null; const dis=selOut==null||isInjured(p)||isSuspended(p); return (
+                        <button key={id} disabled={dis} onClick={()=>doSub(id)} className={"w-full text-left text-xs px-2 py-1 rounded "+(dis?"bg-[#0d1526] text-slate-600":"bg-[#16213a] text-slate-200 hover:bg-[#1d2940]")}>{p.pos} {p.name} <span className="text-slate-500">{p.ovr}</span></button>
+                      ); })}
+                      {!bench.length && <div className="text-[11px] text-slate-600">No bench available.</div>}
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <button onClick={secondHalf} className="w-full px-4 py-2.5 rounded-lg bg-emerald-500 text-slate-900 font-bold">Play Second Half ▶</button>
+            </div>
+          )}
+
+          {phase==="ft" && (
+            <div className="space-y-3">
+              <BoxScore m={G.lastMatch} G={G} />
+              <button onClick={onClose} className="w-full px-4 py-2.5 rounded-lg bg-emerald-500 text-slate-900 font-bold">Continue</button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 function Hub({G, commit, tShow, setTab}){
   const user = G.clubs[G.userTeamId];
   const round = G.schedule[G.day] || [];
@@ -1898,9 +2091,12 @@ function Hub({G, commit, tShow, setTab}){
   const table = tableFor(G, user.div, user.country||0);
   const pos = table.findIndex(c=>c.id===user.id)+1;
   const doSim = fn => { fn(G); commit(G); };
+  const [live, setLive] = useState(false);
+  const playMatchday = () => { if(watchOn(G) && userGame && !userGame.played){ setLive(true); } else doSim(simRound); };
   const offseason = G.phase==="offseason";
   return (
     <div className="space-y-4">
+      {live && <LiveMatch G={G} commit={commit} tShow={tShow} onClose={()=>setLive(false)} />}
       <Card>
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div>
@@ -1935,7 +2131,7 @@ function Hub({G, commit, tShow, setTab}){
             </div>
           ) : <div className="text-slate-400">No fixture this matchday (bye).</div>}
           <div className="flex flex-wrap gap-2 mt-3">
-            <button onClick={()=>doSim(simRound)} className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold">Play Matchday</button>
+            <button onClick={playMatchday} className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold">{watchOn(G)&&userGame?"▶ Watch Match":"Play Matchday"}</button>
             <button onClick={()=>doSim(simToNextUserMatch)} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200">Sim to Next Match</button>
             <button onClick={()=>{ for(let i=0;i<7 && G.phase==="regular" && !G.pendingSack;i++) simRound(G); commit(G); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200">Sim 7 MD</button>
             <button onClick={()=>{ generateTransferOffers(G); commit(G); tShow("Checked the market"); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200">Check Market</button>
