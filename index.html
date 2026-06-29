@@ -1134,6 +1134,16 @@ function finalizeSeason(G){
     G.champions.unshift({ season:G.season, id:champ.id, abbr:champ.abbr, country:ci });
     logNews(G, "title", `🏆 ${champ.name} are champions of the ${divName(ci,0)}!`, champ.id);
     addHonour(G.clubs[champ.id], G.season, "league", `${divName(ci,0)} champions`);
+    // THE TREBLE: same club wins its league, its national cup AND the continental cup
+    const cup = (G.cups||[]).find(x=>x.country===ci);
+    const wonCup = cup && cup.winner===champ.id;
+    const wonCont = G.contCup && G.contCup.winner===champ.id;
+    if(wonCup && wonCont){
+      addHonour(G.clubs[champ.id], G.season, "treble", `🌟 The Treble — ${divName(ci,0)}, ${cupName(ci)} & ${CONT_CUP_NAME}`);
+      logNews(G, "title", `🌟🏆 ${champ.name} complete an historic TREBLE — league, cup and ${CONT_CUP_NAME}!`, champ.id);
+      G.trebles = G.trebles || [];
+      G.trebles.unshift({ season:G.season, id:champ.id, abbr:champ.abbr, country:ci });
+    }
   });
   computeAwards(G);
   evaluateBoardSeasonEnd(G);
@@ -1857,6 +1867,7 @@ function migrate(G){
     if(G.pendingSack==null) G.pendingSack=false;
     if(!G.intl || typeof G.intl!=="object") G.intl={ history:[], lastPlayed:null };
     if(!Array.isArray(G.intl.history)) G.intl.history=[];
+    if(!Array.isArray(G.trebles)) G.trebles=[];
     G.version = SAVE_VERSION;
   }catch(e){}
   return G;
@@ -1888,7 +1899,7 @@ function newGame(userTeamId, opts={}){
     schedule: buildSchedule(clubs),
     freeAgents: [], transferOffers: [], news: [], champions: [], contChampions: [], awardHistory: [], hof: [],
     cups: null, contCup: null, lastMatch: null,
-    finalsArchive: [], records: { players:{}, biggestWin:null },
+    finalsArchive: [], records: { players:{}, biggestWin:null }, trebles: [],
     intl: { history:[], lastPlayed:null },
     boardConfidence: 60, pendingSack: false, jobOffers: null,
     settings: { injuries:true, jobSecurity:true, morale:true, internationals:true, watchMatches:false },
@@ -3518,9 +3529,9 @@ function RecordsView({G}){
 
       <Card>
         <div className="font-semibold mb-2">🏆 {user.name} trophy cabinet</div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2 text-center">
-          {[["league","Leagues"],["cup","Cups"],["continental","Continental"],["promo","Promotions"]].map(([t,l])=>(
-            <div key={t} className="bg-[#0d1526] rounded-lg p-2"><div className="text-2xl font-black tnum">{hCount(t)}</div><div className="text-[11px] text-slate-400">{l}</div></div>
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-2 text-center">
+          {[["league","Leagues"],["cup","Cups"],["continental","Continental"],["treble","🌟 Trebles"],["promo","Promotions"]].map(([t,l])=>(
+            <div key={t} className={"rounded-lg p-2 "+(t==="treble"&&hCount(t)>0?"bg-amber-500/15 border border-amber-500/40":"bg-[#0d1526]")}><div className="text-2xl font-black tnum">{hCount(t)}</div><div className="text-[11px] text-slate-400">{l}</div></div>
           ))}
         </div>
         <div className="space-y-1 text-sm max-h-48 overflow-y-auto">
@@ -3528,6 +3539,16 @@ function RecordsView({G}){
           {!honours.length && <div className="text-slate-500">No trophies yet — go win something.</div>}
         </div>
       </Card>
+
+      {(G.trebles||[]).length>0 && (
+        <Card>
+          <div className="font-semibold mb-2">🌟 Trebles won</div>
+          <div className="text-xs text-slate-500 mb-2">League + National Cup + {CONT_CUP_NAME} in a single season.</div>
+          <div className="space-y-1 text-sm max-h-48 overflow-y-auto">
+            {(G.trebles||[]).map((t,i)=>(<div key={i} className="flex gap-2"><span className="text-slate-500 tnum w-12">{t.season}</span><span className={t.id===user.id?"text-amber-300 font-semibold":"text-slate-200"}>{COUNTRIES[t.country].flag} {G.clubs[t.id]?G.clubs[t.id].name:t.abbr}</span></div>))}
+          </div>
+        </Card>
+      )}
 
       {bw && (
         <Card>
