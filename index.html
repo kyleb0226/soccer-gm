@@ -1337,6 +1337,85 @@ function hallOfFameCheck(G){
   if(G.hof.length>120) G.hof.length=120;
 }
 
+/* ----------------------------- internationals -------------------------- */
+// A compact 4-nation tournament played in the international break (offseason).
+// National teams are picked from every player by nationality (nat), independent
+// of club. Caps & international goals persist on players. Toggle: internationals.
+function intlOn(G){ return !G.settings || G.settings.internationals!==false; }
+function eligibleNationals(G, country){
+  return Object.values(G.players).filter(p=>p.nat===country && p.teamId!=null).sort((a,b)=>b.ovr-a.ovr);
+}
+// Pick a best XI ([{p,slot}]) from an explicit squad for a formation.
+function pickXIFrom(squad, formation){
+  const slots = FORMATIONS[formation] || FORMATIONS["4-3-3"];
+  const used = new Set(); const out = new Array(slots.length).fill(null);
+  const isKeeper = p => p.pos==="GK" || (p.positions||[]).includes("GK");
+  const canPlay = (p,slot) => (p.positions||[p.pos]).includes(slot);
+  const avail = () => squad.filter(p=>!used.has(p.id));
+  slots.forEach((slot,i)=>{ if(slot!=="GK") return;
+    const ks = avail().filter(isKeeper).sort((a,b)=>b.gk-a.gk);
+    const pk = ks[0] || avail().sort((a,b)=>effRating(b,slot)-effRating(a,slot))[0];
+    if(pk){ used.add(pk.id); out[i]={p:pk,slot}; } });
+  const naturalCount = i => avail().filter(p=>canPlay(p,slots[i])).length;
+  const outIdx = slots.map((s,i)=>i).filter(i=>slots[i]!=="GK").sort((a,b)=>naturalCount(a)-naturalCount(b));
+  outIdx.forEach(i=>{ const slot=slots[i], pool=avail();
+    const nat = pool.filter(p=>canPlay(p,slot));
+    const pk = nat.length ? nat.sort((a,b)=>b.ovr-a.ovr)[0] : pool.sort((a,b)=>effRating(b,slot)-effRating(a,slot))[0];
+    if(pk){ used.add(pk.id); out[i]={p:pk,slot}; } });
+  return out.filter(Boolean);
+}
+function unitFromLineup(lineup){
+  let dS=0,dN=0,mS=0,mN=0,aS=0,aN=0,gk=50;
+  lineup.forEach(({p,slot})=>{ const er=effRating(p,slot), b=BAND[slot];
+    if(slot==="GK"){ gk=p.gk; return; }
+    if(b<=2){ dS+=er; dN++; } else if(b===3){ mS+=er; mN++; } else { aS+=er; aN++; }
+    if(b===2){ mS+=er*0.5; mN+=0.5; } });
+  return { DEF:(dN?dS/dN:50)*0.7+gk*0.3, MID:mN?mS/mN:50, ATT:aN?aS/aN:50, gk };
+}
+// Sim one national-team match between two {ci,name,flag,xi} sides. Credits caps to
+// everyone who played and international goals to scorers. Returns the result + scorers.
+function simNationMatch(A, B, opts={}){
+  MORALE_ON = false;   // internationals ignore club morale/form for a neutral feel
+  const uA=unitFromLineup(A.xi), uB=unitFromLineup(B.xi);
+  const aAtt=(0.55*n01(uA.ATT)+0.30*n01(uA.MID)+0.15*n01(uA.DEF));
+  const aDef=(0.55*n01(uA.DEF)+0.30*n01(uA.MID)+0.15*n01(uA.ATT));
+  const bAtt=(0.55*n01(uB.ATT)+0.30*n01(uB.MID)+0.15*n01(uB.DEF));
+  const bDef=(0.55*n01(uB.DEF)+0.30*n01(uB.MID)+0.15*n01(uB.ATT));
+  const xgA=clamp(1.32*Math.exp(1.7*(aAtt-bDef))*(opts.neutral?1:1.06),0.15,5.5);
+  const xgB=clamp(1.32*Math.exp(1.7*(bAtt-aDef))*(opts.neutral?1:0.96),0.15,5.5);
+  let hs=poisson(xgA), as=poisson(xgB);
+  if(opts.mustDecide && hs===as){ if(chance(clamp(0.5+(uA.ATT-uB.ATT)/40,0.1,0.9))) hs++; else as++; }
+  A.xi.concat(B.xi).forEach(({p})=>{ p.caps=(p.caps||0)+1; });
+  const scorersOf=(side,n)=>{ const out=[]; for(let i=0;i<n;i++){ const sc=wpick(side,o=>(SCORE_W[o.slot]||0)*(0.5+n01(o.p.sho))*(hasTrait(o.p,"poacher")?1.5:1)); if(sc){ sc.p.intlG=(sc.p.intlG||0)+1; out.push(sc.p.name); } } return out; };
+  return { hs, as, aScorers:scorersOf(A.xi,hs), bScorers:scorersOf(B.xi,as) };
+}
+// Play the whole tournament: round-robin among the nations, top two contest a final.
+function playIntlTournament(G){
+  const nations = COUNTRIES.map((C,ci)=>({ ci, name:C.name, flag:C.flag,
+    xi: pickXIFrom(eligibleNationals(G,ci).slice(0,23), "4-3-3"), pld:0,w:0,d:0,l:0,pts:0,gf:0,ga:0 }));
+  const fx = [[0,1],[2,3],[0,2],[1,3],[0,3],[1,2]];
+  const group = [];
+  fx.forEach(([i,j])=>{ const a=nations[i], b=nations[j]; const r=simNationMatch(a,b,{});
+    a.pld++; b.pld++; a.gf+=r.hs; a.ga+=r.as; b.gf+=r.as; b.ga+=r.hs;
+    if(r.hs>r.as){ a.w++; a.pts+=3; b.l++; } else if(r.hs<r.as){ b.w++; b.pts+=3; a.l++; } else { a.d++; b.d++; a.pts++; b.pts++; }
+    group.push({ a:a.ci, b:b.ci, hs:r.hs, as:r.as }); });
+  const rank = nations.slice().sort((a,b)=>b.pts-a.pts || (b.gf-b.ga)-(a.gf-a.ga) || b.gf-a.gf);
+  const fr = simNationMatch(rank[0], rank[1], { mustDecide:true, neutral:true });
+  const champ = fr.hs>=fr.as ? rank[0] : rank[1];
+  const runner = champ===rank[0] ? rank[1] : rank[0];
+  G.intl = G.intl || { history:[], lastPlayed:null };
+  const entry = { season:G.season, champ:champ.ci, runnerUp:runner.ci,
+    table: rank.map(n=>({ ci:n.ci, pld:n.pld, w:n.w, d:n.d, l:n.l, gf:n.gf, ga:n.ga, pts:n.pts })),
+    group, final:{ a:rank[0].ci, b:rank[1].ci, hs:fr.hs, as:fr.as, aScorers:fr.aScorers, bScorers:fr.bScorers } };
+  G.intl.history.unshift(entry);
+  if(G.intl.history.length>60) G.intl.history.length=60;
+  G.intl.lastPlayed = G.season;
+  const userCountry = (G.clubs[G.userTeamId]||{}).country||0;
+  logNews(G, "intl", `🌐 ${COUNTRIES[champ.ci].flag} ${COUNTRIES[champ.ci].name} win the International Cup!`, null);
+  if(champ.ci===userCountry) logNews(G, "intl", `🎉 Your nation are international champions!`, G.userTeamId);
+  return entry;
+}
+
 /* ----------------------------- transfers ------------------------------- */
 // Buy a player from another club: pay the fee from your budget; he joins your squad.
 // Paid transfers (buy/sell) + AI bids only happen in the summer or January window.
@@ -1572,6 +1651,8 @@ function migrate(G){
     for(const k in defs){ if(G.settings[k]==null) G.settings[k]=defs[k]; }
     if(G.boardConfidence==null) G.boardConfidence=60;
     if(G.pendingSack==null) G.pendingSack=false;
+    if(!G.intl || typeof G.intl!=="object") G.intl={ history:[], lastPlayed:null };
+    if(!Array.isArray(G.intl.history)) G.intl.history=[];
     G.version = SAVE_VERSION;
   }catch(e){}
   return G;
@@ -1604,6 +1685,7 @@ function newGame(userTeamId, opts={}){
     freeAgents: [], transferOffers: [], news: [], champions: [], contChampions: [], awardHistory: [], hof: [],
     cups: null, contCup: null, lastMatch: null,
     finalsArchive: [], records: { players:{}, biggestWin:null },
+    intl: { history:[], lastPlayed:null },
     boardConfidence: 60, pendingSack: false, jobOffers: null,
     settings: { injuries:true, jobSecurity:true, morale:true, internationals:true, watchMatches:false },
   };
@@ -1642,6 +1724,7 @@ function App(){
     ["transfers","Transfers"],["fa","Free Agents"],["youth","Youth"],["finances","Finances"],
     ["awards","Awards"],["hof","Hall of Fame"],["records","Records"],["news","News"],
   ];
+  if(intlOn(G)) TABS.splice(13, 0, ["nation","Nation"]);
   if(G.phase==="offseason") TABS.push(["offseason","Offseason"]);
 
   return (
@@ -1692,6 +1775,7 @@ function App(){
         {tab==="finances" && <Finances G={G} commit={commit} tShow={tShow} />}
         {tab==="awards" && <AwardsView G={G} />}
         {tab==="hof" && <HallOfFame G={G} />}
+        {tab==="nation" && <NationView G={G} commit={commit} tShow={tShow} />}
         {tab==="records" && <RecordsView G={G} />}
         {tab==="news" && <NewsFeed G={G} />}
         {tab==="offseason" && <Offseason G={G} commit={commit} tShow={tShow} setTab={setTab} />}
@@ -2895,6 +2979,81 @@ function HallOfFame({G}){
   );
 }
 
+/* ----------------------------- nation (internationals) ----------------- */
+function NationView({G, commit, tShow}){
+  const user = G.clubs[G.userTeamId];
+  const myCi = user.country||0;
+  const C = COUNTRIES[myCi];
+  const squad = eligibleNationals(G, myCi);
+  const xi = pickXIFrom(squad.slice(0,23), "4-3-3");
+  const xiIds = new Set(xi.map(o=>o.p.id));
+  const others = squad.filter(p=>!xiIds.has(p.id)).slice(0,12);
+  const hist = (G.intl&&G.intl.history)||[];
+  const last = hist[0];
+  const offseason = G.phase==="offseason";
+  const playedThis = G.intl && G.intl.lastPlayed===G.season;
+  const play = () => { const e=playIntlTournament(G); commit(G); tShow(`${COUNTRIES[e.champ].name} win the International Cup!`); };
+  const ctxOpen = React.useContext(PlayerCtx);
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="font-semibold">{C.flag} {C.name} — National Team</div>
+        <div className="text-sm text-slate-400">You manage your nation in the international break each offseason. Squad is your best players by nationality, from any club.</div>
+      </Card>
+
+      <Card>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="font-semibold">International Cup</div>
+          {offseason
+            ? (playedThis ? <span className="text-xs text-emerald-300">Played this year — {last?COUNTRIES[last.champ].name+" won":""}</span>
+                          : <button onClick={play} className="px-3 py-1.5 rounded bg-emerald-500 text-slate-900 text-sm font-semibold">Play tournament</button>)
+            : <span className="text-xs text-slate-500">Available in the offseason (international break).</span>}
+        </div>
+        {last && (
+          <div className="mt-3">
+            <div className="text-xs text-slate-500 mb-1">{last.season} — group table</div>
+            <table className="w-full text-sm tnum mb-2">
+              <thead><tr className="text-slate-500 text-xs"><th className="text-left">Nation</th><th>Pld</th><th>W</th><th>D</th><th>L</th><th>GD</th><th>Pts</th></tr></thead>
+              <tbody>{last.table.map((t,i)=>(<tr key={i} className={t.ci===myCi?"text-emerald-300":""}><td className="text-left">{COUNTRIES[t.ci].flag} {COUNTRIES[t.ci].name}</td><td className="text-center">{t.pld}</td><td className="text-center">{t.w}</td><td className="text-center">{t.d}</td><td className="text-center">{t.l}</td><td className="text-center">{(t.gf-t.ga>=0?"+":"")+(t.gf-t.ga)}</td><td className="text-center font-semibold">{t.pts}</td></tr>))}</tbody>
+            </table>
+            <div className="text-xs text-slate-500 mb-1">Final</div>
+            <div className="text-sm">{COUNTRIES[last.final.a].flag} {COUNTRIES[last.final.a].name} <span className="font-bold tnum">{last.final.hs}-{last.final.as}</span> {COUNTRIES[last.final.b].flag} {COUNTRIES[last.final.b].name} <span className="text-amber-300">🏆 {COUNTRIES[last.champ].name}</span></div>
+          </div>
+        )}
+      </Card>
+
+      <Card className="p-0 overflow-x-auto">
+        <div className="p-3 font-semibold">Projected XI</div>
+        <table className="w-full text-sm">
+          <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="p-2 text-left">Slot</th><th className="p-2 text-left">Player</th><th className="p-2">Club</th><th className="p-2">OVR</th><th className="p-2">Caps</th><th className="p-2">Gls</th></tr></thead>
+          <tbody>
+            {xi.map(({p,slot})=>(
+              <tr key={p.id} className="border-b border-[#15203a] cursor-pointer hover:bg-[#16213a]" onClick={()=>ctxOpen&&ctxOpen(p)}>
+                <td className="p-2 text-left text-slate-400">{slot}</td>
+                <td className="p-2 text-left font-medium">{p.name}</td>
+                <td className="p-2 text-center text-slate-400">{p.teamId!=null&&G.clubs[p.teamId]?G.clubs[p.teamId].abbr:"—"}</td>
+                <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
+                <td className="p-2 text-center tnum">{p.caps||0}</td>
+                <td className="p-2 text-center tnum">{p.intlG||0}</td>
+              </tr>
+            ))}
+            {!xi.length && <tr><td colSpan="6" className="p-4 text-center text-slate-500">No eligible players for {C.name} yet.</td></tr>}
+          </tbody>
+        </table>
+      </Card>
+
+      {hist.length>0 && (
+        <Card>
+          <div className="font-semibold mb-2">🏆 Roll of honour</div>
+          <div className="space-y-1 text-sm max-h-56 overflow-y-auto">
+            {hist.map((h,i)=>(<div key={i} className="flex gap-2"><span className="text-slate-500 tnum w-12">{h.season}</span><span className={h.champ===myCi?"text-emerald-300":"text-slate-200"}>{COUNTRIES[h.champ].flag} {COUNTRIES[h.champ].name}</span></div>))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 /* ----------------------------- records / history ----------------------- */
 function RecordsView({G}){
   const user = G.clubs[G.userTeamId];
@@ -3176,7 +3335,7 @@ function PlayerModal({p, G, onClose}){
             <div className="font-bold text-lg">{nat&&<span className="mr-1" title={nat.name}>{nat.flag}</span>}{p.name}{scoutConf(p)<0.85&&<span className="text-[10px] text-slate-500 font-normal ml-2">scouted ~{Math.round(scoutConf(p)*100)}%</span>}{p.seasonDev?<span className={"text-[11px] font-semibold ml-2 "+(p.seasonDev>0?"text-emerald-400":"text-red-400")} title="OVR change this season">{p.seasonDev>0?"↗ +":"↘ "}{p.seasonDev}</span>:null}</div>
             <div className="text-sm text-slate-400">{posLabel(p)} · {p.age}y · {p.foot==="B"?"Both":p.foot==="L"?"Left":"Right"} footed{club?` · ${club.name}`:" · Free agent"}</div>
             <div className="text-xs text-slate-500 mt-0.5">Potential {scoutConf(p)>=0.85?p.pot:scoutedPot(p)+"~"} · Value {money(p.value)} · Wage {money(p.salary)}/yr{p.years>0?` · ${p.years}y left`:""}{p.fitness!=null&&p.fitness<100?` · ${p.fitness}% fit`:""}</div>
-            <div className="text-xs text-slate-500 mt-0.5">{p.peakOvr?`Peak OVR ${p.peakOvr}`:""}{p.debutSeason!=null?` · Debut ${p.debutSeason}`:""}{p.hof?" · 🏅 Hall of Fame":""}{(p.awards||0)>0?` · ${p.awards}× POTS`:""}{(p.golden||0)>0?` · ${p.golden}× Golden Boot`:""}</div>
+            <div className="text-xs text-slate-500 mt-0.5">{p.peakOvr?`Peak OVR ${p.peakOvr}`:""}{p.debutSeason!=null?` · Debut ${p.debutSeason}`:""}{p.hof?" · 🏅 Hall of Fame":""}{(p.awards||0)>0?` · ${p.awards}× POTS`:""}{(p.golden||0)>0?` · ${p.golden}× Golden Boot`:""}{(p.caps||0)>0?` · ${p.caps} caps`:""}{(p.intlG||0)>0?` · ${p.intlG} intl goals`:""}</div>
             {(formTag(p.form)||moraleTag(p.morale))&&<div className="text-xs mt-0.5">{formTag(p.form)&&<span className={formTag(p.form).c}>{formTag(p.form).t}</span>}{formTag(p.form)&&moraleTag(p.morale)&&<span className="text-slate-600"> · </span>}{moraleTag(p.morale)&&<span className={moraleTag(p.morale).c}>{moraleTag(p.morale).t}</span>}</div>}
             {p.traits&&p.traits.length>0&&<div className="mt-1 flex flex-wrap gap-1">{p.traits.map(t=>TRAITS[t]&&<span key={t} className={"text-[11px] px-1.5 py-0.5 rounded "+(TRAITS[t].bad?"bg-red-900/40 text-red-300":"bg-[#16213a] text-slate-300")} title={TRAITS[t].bad?"Negative trait":"Special trait"}>{TRAITS[t].emoji} {TRAITS[t].name}</span>)}</div>}
             {(isInjured(p)||isSuspended(p))&&<div className="text-xs mt-0.5">{isInjured(p)&&<span className="text-red-400">✚ {p.injury.type} ({p.injury.weeks}w)</span>}{isInjured(p)&&isSuspended(p)&&" · "}{isSuspended(p)&&<span className="text-orange-400">⛔ banned {p.susp} match{p.susp>1?"es":""}</span>}</div>}
