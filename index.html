@@ -1516,7 +1516,7 @@ function App(){
     ["hub","Hub"],["squad","Squad"],["tactics","Tactics"],["table","Table"],
     ["players","Players"],["stats","Leaders"],["cup","Cup"],["contcup","Champions Cup"],["fixtures","Fixtures"],
     ["transfers","Transfers"],["fa","Free Agents"],["youth","Youth"],["finances","Finances"],
-    ["awards","Awards"],["hof","Hall of Fame"],["news","News"],
+    ["awards","Awards"],["hof","Hall of Fame"],["records","Records"],["news","News"],
   ];
   if(G.phase==="offseason") TABS.push(["offseason","Offseason"]);
 
@@ -1568,6 +1568,7 @@ function App(){
         {tab==="finances" && <Finances G={G} commit={commit} tShow={tShow} />}
         {tab==="awards" && <AwardsView G={G} />}
         {tab==="hof" && <HallOfFame G={G} />}
+        {tab==="records" && <RecordsView G={G} />}
         {tab==="news" && <NewsFeed G={G} />}
         {tab==="offseason" && <Offseason G={G} commit={commit} tShow={tShow} setTab={setTab} />}
       </main>
@@ -2757,6 +2758,127 @@ function HallOfFame({G}){
           </Card>
         ))}
       </div>
+    </div>
+  );
+}
+
+/* ----------------------------- records / history ----------------------- */
+function RecordsView({G}){
+  const user = G.clubs[G.userTeamId];
+  const [final, setFinal] = useState(null);
+  const [country, setCountry] = useState(user.country||0);
+  const recPlayers = Object.values((G.records&&G.records.players)||{});
+  const flag = nat => nat!=null && COUNTRIES[nat] ? COUNTRIES[nat].flag+" " : "";
+  const lead = (key, n=12) => recPlayers.filter(p=>(p[key]||0)>0).sort((a,b)=>(b[key]||0)-(a[key]||0)).slice(0,n);
+  const champs = (G.champions||[]).filter(c=>c.country===country);
+  const contChamps = G.contChampions||[];
+  const finals = G.finalsArchive||[];
+  const bw = G.records && G.records.biggestWin;
+  const honours = (user.honours||[]).slice().reverse();
+  const hCount = t => honours.filter(h=>h.type===t).length;
+  const LeaderTable = ({title, rows, valKey, valLabel}) => (
+    <Card className="p-0 overflow-x-auto">
+      <div className="p-3 font-semibold">{title}</div>
+      <table className="w-full text-sm">
+        <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="p-2 text-left">#</th><th className="p-2 text-left">Player</th><th className="p-2">Pos</th><th className="p-2">Club</th><th className="p-2">{valLabel}</th></tr></thead>
+        <tbody>
+          {rows.map((p,i)=>(
+            <tr key={p.id} className="border-b border-[#15203a]">
+              <td className="p-2 text-left tnum text-slate-500">{i+1}</td>
+              <td className="p-2 text-left">{flag(p.nat)}{p.name}{p.hof&&<span className="ml-1" title="Hall of Fame">🏅</span>}{p.retired&&<span className="ml-1 text-[10px] text-slate-500">ret.</span>}</td>
+              <td className="p-2 text-center text-slate-400">{p.pos}</td>
+              <td className="p-2 text-center text-slate-400">{p.club}</td>
+              <td className="p-2 text-center tnum font-bold">{p[valKey]}</td>
+            </tr>
+          ))}
+          {!rows.length && <tr><td colSpan="5" className="p-4 text-center text-slate-500">Nothing recorded yet — play some seasons.</td></tr>}
+        </tbody>
+      </table>
+    </Card>
+  );
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="font-semibold">📚 Records & History</div>
+        <div className="text-sm text-slate-400">Every champion, every saved final, and all-time leaders that persist even after players retire.</div>
+      </Card>
+
+      <Card>
+        <div className="font-semibold mb-2">🏆 {user.name} trophy cabinet</div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2 text-center">
+          {[["league","Leagues"],["cup","Cups"],["continental","Continental"],["promo","Promotions"]].map(([t,l])=>(
+            <div key={t} className="bg-[#0d1526] rounded-lg p-2"><div className="text-2xl font-black tnum">{hCount(t)}</div><div className="text-[11px] text-slate-400">{l}</div></div>
+          ))}
+        </div>
+        <div className="space-y-1 text-sm max-h-48 overflow-y-auto">
+          {honours.map((h,i)=>(<div key={i} className="text-slate-300"><span className="text-slate-500 tnum mr-2">{h.season}</span>{h.label}</div>))}
+          {!honours.length && <div className="text-slate-500">No trophies yet — go win something.</div>}
+        </div>
+      </Card>
+
+      {bw && (
+        <Card>
+          <div className="font-semibold mb-1">💥 Biggest league win on record</div>
+          <div className="text-sm text-slate-300"><span className="font-semibold">{bw.winner}</span> {bw.hs}-{bw.as} {bw.loser} <span className="text-slate-500">· {bw.season}</span></div>
+        </Card>
+      )}
+
+      <div className="grid lg:grid-cols-2 gap-3">
+        <LeaderTable title="⚽ All-time top scorers" rows={lead("G")} valKey="G" valLabel="Goals" />
+        <LeaderTable title="👟 Most appearances" rows={lead("App")} valKey="App" valLabel="Apps" />
+        <LeaderTable title="🅰️ Most assists" rows={lead("A")} valKey="A" valLabel="Assists" />
+        <LeaderTable title="⭐ Most MOTM awards" rows={lead("MOTM")} valKey="MOTM" valLabel="MOTM" />
+      </div>
+
+      <Card>
+        <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+          <div className="font-semibold">👑 League champions</div>
+          <div className="flex gap-1 flex-wrap">
+            {COUNTRIES.map((C,ci)=>(
+              <button key={ci} onClick={()=>setCountry(ci)} className={"px-2 py-1 rounded text-xs "+(country===ci?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>{C.flag}</button>
+            ))}
+          </div>
+        </div>
+        <div className="space-y-1 text-sm max-h-64 overflow-y-auto">
+          {champs.map((c,i)=>(<div key={i} className="flex gap-2"><span className="text-slate-500 tnum w-12">{c.season}</span><span className="text-slate-200">{G.clubs[c.id]?G.clubs[c.id].name:c.abbr}</span></div>))}
+          {!champs.length && <div className="text-slate-500">No champions recorded yet for {COUNTRIES[country].name}.</div>}
+        </div>
+      </Card>
+
+      <Card>
+        <div className="font-semibold mb-2">🌍 {CONT_CUP_NAME} winners</div>
+        <div className="space-y-1 text-sm max-h-48 overflow-y-auto">
+          {contChamps.map((c,i)=>(<div key={i} className="flex gap-2"><span className="text-slate-500 tnum w-12">{c.season}</span><span className="text-slate-200">{G.clubs[c.id]?G.clubs[c.id].name:c.abbr}</span></div>))}
+          {!contChamps.length && <div className="text-slate-500">No continental winners recorded yet.</div>}
+        </div>
+      </Card>
+
+      <Card>
+        <div className="font-semibold mb-2">📼 Saved finals</div>
+        <div className="text-xs text-slate-500 mb-2">Tap a final to reopen its full box score.</div>
+        <div className="space-y-1">
+          {finals.map((m,i)=>(
+            <button key={i} onClick={()=>setFinal(m)} className="w-full text-left flex items-center gap-2 text-sm bg-[#0d1526] hover:bg-[#16213a] rounded-lg px-3 py-2">
+              <span className="text-slate-500 tnum w-12">{m.season}</span>
+              <span className="flex-1">{m.homeName} <span className="font-bold tnum">{m.hs}-{m.as}</span> {m.awayName}</span>
+              <span className="text-[11px] text-slate-500">{m.comp}</span>
+            </button>
+          ))}
+          {!finals.length && <div className="text-slate-500 text-sm">No finals saved yet — win or lose a cup final and it'll appear here.</div>}
+        </div>
+      </Card>
+
+      {final && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center p-4" onClick={()=>setFinal(null)}>
+          <div className="bg-[#101a30] border border-[#1d2940] rounded-xl w-full max-w-lg max-h-[85vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
+            <div className="p-3 border-b border-[#1d2940] flex items-center justify-between sticky top-0 bg-[#101a30]">
+              <div className="font-semibold">{final.comp} Final · {final.season}</div>
+              <button onClick={()=>setFinal(null)} className="text-slate-400">✕</button>
+            </div>
+            <div className="p-4"><BoxScore m={final} G={G} /></div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
