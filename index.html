@@ -1484,6 +1484,17 @@ function OvrPill({v}){
   return <span className={"inline-block w-8 text-center rounded font-bold text-xs py-0.5 "+c}>{v}</span>;
 }
 function PotPill({v}){ return <span className="inline-block w-8 text-center rounded font-semibold text-xs py-0.5 border border-amber-500/50 text-amber-300/90" title="Potential">{v}</span>; }
+// ---- Scouting fog: unproven players (youth, low pro experience) show a SCOUTED rating that can be
+// off and converges to the truth as they rack up appearances. Deterministic per id; AI/sim use TRUE.
+function scoutApps(p){ return ((p.career&&p.career.App)||0) + ((p.stats&&p.stats.App)||0); }
+function scoutConf(p){ if(!p) return 1; let c=clamp(scoutApps(p)/55, 0, 1); if(p.youth) c=Math.min(c,0.30); c=clamp(c+(p.age-17)*0.025, 0, 1); return c; }
+function scoutBias(p){ return (mulberry32((p.id>>>0)||1)()*2-1)*8; }
+function scoutedOvr(p){ const c=scoutConf(p); return clamp(Math.round(p.ovr + scoutBias(p)*(1-c)), 20, 99); }
+function scoutedPot(p){ const c=scoutConf(p); return clamp(Math.round(p.pot + scoutBias(p)*(1-c)*1.1), 20, 99); }
+function ScoutOvrPill({p}){ const c=scoutConf(p); if(c>=0.85) return <OvrPill v={p.ovr} />;
+  return <span className="inline-flex items-center" title={`Scouted ~${Math.round(c*100)}% — firms up with appearances`}><OvrPill v={scoutedOvr(p)} /><span className="text-slate-500 text-[9px] ml-0.5">~</span></span>; }
+function ScoutPotPill({p}){ const c=scoutConf(p); if(c>=0.85) return <PotPill v={p.pot} />;
+  return <span className="inline-flex items-center" title={`Scouted ceiling ~${Math.round(c*100)}%`}><PotPill v={scoutedPot(p)} /><span className="text-amber-500/60 text-[9px] ml-0.5">~</span></span>; }
 function PName({p, className=""}){
   const open = React.useContext(PlayerCtx);
   return <button onClick={()=>open&&open(p)} className={"text-left hover:text-emerald-300 "+className}>{p.name}</button>;
@@ -2283,7 +2294,7 @@ function Transfers({G, commit, tShow}){
                     <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
                     <td className="p-2 text-center text-slate-400">{G.clubs[p.teamId].abbr}</td>
                     <td className="p-2 text-center"><PosTag p={p} /></td>
-                    <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
+                    <td className="p-2 text-center"><ScoutOvrPill p={p} /></td>
                     <td className="p-2 text-center tnum">{p.age}</td>
                     <td className="p-2 text-center tnum">{money(feeFor(p))}</td>
                     <td className="p-2 text-center"><button onClick={()=>doBuy(p)} disabled={!windowOpen||user.budget<feeFor(p)} className={"px-2 py-1 rounded text-xs font-semibold "+((!windowOpen||user.budget<feeFor(p))?"bg-[#16213a] text-slate-500":"bg-emerald-500 text-slate-900")}>Buy</button></td>
@@ -2353,7 +2364,7 @@ function Transfers({G, commit, tShow}){
                   <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
                   <td className="p-2 text-center text-slate-400">{G.clubs[p.teamId].abbr}</td>
                   <td className="p-2 text-center"><PosTag p={p} /></td>
-                  <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
+                  <td className="p-2 text-center"><ScoutOvrPill p={p} /></td>
                   <td className="p-2 text-center tnum">{p.age}</td>
                   <td className="p-2 text-center"><button onClick={()=>doLoanIn(p)} disabled={!windowOpen} className={"px-2 py-1 rounded text-xs font-semibold "+(windowOpen?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-500")}>Loan</button></td>
                 </tr>
@@ -2399,7 +2410,7 @@ function FreeAgents({G, commit, tShow}){
               <tr key={p.id} className="border-b border-[#15203a]">
                 <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
                 <td className="p-2 text-center"><PosTag p={p} /></td>
-                <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
+                <td className="p-2 text-center"><ScoutOvrPill p={p} /></td>
                 <td className="p-2 text-center tnum">{p.age}</td>
                 <td className="p-2 text-center tnum">{money(wageFor(p))}</td>
                 <td className="p-2 text-center"><button onClick={()=>sign(p)} className="px-2 py-1 rounded bg-emerald-500 text-slate-900 text-xs font-semibold">Sign</button></td>
@@ -2641,7 +2652,7 @@ function Offseason({G, commit, tShow, setTab}){
         <Card>
           <div className="font-semibold mb-2">🎓 Last youth intake</div>
           <div className="space-y-1 text-sm">
-            {intake.map(p=>(<div key={p.id} className="flex items-center gap-2"><span className="text-slate-400 w-10">{p.pos}</span><span className="flex-1">{p.name}</span><OvrPill v={p.ovr} /><PotPill v={p.pot} /></div>))}
+            {intake.map(p=>(<div key={p.id} className="flex items-center gap-2"><span className="text-slate-400 w-10">{p.pos}</span><span className="flex-1">{p.name}</span><ScoutOvrPill p={p} /><ScoutPotPill p={p} /></div>))}
           </div>
         </Card>
       )}
@@ -2722,11 +2733,11 @@ function PlayerModal({p, G, onClose}){
     <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center p-4" onClick={onClose}>
       <div className="bg-[#101a30] border border-[#1d2940] rounded-xl w-full max-w-lg max-h-[85vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
         <div className="p-4 border-b border-[#1d2940] flex items-start gap-3 sticky top-0 bg-[#101a30]">
-          <OvrPill v={p.ovr} />
+          <ScoutOvrPill p={p} />
           <div className="flex-1">
-            <div className="font-bold text-lg">{p.name}</div>
+            <div className="font-bold text-lg">{p.name}{scoutConf(p)<0.85&&<span className="text-[10px] text-slate-500 font-normal ml-2">scouted ~{Math.round(scoutConf(p)*100)}%</span>}{p.seasonDev?<span className={"text-[11px] font-semibold ml-2 "+(p.seasonDev>0?"text-emerald-400":"text-red-400")} title="OVR change this season">{p.seasonDev>0?"↗ +":"↘ "}{p.seasonDev}</span>:null}</div>
             <div className="text-sm text-slate-400">{posLabel(p)} · {p.age}y · {p.foot==="B"?"Both":p.foot==="L"?"Left":"Right"} footed{club?` · ${club.name}`:" · Free agent"}</div>
-            <div className="text-xs text-slate-500 mt-0.5">Potential {p.pot} · Value {money(p.value)} · Wage {money(p.salary)}/yr{p.years>0?` · ${p.years}y left`:""}</div>
+            <div className="text-xs text-slate-500 mt-0.5">Potential {scoutConf(p)>=0.85?p.pot:scoutedPot(p)+"~"} · Value {money(p.value)} · Wage {money(p.salary)}/yr{p.years>0?` · ${p.years}y left`:""}{p.fitness!=null&&p.fitness<100?` · ${p.fitness}% fit`:""}</div>
             {(isInjured(p)||isSuspended(p))&&<div className="text-xs mt-0.5">{isInjured(p)&&<span className="text-red-400">✚ {p.injury.type} ({p.injury.weeks}w)</span>}{isInjured(p)&&isSuspended(p)&&" · "}{isSuspended(p)&&<span className="text-orange-400">⛔ banned {p.susp} match{p.susp>1?"es":""}</span>}</div>}
           </div>
           <button onClick={onClose} className="text-slate-400">✕</button>
