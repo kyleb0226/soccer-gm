@@ -739,8 +739,8 @@ function userCup(G){ const c=G.clubs[G.userTeamId]; return (G.cups||[]).find(x=>
 // alongside the leagues. Qualifiers: each country's top 3 by LAST season's finish
 // PLUS a 4th "cup route" berth (national cup winner -> runner-up -> next finisher).
 const CONT_CUP_NAME = "Continental Champions Cup";
-const CONT_ORDER = ["R16","QF","SF","Final"];
-const CONT_MD = { 9:"R16", 17:"QF", 25:"SF", 33:"Final" };
+const CONT_ORDER = ["QF","SF","Final"];   // knockout phase order (groups handled separately)
+const CONT_MD = { 5:"G1", 11:"G2", 17:"G3", 24:"QF", 30:"SF", 36:"Final" };
 // Rank one country's top-flight clubs by last completed season's finish (best first);
 // newly promoted clubs (no top-flight history) and ties fall back to current strength.
 function contRankCountry(G, country){
@@ -775,21 +775,64 @@ function seedBracket16(pool){
   const order = [1,16,8,9,5,12,4,13,3,14,6,11,7,10,2,15];
   return order.map(s=>pool[s-1]).filter(x=>x!=null);
 }
+// Continental cup = GROUP STAGE → KNOCKOUT. Each nation sends 4 qualifiers; the 16 are drawn into
+// 4 groups of 4 so every group has exactly ONE club from each country and one from each seeding pot.
+// Single round-robin (3 matchdays); the top 2 of each group advance to an 8-team knockout (QF→Final).
+const CONT_GROUP_FX = [ [[0,3],[1,2]], [[0,2],[3,1]], [[0,1],[2,3]] ];   // round-robin of 4
 function initContCup(G){
-  // Gather each country's four qualifiers grouped by qualification rank, so the
-  // four national champions are the top seeds (1-4), the four runners-up next, etc.
-  const perCountry = COUNTRIES.map((_,ci)=>countryContQualifiers(G, ci));
-  const pool = [], cupRoutes = [];
-  perCountry.forEach(q=>{ if(q.cupRoute!=null) cupRoutes.push(q.cupRoute); });
-  for(let qp=0; qp<4; qp++){
-    perCountry.forEach(q=>{ if(q.ids[qp]!=null) pool.push(q.ids[qp]); });
+  const perCountry = COUNTRIES.map((_,ci)=>countryContQualifiers(G, ci));   // {ids:[4 by rank], cupRoute}
+  const nC = COUNTRIES.length;
+  const cupRoutes=[]; perCountry.forEach(q=>{ if(q.cupRoute!=null) cupRoutes.push(q.cupRoute); });
+  const seeds={}; perCountry.forEach(q=>q.ids.forEach((id,p)=>{ if(id!=null) seeds[id]=p+1; }));   // pot = rank
+  const groups=[];
+  for(let g=0; g<4; g++){
+    const teams=[];
+    for(let c=0;c<nC;c++){ const id = perCountry[c] && perCountry[c].ids[(c+g)%4]; if(id!=null) teams.push(id); }  // one per country + one per pot
+    const table={}; teams.forEach(id=>table[id]={pld:0,w:0,d:0,l:0,gf:0,ga:0,pts:0});
+    groups.push({ name:String.fromCharCode(65+g), teams, table, results:[] });
   }
-  const seeds = {}; pool.forEach((id,i)=>seeds[id]=i+1);
-  G.contCup = {
-    alive: seedBracket16(pool), round: "R16", results: {}, history: [],
-    winner: null, runnerUp: null, seeds, qualifiers: pool.slice(),
-    cupRoutes, season: G.season,
-  };
+  const qualifiers=[]; perCountry.forEach(q=>q.ids.forEach(id=>{ if(id!=null) qualifiers.push(id); }));
+  G.contCup = { season:G.season, phase:"group", groupMd:0, round:"G1", groups,
+    alive:[], results:{}, history:[], winner:null, runnerUp:null, seeds, qualifiers, cupRoutes };
+}
+function contGroupOrder(grp){
+  return grp.teams.slice().sort((x,y)=>{ const A=grp.table[x], B=grp.table[y];
+    return B.pts-A.pts || (B.gf-B.ga)-(A.gf-A.ga) || B.gf-A.gf; });
+}
+function playContGroupRound(G, cup){
+  const md = cup.groupMd;
+  cup.groups.forEach(grp=>{
+    (CONT_GROUP_FX[md]||[]).forEach(([ai,bi])=>{
+      const aId=grp.teams[ai], bId=grp.teams[bi]; if(aId==null||bId==null) return;
+      const a=G.clubs[aId], b=G.clubs[bId];
+      ensureXI(a,G.players); ensureXI(b,G.players);
+      const box=simMatch(a,b,G.players,{cup:true, G});   // group games can draw
+      const ta=grp.table[aId], tb=grp.table[bId];
+      ta.pld++; tb.pld++; ta.gf+=box.hs; ta.ga+=box.as; tb.gf+=box.as; tb.ga+=box.hs;
+      if(box.hs>box.as){ ta.w++; ta.pts+=3; tb.l++; }
+      else if(box.hs<box.as){ tb.w++; tb.pts+=3; ta.l++; }
+      else { ta.d++; tb.d++; ta.pts++; tb.pts++; }
+      grp.results.push({ md, home:aId, away:bId, hs:box.hs, as:box.as });
+    });
+  });
+}
+function buildContKnockout(G, cup){
+  const ord = cup.groups.map(contGroupOrder);
+  const w = ord.map(o=>o[0]), r = ord.map(o=>o[1]);   // winners + runners-up [A,B,C,D]
+  // QF: 1A-2B · 1C-2D · 1B-2A · 1D-2C (a group winner can't meet his own runner-up early)
+  cup.alive = [ w[0],r[1], w[2],r[3], w[1],r[0], w[3],r[2] ].filter(x=>x!=null);
+  cup.phase = "ko"; cup.round = "QF";
+}
+function playContCupRound(G){
+  const cup=G.contCup; if(!cup || cup.winner!=null) return;
+  if(cup.phase==="group"){
+    playContGroupRound(G, cup);
+    cup.groupMd++;
+    if(cup.groupMd>=3) buildContKnockout(G, cup);
+    else cup.round = "G"+(cup.groupMd+1);
+  } else {
+    playKnockoutRound(G, cup, CONT_ORDER);
+  }
 }
 
 /* ----------------------------- sim loop -------------------------------- */
@@ -816,7 +859,7 @@ function simRound(G){
   if(CUP_MD[G.day+1] && G.cups){ playCupRound(G); }
   // continental champions cup round on its matchday
   if(CONT_MD[G.day+1] && G.contCup && G.contCup.winner==null){
-    playKnockoutRound(G, G.contCup, CONT_ORDER);
+    playContCupRound(G);
     if(G.contCup.winner!=null){
       const wc=G.clubs[G.contCup.winner];
       logNews(G,"cup",`🏆 ${wc.name} are crowned champions of ${CONT_CUP_NAME}!`, wc.id);
@@ -1205,7 +1248,7 @@ function migrate(G){
     G.clubs.forEach(c=>{ if(c.country==null) c.country=0; });
     if(!Array.isArray(G.cups)){ if(G.cup){ G.cup.country=0; G.cups=[G.cup]; } else initCups(G); delete G.cup; }
     G.cups.forEach(cup=>{ if(cup.country==null) cup.country=0; if(cup.runnerUp===undefined) cup.runnerUp=null; });
-    if(!G.contCup) initContCup(G);
+    if(!G.contCup || !G.contCup.phase) initContCup(G);   // (re)build into the group-stage format
     // backfill newer per-player stat fields (shots, key passes, xG, saves, bans)
     const fill = s => { if(s){ ["SH","SOT","KP","xG","Sv"].forEach(k=>{ if(s[k]==null) s[k]=0; }); } };
     Object.values(G.players||{}).forEach(p=>{ fill(p.stats); fill(p.career); if(p.susp==null) p.susp=0; if(p.ycCount==null) p.ycCount=0; });
@@ -1938,7 +1981,7 @@ function CupView({G}){
 function ContCupView({G}){
   const cup = G.contCup;
   if(!cup) return <Card>The {CONT_CUP_NAME} has not started yet.</Card>;
-  const roundLabel = { R16:"Round of 16", QF:"Quarter-finals", SF:"Semi-finals", Final:"Final" };
+  const roundLabel = { G1:"Group Stage — MD1", G2:"Group Stage — MD2", G3:"Group Stage — MD3", QF:"Quarter-finals", SF:"Semi-finals", Final:"Final" };
   const seedOf = id => (cup.seeds||{})[id];
   const clubLine = (id, win) => {
     const c = G.clubs[id]; if(!c) return null;
@@ -1958,6 +2001,30 @@ function ContCupView({G}){
             : `Current round: ${roundLabel[cup.round]||cup.round} · ${cup.alive.length} clubs left`}
         </div>
       </Card>
+
+      {cup.groups && <Card>
+        <div className="font-semibold mb-1">Group Stage</div>
+        <div className="text-xs text-slate-500 mb-3">Four groups of four — one club from each nation per group. Top 2 advance to the quarter-finals.</div>
+        <div className="grid sm:grid-cols-2 gap-3">
+          {cup.groups.map((grp,gi)=>{
+            const ord = contGroupOrder(grp);
+            return <div key={gi} className="bg-[#13203a] rounded p-2">
+              <div className="text-xs font-semibold text-indigo-300 mb-1">Group {grp.name}</div>
+              <table className="w-full text-xs tnum"><tbody>
+                {ord.map((id,pos)=>{ const c=G.clubs[id], t=grp.table[id]; const adv=pos<2;
+                  return <tr key={id} className={(id===G.userTeamId?"text-emerald-300 ":"")+(adv?"":"text-slate-500")}>
+                    <td className="text-left pr-1">{adv?"▸":" "} {c?c.abbr:"?"}</td>
+                    <td className="text-center w-6">{t.pld}</td>
+                    <td className="text-center w-10 text-slate-500">{t.w}-{t.d}-{t.l}</td>
+                    <td className="text-center w-7">{(t.gf-t.ga>=0?"+":"")+(t.gf-t.ga)}</td>
+                    <td className="text-center w-6 font-bold">{t.pts}</td>
+                  </tr>;
+                })}
+              </tbody></table>
+            </div>;
+          })}
+        </div>
+      </Card>}
 
       {CONT_ORDER.map(r=>{
         const ties = (cup.results||{})[r];
