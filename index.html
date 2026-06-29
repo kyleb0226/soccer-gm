@@ -1542,6 +1542,29 @@ function playIntlTournament(G){
   return entry;
 }
 
+/* ----------------------------- preseason ------------------------------- */
+// Optional preseason tour played in the offseason: four friendlies for flavour,
+// tour income, and a small morale/form lift heading into the new campaign.
+// Friendlies don't touch league tables or season stats.
+function playPreseason(G){
+  const user = G.clubs[G.userTeamId];
+  const opps = G.clubs.filter(c=>c.id!==user.id).slice().sort(()=>_rng()-0.5).slice(0,4);
+  const results = opps.map(o=>{
+    const sh=clubStrength(user,G.players), sa=clubStrength(o,G.players);
+    const xgH=clamp(1.4*Math.exp(0.05*(sh-sa)),0.3,4.5), xgA=clamp(1.4*Math.exp(0.05*(sa-sh)),0.3,4.5);
+    return { opp:o.abbr, oppName:o.name, hs:poisson(xgH), as:poisson(xgA) };
+  });
+  const income = round(stadiumCapacity(user)/1000 * (user.div===0?0.9:0.5) *10)/10;
+  user.budget = round((user.budget + income)*10)/10;
+  Object.values(G.players).filter(p=>p.teamId===user.id).forEach(p=>{
+    p.morale = clamp((p.morale==null?70:p.morale)+5, 0, 100);
+    p.form = clamp((p.form==null?6.7:p.form)+0.3, 4, 10);
+  });
+  G.preseason = { season:G.season, results, income };
+  logNews(G, "finance", `🏝️ Preseason tour earned ${money(income)} and sharpened the squad.`, user.id);
+  return G.preseason;
+}
+
 /* ----------------------------- transfers ------------------------------- */
 // Buy a player from another club: pay the fee from your budget; he joins your squad.
 // Paid transfers (buy/sell) + AI bids only happen in the summer or January window.
@@ -1714,14 +1737,20 @@ function generateJobOffers(G, kind){
   return pool.slice(0,3).map(c=>({ id:c.id, name:c.name, div:c.div, country:c.country||0, str:clubStrength(c,G.players), kind }));
 }
 // Unhappy players agitate to leave; a settled one withdraws. Gated by morale setting.
+// A good player left out of the XI grows restless ("play me or sell me").
 function processTransferRequests(G){
   if(!G.settings || G.settings.morale===false) return;
-  Object.values(G.players).filter(p=>p.teamId===G.userTeamId && !p.youth).forEach(p=>{
+  if(G.day<6) return;   // give the season a few games before anyone agitates
+  const user = G.clubs[G.userTeamId];
+  const inXI = new Set(user.xi||[]);
+  Object.values(G.players).filter(p=>p.teamId===user.id && !p.youth).forEach(p=>{
+    const benchedStar = p.ovr>=70 && !inXI.has(p.id) && !isInjured(p);
+    if(benchedStar){ p.morale = clamp((p.morale==null?60:p.morale)-2, 0, 100); }   // wants first-team football
     if(p.wantsOut){
       p.morale = clamp((p.morale==null?60:p.morale)-1, 0, 100);   // unrest festers until resolved
-      if((p.morale||60) >= 58){ p.wantsOut=false; logNews(G,"morale",`🙂 ${p.name} has settled and withdrawn his transfer request.`, G.userTeamId); }
-    } else if((p.morale==null?60:p.morale) < 26 && p.ovr>=60 && chance(0.06)){
-      p.wantsOut=true; logNews(G,"morale",`📨 ${p.name} has handed in a transfer request — sell him or win him back with game time.`, G.userTeamId);
+      if((p.morale||60) >= 60){ p.wantsOut=false; logNews(G,"morale",`🙂 ${p.name} has settled and withdrawn his transfer request.`, user.id); }
+    } else if(((p.morale==null?60:p.morale) < 32 || (benchedStar && (p.morale||60)<45)) && p.ovr>=64 && chance(0.07)){
+      p.wantsOut=true; logNews(G,"morale",`📨 ${p.name} has handed in a transfer request — sell him or win him back with game time.`, user.id);
     }
   });
 }
@@ -3620,6 +3649,20 @@ function Offseason({G, commit, tShow, setTab}){
           <button onClick={()=>setTab("fa")} className="px-3 py-1.5 rounded bg-[#16213a] text-slate-200 text-sm">Free Agents</button>
           <button onClick={()=>setTab("squad")} className="px-3 py-1.5 rounded bg-[#16213a] text-slate-200 text-sm">Renew Contracts</button>
         </div>
+      </Card>
+      <Card>
+        <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+          <div className="font-semibold">🏝️ Preseason tour <span className="text-slate-500 text-xs font-normal">(optional)</span></div>
+          {(!G.preseason || G.preseason.season!==G.season)
+            ? <button onClick={()=>{ const r=playPreseason(G); commit(G); tShow(`Preseason done — earned ${money(r.income)}`); }} className="px-3 py-1.5 rounded bg-emerald-500 text-slate-900 text-sm font-semibold">Play tour</button>
+            : <span className="text-xs text-emerald-300">Completed · +{money(G.preseason.income)}</span>}
+        </div>
+        <div className="text-sm text-slate-400">Four friendlies for tour income and a small morale & sharpness boost before the season. No effect on league or stats.</div>
+        {G.preseason && G.preseason.season===G.season && (
+          <div className="mt-2 space-y-1 text-sm tnum">
+            {G.preseason.results.map((m,i)=>(<div key={i} className="flex gap-2"><span className="flex-1">{user.abbr} {m.hs}-{m.as} {m.opp}</span><span className={"text-xs "+(m.hs>m.as?"text-emerald-400":m.hs<m.as?"text-red-400":"text-slate-500")}>{m.hs>m.as?"W":m.hs<m.as?"L":"D"}</span></div>))}
+          </div>
+        )}
       </Card>
       <Card>
         <div className="font-semibold mb-2">Start next season</div>
