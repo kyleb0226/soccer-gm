@@ -810,6 +810,8 @@ function simRound(G){
   });
   // injuries heal a week; league suspensions tick down one match
   Object.values(G.players).forEach(p=>{ if(isInjured(p)) p.injury.weeks--; if(isSuspended(p)) p.susp--; });
+  // youth 5v5 game time (drives prospect development)
+  accrueYouth(G);
   // domestic cup round (all national cups) on its matchday
   if(CUP_MD[G.day+1] && G.cups){ playCupRound(G); }
   // continental champions cup round on its matchday
@@ -972,6 +974,9 @@ function developPlayer(p){
   else if(p.age<=27) delta = room>0 ? rint(0,3) : 0;
   else if(p.age<=30) delta = -rint(0,1);
   else delta = -rint(1,3);
+  // youth game time accelerates teenage development
+  if(p.age<=20 && room>0){ const ya=p.youthApps||0; delta += ya>=18?2 : ya>=8?1 : 0; }
+  p.youthApps = 0; p.youthG = 0;
   if(delta>0) delta = Math.min(delta, room);   // never overshoot potential
   // OVR is a weighted average of attributes, so bump attributes until the OVR
   // actually moves by ~delta (the old code added raw points that averaged away to ~0).
@@ -1032,6 +1037,45 @@ function refillSquad(G, club){
   guard=0; while(has(ATT)<5 && guard++<40) add(pick(["ST","RW","LW"]));
   guard=0; while(squad.length<23 && guard++<40) add(pick(ALL_POS));
   autoPickXI(club, G.players);
+}
+
+/* ----------------------------- youth (5v5) ----------------------------- */
+// A lightweight youth setup: every club fields a small-sided youth side of its
+// academy prospects (age <= 19). Game time accrues (youthApps) and accelerates
+// their development at the season rollover. The user's youth game is simmed in
+// detail each matchday for flavour; AI clubs just bank the game time.
+function youthProspects(G, clubId){
+  return Object.values(G.players).filter(p=>p.teamId===clubId && p.age<=19)
+    .sort((a,b)=> b.pot-a.pot || b.ovr-a.ovr);
+}
+// The 5-a-side youth XI: best keeper + four best outfielders.
+function youthFive(G, clubId){
+  const pros = youthProspects(G, clubId);
+  const gk = pros.find(p=>p.pos==="GK");
+  const out = pros.filter(p=>p.pos!=="GK").slice(0, gk?4:5);
+  return (gk?[gk]:[]).concat(out);
+}
+function youthStrength(G, clubId){
+  const five = youthFive(G, clubId);
+  if(!five.length) return 45;
+  return five.reduce((s,p)=>s+p.ovr,0)/five.length;
+}
+function simYouthMatch(G, home, away){
+  const sh = youthStrength(G, home.id), sa = youthStrength(G, away.id);
+  const xgH = clamp(1.5*Math.exp(0.045*(sh-sa)), 0.3, 4.5), xgA = clamp(1.5*Math.exp(0.045*(sa-sh)), 0.3, 4.5);
+  const hs = poisson(xgH), as = poisson(xgA);
+  const attackers = youthFive(G, home.id).filter(p=>p.pos!=="GK");
+  const scorers = [];
+  for(let i=0;i<hs;i++){ const sc = attackers.length?pick(attackers):youthFive(G,home.id)[0]; if(sc){ sc.youthG=(sc.youthG||0)+1; scorers.push(sc.name); } }
+  return { opp: away.abbr, oppName: away.name, hs, as, scorers, day: G.day+1 };
+}
+function accrueYouth(G){
+  // bank a youth appearance for each club's playing prospects
+  G.clubs.forEach(c=>{ youthFive(G, c.id).forEach(p=>{ p.youthApps=(p.youthApps||0)+1; }); });
+  // detailed youth fixture for the user's club
+  const u = G.clubs[G.userTeamId];
+  const pool = G.clubs.filter(c=>c.id!==u.id && c.country===u.country);
+  if(pool.length) G.youthLast = simYouthMatch(G, u, pick(pool));
 }
 
 /* ----------------------------- hall of fame ---------------------------- */
@@ -1232,7 +1276,7 @@ function App(){
   const TABS = [
     ["hub","Hub"],["squad","Squad"],["tactics","Tactics"],["table","Table"],
     ["players","Players"],["stats","Leaders"],["cup","Cup"],["contcup","Champions Cup"],["fixtures","Fixtures"],
-    ["transfers","Transfers"],["fa","Free Agents"],["finances","Finances"],
+    ["transfers","Transfers"],["fa","Free Agents"],["youth","Youth"],["finances","Finances"],
     ["awards","Awards"],["hof","Hall of Fame"],["news","News"],
   ];
   if(G.phase==="offseason") TABS.push(["offseason","Offseason"]);
@@ -1281,6 +1325,7 @@ function App(){
         {tab==="fixtures" && <Fixtures G={G} />}
         {tab==="transfers" && <Transfers G={G} commit={commit} tShow={tShow} />}
         {tab==="fa" && <FreeAgents G={G} commit={commit} tShow={tShow} />}
+        {tab==="youth" && <YouthView G={G} />}
         {tab==="finances" && <Finances G={G} />}
         {tab==="awards" && <AwardsView G={G} />}
         {tab==="hof" && <HallOfFame G={G} />}
@@ -2149,6 +2194,76 @@ function FreeAgents({G, commit, tShow}){
           </tbody>
         </table>
       </Card>
+    </div>
+  );
+}
+
+/* ----------------------------- youth (5v5) ----------------------------- */
+function YouthView({G}){
+  const user = G.clubs[G.userTeamId];
+  const pros = youthProspects(G, user.id);
+  const five = youthFive(G, user.id);
+  const fiveIds = new Set(five.map(p=>p.id));
+  const last = G.youthLast;
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="font-semibold">🎓 {user.name} Academy — 5-a-side</div>
+        <div className="text-sm text-slate-400">Your prospects (age ≤19) play a small-sided youth match each matchday. Game time develops them faster — keep promising teenagers here until they're ready for the senior squad.</div>
+      </Card>
+
+      {last && (
+        <Card>
+          <div className="flex items-center justify-between">
+            <div className="font-semibold">Latest youth result</div>
+            <div className="text-xs text-slate-500">MD{last.day}</div>
+          </div>
+          <div className="flex items-center justify-center gap-4 py-1">
+            <div className="flex-1 text-right font-bold">{user.abbr}</div>
+            <div className="text-2xl font-black tnum">{last.hs} - {last.as}</div>
+            <div className="flex-1 font-bold">{last.opp}</div>
+          </div>
+          {last.scorers && last.scorers.length>0 && <div className="text-center text-xs text-slate-400">⚽ {last.scorers.join(", ")}</div>}
+        </Card>
+      )}
+
+      <Card>
+        <div className="font-semibold mb-1">Youth XI (5-a-side)</div>
+        <div className="text-xs text-slate-500 mb-2">Best keeper + four outfielders — these get the most game time.</div>
+        <div className="grid grid-cols-1 gap-1">
+          {five.map(p=>(
+            <div key={p.id} className="flex items-center gap-2 text-sm">
+              <span className="w-9 text-slate-400">{p.pos}</span>
+              <PName p={p} className="flex-1 font-medium" />
+              <OvrPill v={p.ovr} /><PotPill v={p.pot} />
+              <span className="text-xs text-slate-500 w-16 text-right">{p.youthApps||0} apps</span>
+            </div>
+          ))}
+          {!five.length && <div className="text-slate-500 text-sm">No academy prospects right now — they arrive at the youth intake each summer.</div>}
+        </div>
+      </Card>
+
+      {pros.length>five.length && (
+        <Card className="p-0 overflow-x-auto">
+          <div className="p-3 font-semibold">Other prospects</div>
+          <table className="w-full text-sm">
+            <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="text-left p-2">Player</th><th className="p-2">Pos</th><th className="p-2">Age</th><th className="p-2">OVR</th><th className="p-2">Pot</th><th className="p-2">Youth Apps</th><th className="p-2">Goals</th></tr></thead>
+            <tbody>
+              {pros.filter(p=>!fiveIds.has(p.id)).map(p=>(
+                <tr key={p.id} className="border-b border-[#15203a]">
+                  <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
+                  <td className="p-2 text-center text-slate-400">{p.pos}</td>
+                  <td className="p-2 text-center tnum">{p.age}</td>
+                  <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
+                  <td className="p-2 text-center"><PotPill v={p.pot} /></td>
+                  <td className="p-2 text-center tnum">{p.youthApps||0}</td>
+                  <td className="p-2 text-center tnum">{p.youthG||0}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
     </div>
   );
 }
