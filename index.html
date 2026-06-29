@@ -361,11 +361,25 @@ function buildSquad(clubId, div){
   players.forEach(p => p.teamId = clubId);
   return players;
 }
+// Pair clubs within each country+division as mutual rivals so derbies occur in
+// the league. A derby is tighter (the underdog lifts) and swings the user's
+// board confidence and squad morale harder.
+function assignRivals(clubs){
+  const groups={};
+  clubs.forEach(c=>{ const k=(c.country||0)+"-"+c.div; (groups[k]=groups[k]||[]).push(c); });
+  Object.values(groups).forEach(arr=>{
+    const ids=arr.slice();
+    for(let i=ids.length-1;i>0;i--){ const j=Math.floor(_rng()*(i+1)); [ids[i],ids[j]]=[ids[j],ids[i]]; }
+    for(let i=0;i+1<ids.length;i+=2){ ids[i].rivalId=ids[i+1].id; ids[i+1].rivalId=ids[i].id; }
+  });
+}
+function isDerby(G, aId, bId){ const a=G.clubs[aId]; return !!a && a.rivalId===bId; }
 function generateLeague(userTeamId, opts={}){
   const { seed=null } = opts;
   if(seed!=null && !Number.isNaN(seed)) setRng(mulberry32(seed >>> 0));
   const clubs = ALL_CLUB_DEFS.map((d,i)=>makeClub(d, i, divOfIdx(i), countryOfIdx(i)));
   clubs[userTeamId].userControlled = true;
+  assignRivals(clubs);
   const players = {};
   clubs.forEach(c => buildSquad(c.id, c.div).forEach(p => players[p.id] = p));
   clubs.forEach(c => autoPickXI(c, players));
@@ -522,6 +536,8 @@ function simMatch(home, away, players, opts={}){
   const homeAdv = neutral ? 1 : 1.12, awayAdv = neutral ? 1 : 0.92;
   let xgH = clamp(1.32 * Math.exp(1.7*(hAtt - aDef)) * tH.xgFor * tA.xgAgainst * homeAdv, 0.15, 5.5);
   let xgA = clamp(1.32 * Math.exp(1.7*(aAtt - hDef)) * tA.xgFor * tH.xgAgainst * awayAdv, 0.15, 5.5);
+  // derby: the form book goes out the window — compress the gap toward the mean
+  if(home.rivalId===away.id){ const m=(xgH+xgA)/2; xgH=xgH*0.82+m*0.18; xgA=xgA*0.82+m*0.18; }
   let hs = poisson(xgH), as = poisson(xgA);
   if(opts.mustDecide && hs===as){ if(chance(clamp(0.5+(clubStrength(home,players)-clubStrength(away,players))/40,0.1,0.9))) hs++; else as++; }
   // match stats: possession (midfield share), shots & shots-on-target (from xG)
@@ -939,7 +955,9 @@ function simRound(G){
       G.lastMatch = serializeBox(box, G);
       logNews(G, "match", `${home.abbr} ${box.hs}-${box.as} ${away.abbr}`, G.userTeamId);
       const userHome = home.id===G.userTeamId;
-      bumpConfidenceForResult(G, userHome?box.hs>box.as:box.as>box.hs, box.hs===box.as);
+      const derby = home.rivalId===away.id;
+      bumpConfidenceForResult(G, userHome?box.hs>box.as:box.as>box.hs, box.hs===box.as, derby?1.8:1);
+      if(derby) logNews(G,"match",`🔥 Derby day! ${home.abbr} ${box.hs}-${box.as} ${away.abbr}`, G.userTeamId);
     }
     maybeInjure(home, G.players, G.settings); maybeInjure(away, G.players, G.settings);
   });
@@ -1085,7 +1103,7 @@ function liveFinish(G, M){
   M.gref.played=true; M.gref.hs=M.hs; M.gref.as=M.as;
   const margin=Math.abs(M.hs-M.as), bw=G.records&&G.records.biggestWin;
   if(margin>=4&&(!bw||margin>bw.margin)){ G.records=G.records||{players:{},biggestWin:null}; const wh=M.hs>M.as; G.records.biggestWin={season:G.season,margin,winner:(wh?home:away).name,loser:(wh?away:home).name,hs:Math.max(M.hs,M.as),as:Math.min(M.hs,M.as)}; }
-  const uHome=home.id===G.userTeamId; bumpConfidenceForResult(G, uHome?M.hs>M.as:M.as>M.hs, M.hs===M.as);
+  const uHome=home.id===G.userTeamId; const derby=home.rivalId===away.id; bumpConfidenceForResult(G, uHome?M.hs>M.as:M.as>M.hs, M.hs===M.as, derby?1.8:1);
   const tl=[]; let rh=0,ra=0; M.events.slice().sort((a,b)=>a.min-b.min).forEach(e=>{ if(e.side==="H")rh++; else ra++; tl.push({min:e.min,side:e.side,name:e.name,assist:e.assist,hs:rh,as:ra}); });
   const poss=clamp(round(50+(n01(unitRatings(home,players).MID)-n01(unitRatings(away,players).MID))*45+2),28,72);
   G.lastMatch={ season:G.season, day:G.day+1, home:home.abbr, away:away.abbr, homeName:home.name, awayName:away.name, hs:M.hs, as:M.as, neutral:false, cup:false,
@@ -1672,10 +1690,10 @@ function expTargetPos(G){
   return 17;   // "safe" — anything above the drop zone
 }
 function confLabel(c){ return c>=80?"Secure":c>=60?"Backed":c>=40?"Watching":c>=20?"Under pressure":"On the brink"; }
-function bumpConfidenceForResult(G, win, draw){
+function bumpConfidenceForResult(G, win, draw, mult=1){
   if(!jobSecurityOn(G)) return;
   if(G.boardConfidence==null) G.boardConfidence=60;
-  G.boardConfidence = clamp(G.boardConfidence + (win?4: draw?0.5: -4), 0, 100);
+  G.boardConfidence = clamp(G.boardConfidence + (win?4: draw?0.5: -4)*mult, 0, 100);
 }
 // Pick clubs that would hire the user right now (a sacking) or come calling
 // (a poaching approach when overperforming). Returns up to 3 offers.
@@ -1783,6 +1801,7 @@ function migrate(G){
     Object.values(G.players||{}).forEach(p=>{ fill(p.stats); fill(p.career); if(p.susp==null) p.susp=0; if(p.ycCount==null) p.ycCount=0; fillP(p); });
     (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); fillP(p); });
     G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureXI(c, G.players); });
+    if(!G.clubs.some(c=>c.rivalId!=null)) assignRivals(G.clubs);
     if(!G.expectation) setOwnerExpectation(G);
     // history/records + feature-toggle backfill
     if(!Array.isArray(G.finalsArchive)) G.finalsArchive = [];
@@ -2167,6 +2186,7 @@ function Hub({G, commit, tShow, setTab}){
                   ? <span><span className="text-emerald-300">{user.abbr}</span> vs {G.clubs[userGame.away].abbr}</span>
                   : <span>{G.clubs[userGame.home].abbr} vs <span className="text-emerald-300">{user.abbr}</span></span>}
                 <span className="text-slate-500 text-sm"> ({userGame.home===G.userTeamId?"H":"A"})</span>
+                {isDerby(G, userGame.home, userGame.away) && <span className="ml-2 text-orange-400 text-sm font-bold" title="Derby vs your rivals">🔥 DERBY</span>}
               </div>
               <div className="text-sm text-slate-400">{userGame.home===G.userTeamId?G.clubs[userGame.away].name:G.clubs[userGame.home].name}</div>
             </div>
@@ -2789,9 +2809,9 @@ function userFixtureFeed(G){
   G.schedule.forEach((round, md)=>{
     const g = round.find(x=>x.home===uid||x.away===uid);
     if(!g) return;
-    const home = g.home===uid, opp = G.clubs[home?g.away:g.home];
+    const home = g.home===uid, oppId = home?g.away:g.home, opp = G.clubs[oppId];
     out.push({ md:md+1, comp:"league", home, oppName:opp?opp.name:"?", played:!!g.played,
-      gf:home?g.hs:g.as, ga:home?g.as:g.hs, round:"League" });
+      gf:home?g.hs:g.as, ga:home?g.as:g.hs, round:"League", derby:isDerby(G, uid, oppId) });
   });
   // domestic cup (current season)
   const cup = (G.cups||[]).find(c=>c.country===(G.clubs[uid].country||0));
@@ -2851,7 +2871,7 @@ function Fixtures({G}){
                 <span className="w-5 text-center" title={m.label}>{m.sym}</span>
                 {f.comp!=="league" && <span className={"text-[10px] w-8 "+m.cls}>{f.round}</span>}
                 <span className="w-5 text-slate-400 text-xs">{f.home==null?"":f.home?"H":"A"}</span>
-                <span className="flex-1">{f.oppName}</span>
+                <span className="flex-1">{f.oppName}{f.derby&&<span className="ml-1 text-orange-400" title="Derby vs your rivals">🔥</span>}</span>
                 {f.played
                   ? <span className="font-semibold tnum">{f.gf}-{f.ga} <span className={"inline-block w-2 h-2 rounded-full ml-1 "+(win?"bg-emerald-500":loss?"bg-red-500":"bg-slate-500")}></span></span>
                   : <span className="text-slate-500">—</span>}
