@@ -243,8 +243,16 @@ function divName(country, div){ return (COUNTRIES[country]||COUNTRIES[0]).divNam
 const DIV_NAMES = COUNTRIES[0].divNames;
 
 /* ----------------------------- player gen ------------------------------ */
-function emptyStats(){ return { App:0, Min:0, G:0, A:0, CS:0, YC:0, RC:0, MOTM:0, ratingSum:0, ratingN:0 }; }
+function emptyStats(){ return { App:0, Min:0, G:0, A:0, CS:0, YC:0, RC:0, MOTM:0, ratingSum:0, ratingN:0, SH:0, SOT:0, KP:0, xG:0, Sv:0 }; }
 function avgRating(s){ return s && s.ratingN ? s.ratingSum/s.ratingN : 0; }
+// A WAR-style "Rating Value": one number for a player's total contribution this run.
+// Goals/assists/clean sheets/saves weighted, scaled by minutes and rating over baseline.
+function ratingValue(s){
+  if(!s || !s.App) return 0;
+  const perf = (avgRating(s) - 6.5) * (s.Min/90) * 0.22;
+  const out = (s.G||0)*0.42 + (s.A||0)*0.26 + (s.CS||0)*0.12 + (s.Sv||0)*0.015 + (s.KP||0)*0.01;
+  return +(perf + out).toFixed(1);
+}
 function computeOvr(p){
   const w = POS_W[p.pos] || POS_W.CM;
   let s = 0; for(const k in w) s += w[k] * (p[k]||0);
@@ -393,9 +401,29 @@ function buildSchedule(clubs){
 // Effective rating of player `p` if fielded at formation `slot`.
 function effRating(p, slot){ return Math.max(20, p.ovr - posPenalty(p, slot)); }
 // Three unit ratings (DEF / MID / ATT) for a club's current XI, 20..99-ish.
-function unitRatings(club, players){
+// The XI a club actually fields: its chosen XI with injured/suspended players
+// auto-replaced by the best available squad member for that slot (so a club is
+// never short and never fields an unavailable player).
+function fieldedXI(club, players){
   const slots = FORMATIONS[club.formation] || FORMATIONS["4-3-3"];
-  const xi = (club.xi||[]).map((id,i)=>({ p: players[id], slot: slots[i] })).filter(o=>o.p);
+  const xi = club.xi || [];
+  const used = new Set();
+  const subs = Object.values(players).filter(p=>p.teamId===club.id && isAvailable(p));
+  const out = [];
+  slots.forEach((slot,i)=>{
+    let p = players[xi[i]];
+    if(!p || !isAvailable(p) || used.has(p.id)){
+      const pool = subs.filter(q=>!used.has(q.id));
+      const naturals = pool.filter(q=>(q.positions||[q.pos]).includes(slot));
+      p = (naturals.length ? naturals.sort((a,b)=>b.ovr-a.ovr)
+                           : pool.sort((a,b)=>effRating(b,slot)-effRating(a,slot)))[0];
+    }
+    if(p){ used.add(p.id); out.push({ p, slot }); }
+  });
+  return out;
+}
+function unitRatings(club, players){
+  const xi = fieldedXI(club, players);
   let dS=0,dN=0, mS=0,mN=0, aS=0,aN=0, gk=50;
   xi.forEach(({p,slot})=>{
     const er = effRating(p, slot), b = BAND[slot];
@@ -434,24 +462,30 @@ function simMatch(home, away, players, opts={}){
   let xgA = clamp(1.32 * Math.exp(1.7*(aAtt - hDef)) * tA.xgFor * tH.xgAgainst * awayAdv, 0.15, 5.5);
   let hs = poisson(xgH), as = poisson(xgA);
   if(opts.mustDecide && hs===as){ if(chance(clamp(0.5+(clubStrength(home,players)-clubStrength(away,players))/40,0.1,0.9))) hs++; else as++; }
-  const box = { home, away, hs, as, hScorers:[], aScorers:[], hRatings:[], aRatings:[], neutral };
+  // match stats: possession (midfield share), shots & shots-on-target (from xG)
+  const possH = clamp(round(50 + (n01(uH.MID)-n01(uA.MID))*45 + (neutral?0:2)), 28, 72);
+  const shH = clamp(round(xgH/0.11 + gauss(0,1.4)), hs, 32);
+  const shA = clamp(round(xgA/0.11 + gauss(0,1.4)), as, 32);
+  const sotH = clamp(round(shH*(0.30+0.12*n01(uH.ATT))), hs, shH);
+  const sotA = clamp(round(shA*(0.30+0.12*n01(uA.ATT))), as, shA);
+  const box = { home, away, hs, as, hScorers:[], aScorers:[], hRatings:[], aRatings:[], neutral,
+    stat:{ possH, possA:100-possH, shH, shA, sotH, sotA, xgH:+xgH.toFixed(2), xgA:+xgA.toFixed(2) }, timeline:[] };
   applyMatch(home, away, hs, as, players, box, opts);
   return box;
 }
-function lineupOf(club, players){
-  const slots = FORMATIONS[club.formation] || FORMATIONS["4-3-3"];
-  return (club.xi||[]).map((id,i)=>({ p: players[id], slot: slots[i] })).filter(o=>o.p && !isInjured(o.p));
-}
+function lineupOf(club, players){ return fieldedXI(club, players); }
 // attacking weight of a slot (who tends to score) and creative weight (who assists)
 const SCORE_W = { GK:0, RB:0.6, LB:0.6, CB:0.7, RWB:0.9, LWB:0.9, CDM:1.0, CM:2.2, CAM:4.5, RM:3.2, LM:3.2, RW:5.5, LW:5.5, ST:9 };
 const CREATE_W = { GK:0, RB:1.2, LB:1.2, CB:0.4, RWB:2.0, LWB:2.0, CDM:1.4, CM:3.2, CAM:5.0, RM:4.2, LM:4.2, RW:4.5, LW:4.5, ST:2.2 };
 function applyMatch(home, away, hs, as, players, box, opts){
   const isCup = !!opts.cup;
+  const G = opts.G;
+  const st = box.stat || {};
   const H = lineupOf(home, players), A = lineupOf(away, players);
   // appearances + minutes for everyone who started (90'); a couple of bench cameos
   function credit(side, club){
     side.forEach(({p})=>{ p.stats.App++; p.stats.Min += 90; });
-    const bench = (club.bench||[]).map(id=>players[id]).filter(p=>p && !isInjured(p));
+    const bench = (club.bench||[]).map(id=>players[id]).filter(p=>p && isAvailable(p));
     bench.slice(0,3).forEach(p=>{ if(chance(0.5)){ p.stats.App++; p.stats.Min += rint(8,30); } });
   }
   credit(H, home); credit(A, away);
@@ -467,7 +501,7 @@ function applyMatch(home, away, hs, as, players, box, opts){
       if(chance(0.72)){
         const cands = side.filter(o => o !== sc);
         const as2 = wpick(cands, o => (CREATE_W[o.slot]||0) * (0.5 + n01(o.p.pas*0.6 + o.p.dri*0.4)));
-        if(as2){ as2.p.stats.A++; assistName = as2.p.name; assistId = as2.p.id; }
+        if(as2){ as2.p.stats.A++; as2.p.stats.KP++; assistName = as2.p.name; assistId = as2.p.id; }
       }
       out.push({ name: sc.p.name, id: sc.p.id, min, assist: assistName, assistId });
     }
@@ -476,23 +510,59 @@ function applyMatch(home, away, hs, as, players, box, opts){
   }
   box.hScorers = awardGoals(H, hs);
   box.aScorers = awardGoals(A, as);
+  // distribute shots / shots-on-target / xG to attackers, and key passes to creators
+  function spread(side, shots, sot, xg){
+    for(let i=0;i<shots;i++){
+      const o = wpick(side, q => (SCORE_W[q.slot]||0) * (0.5 + n01(q.p.sho)));
+      if(!o) continue;
+      o.p.stats.SH++;
+      if(i < sot) o.p.stats.SOT++;
+      o.p.stats.xG += +(xg/Math.max(1,shots)).toFixed(2);
+    }
+    const kp = Math.max(0, round(shots*0.55) - 0);   // chances created beyond assists
+    for(let i=0;i<kp;i++){ const o = wpick(side, q => (CREATE_W[q.slot]||0) * (0.5 + n01(q.p.pas))); if(o) o.p.stats.KP++; }
+  }
+  spread(H, st.shH||hs, st.sotH||hs, st.xgH||hs);
+  spread(A, st.shA||as, st.sotA||as, st.xgA||as);
+  // goalkeeper saves = shots on target faced minus goals conceded
+  const gkOf = side => side.find(o=>o.slot==="GK");
+  const gH = gkOf(H), gA = gkOf(A);
+  if(gH) gH.p.stats.Sv += Math.max(0, (st.sotA||0) - as);
+  if(gA) gA.p.stats.Sv += Math.max(0, (st.sotH||0) - hs);
   // clean sheets
   if(as===0) H.forEach(({p,slot})=>{ if(BAND[slot]<=2 || slot==="GK") p.stats.CS++; });
   if(hs===0) A.forEach(({p,slot})=>{ if(BAND[slot]<=2 || slot==="GK") p.stats.CS++; });
-  // cards (light)
-  [H,A].forEach(side => side.forEach(({p,slot})=>{
+  // cards -> suspensions (yellows accumulate to a ban; red = multi-match ban)
+  function card(p, slot){
     const yc = clamp(0.10 + (BAND[slot]<=2?0.06:0) - n01(p.phy)*0.04, 0.04, 0.22);
-    if(chance(yc)) p.stats.YC++;
-    if(chance(0.01)) { p.stats.RC++; injure(p, rint(2,4)); }
-  }));
-  // ratings + man of the match
+    if(chance(yc)){
+      p.stats.YC++; p.ycCount = (p.ycCount||0) + 1;
+      if(p.ycCount >= YC_BAN_THRESHOLD){ p.ycCount = 0; banPlayer(G, p, 1, "yellow-card accumulation"); }
+    }
+    if(chance(0.01)){ p.stats.RC++; const m = rint(2,3); injure(p, rint(2,4)); banPlayer(G, p, m, "a red card"); }
+  }
+  [H,A].forEach(side => side.forEach(({p,slot})=>card(p,slot)));
+  // minute-by-minute timeline (used in the box score)
+  const tl = [];
+  let rh=0, ra=0;
+  box.hScorers.concat(box.aScorers).slice()
+    .sort((a,b)=>a.min-b.min)
+    .forEach(g=>{
+      const isHome = box.hScorers.includes(g);
+      if(isHome) rh++; else ra++;
+      tl.push({ min:g.min, side:isHome?"H":"A", name:g.name, assist:g.assist, hs:rh, as:ra });
+    });
+  box.timeline = tl;
+  // ratings + man of the match (now nudged by territory: shots & possession edge)
   const res = hs>as?1 : hs<as?-1 : 0;
-  function rate(side, scored, conceded, result){
+  function rate(side, scored, conceded, result, shotsFor, shotsAgainst, poss){
     let best=null, bestR=0;
+    const terr = clamp((shotsFor-shotsAgainst)*0.015 + (poss-50)*0.004, -0.3, 0.3);
     side.forEach(({p,slot})=>{
-      let r = 6.2 + (result>0?0.4:result<0?-0.3:0);
+      let r = 6.2 + (result>0?0.4:result<0?-0.3:0) + terr;
       r += 0.95 * countGoals(box, p.id);
       r += 0.55 * countAssists(box, p.id);
+      if(slot==="GK") r += clamp((p.stats.Sv? Math.min(p.stats.Sv,6):0)*0.05, 0, 0.4);
       if(conceded===0 && (BAND[slot]<=2||slot==="GK")) r += 0.6;
       if(conceded>=3 && (BAND[slot]<=2||slot==="GK")) r -= 0.5;
       r = clamp(r + gauss(0, 0.35), 4.0, 10);
@@ -501,7 +571,8 @@ function applyMatch(home, away, hs, as, players, box, opts){
     });
     return best;
   }
-  const motmH = rate(H, hs, as, res), motmA = rate(A, as, hs, -res);
+  const motmH = rate(H, hs, as, res, st.shH||0, st.shA||0, st.possH||50);
+  const motmA = rate(A, as, hs, -res, st.shA||0, st.shH||0, st.possA||50);
   const motm = (res>=0 ? motmH : motmA) || motmH || motmA;
   if(motm) motm.stats.MOTM++;
   box.motm = motm ? motm.name : null;
@@ -513,12 +584,22 @@ function applyMatch(home, away, hs, as, players, box, opts){
     else { home.d++; away.d++; home.pts++; away.pts++; }
   }
 }
+// Ban a player for N upcoming matches; news only for the user's club.
+function banPlayer(G, p, matches, reason){
+  p.susp = (p.susp||0) + matches;
+  if(G && p.teamId!=null && G.clubs[p.teamId] && G.clubs[p.teamId].userControlled){
+    logNews(G, "susp", `🟥 ${p.name} suspended for ${p.susp} match${p.susp>1?"es":""} (${reason})`, p.teamId);
+  }
+}
 function countGoals(box, id){ return box.hScorers.filter(s=>s.id===id).length + box.aScorers.filter(s=>s.id===id).length; }
 function countAssists(box, id){ return box.hScorers.concat(box.aScorers).filter(s=>s.assistId===id).length; }
 
-/* ----------------------------- injuries -------------------------------- */
+/* ----------------------------- injuries & bans ------------------------- */
 function isInjured(p){ return !!(p && p.injury && p.injury.weeks > 0); }
 function injure(p, weeks){ p.injury = { weeks, type: pick(["knock","hamstring","ankle","muscle strain"]) }; }
+function isSuspended(p){ return !!(p && p.susp > 0); }
+function isAvailable(p){ return p && !isInjured(p) && !isSuspended(p); }
+const YC_BAN_THRESHOLD = 5;   // yellows accumulated -> a one-match ban
 function maybeInjure(club, players, settings){
   if(settings && settings.injuries===false) return;
   const xi = (club.xi||[]).map(id=>players[id]).filter(Boolean);
@@ -533,8 +614,8 @@ function maybeInjure(club, players, settings){
 // goal if a keeper is available.
 function autoPickXI(club, players){
   const slots = FORMATIONS[club.formation] || FORMATIONS["4-3-3"];
-  let squad = Object.values(players).filter(p => p.teamId===club.id && !isInjured(p));
-  if(squad.length < 11) squad = Object.values(players).filter(p => p.teamId===club.id);   // emergency: ignore injuries
+  let squad = Object.values(players).filter(p => p.teamId===club.id && isAvailable(p));
+  if(squad.length < 11) squad = Object.values(players).filter(p => p.teamId===club.id);   // emergency: ignore injuries/bans
   const used = new Set();
   const xi = new Array(slots.length).fill(null);
   const isKeeper = p => p.pos==="GK" || (p.positions||[]).includes("GK");
@@ -604,7 +685,7 @@ function playKnockoutRound(G, cup, order){
     const a = G.clubs[ids[i]], b = G.clubs[ids[i+1]];
     if(!b){ winners.push(ids[i]); continue; }
     ensureXI(a, G.players); ensureXI(b, G.players);
-    const box = simMatch(a, b, G.players, { cup:true, neutral: isFinal, mustDecide:true });
+    const box = simMatch(a, b, G.players, { cup:true, neutral: isFinal, mustDecide:true, G });
     const w = box.hs>=box.as ? a.id : b.id;   // mustDecide guarantees no draw
     winners.push(w);
     ties.push({ home:a.id, away:b.id, hs:box.hs, as:box.as, win:w });
@@ -719,7 +800,7 @@ function simRound(G){
   round.forEach(g=>{
     const home = G.clubs[g.home], away = G.clubs[g.away];
     ensureXI(home, G.players); ensureXI(away, G.players);
-    const box = simMatch(home, away, G.players, {});
+    const box = simMatch(home, away, G.players, { G });
     g.played = true; g.hs = box.hs; g.as = box.as;
     if(home.id===G.userTeamId || away.id===G.userTeamId){
       G.lastMatch = serializeBox(box, G);
@@ -727,8 +808,8 @@ function simRound(G){
     }
     maybeInjure(home, G.players, G.settings); maybeInjure(away, G.players, G.settings);
   });
-  // injuries heal a week
-  Object.values(G.players).forEach(p=>{ if(isInjured(p)) p.injury.weeks--; });
+  // injuries heal a week; league suspensions tick down one match
+  Object.values(G.players).forEach(p=>{ if(isInjured(p)) p.injury.weeks--; if(isSuspended(p)) p.susp--; });
   // domestic cup round (all national cups) on its matchday
   if(CUP_MD[G.day+1] && G.cups){ playCupRound(G); }
   // continental champions cup round on its matchday
@@ -751,6 +832,7 @@ function serializeBox(box, G){
     home: box.home.abbr, away: box.away.abbr, homeName: box.home.name, awayName: box.away.name,
     hs: box.hs, as: box.as, neutral: box.neutral, cup: !!box.cup,
     hScorers: box.hScorers, aScorers: box.aScorers, motm: box.motm,
+    stat: box.stat, timeline: box.timeline,
   };
 }
 // sim forward until the user's next league match is about to be played (or season end)
@@ -812,6 +894,7 @@ function startNextSeason(G){
       for(const k in p.stats) p.career[k] = (p.career[k]||0) + p.stats[k];
     }
     p.stats = emptyStats();
+    p.susp = 0; p.ycCount = 0;   // bans & yellow tallies clear each season
   });
   // record club season history + reset table
   G.clubs.forEach(c=>{
@@ -1079,6 +1162,10 @@ function migrate(G){
     if(!Array.isArray(G.cups)){ if(G.cup){ G.cup.country=0; G.cups=[G.cup]; } else initCups(G); delete G.cup; }
     G.cups.forEach(cup=>{ if(cup.country==null) cup.country=0; if(cup.runnerUp===undefined) cup.runnerUp=null; });
     if(!G.contCup) initContCup(G);
+    // backfill newer per-player stat fields (shots, key passes, xG, saves, bans)
+    const fill = s => { if(s){ ["SH","SOT","KP","xG","Sv"].forEach(k=>{ if(s[k]==null) s[k]=0; }); } };
+    Object.values(G.players||{}).forEach(p=>{ fill(p.stats); fill(p.career); if(p.susp==null) p.susp=0; if(p.ycCount==null) p.ycCount=0; });
+    (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); });
     G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureXI(c, G.players); });
     if(!G.expectation) setOwnerExpectation(G);
     G.version = SAVE_VERSION;
@@ -1443,6 +1530,7 @@ function Squad({G, commit, tShow}){
                   {inXI.has(p.id) && <span className="text-emerald-400 mr-1" title="In starting XI">●</span>}
                   <PName p={p} className="font-medium" />
                   {isInjured(p) && <span className="ml-1 text-red-400 text-xs" title={p.injury.type}>✚{p.injury.weeks}w</span>}
+                  {isSuspended(p) && <span className="ml-1 text-orange-400 text-xs" title="Suspended">⛔{p.susp}</span>}
                   {p.youth && <span className="ml-1 text-amber-300 text-xs">YTH</span>}
                   {p.unhappy && p.years>0 && <span className="ml-1 text-orange-400 text-xs" title="Wants a new contract before it runs down">⚠</span>}
                 </td>
@@ -1750,8 +1838,12 @@ function Leaders({G}){
       <div className="grid sm:grid-cols-2 gap-3">
         {board("⚽ Top Scorers", pool.slice().sort((a,b)=>b.stats.G-a.stats.G), p=>p.stats.G)}
         {board("🅰️ Assists", pool.slice().sort((a,b)=>b.stats.A-a.stats.A), p=>p.stats.A)}
+        {board("🎯 Key Passes", pool.slice().sort((a,b)=>(b.stats.KP||0)-(a.stats.KP||0)), p=>p.stats.KP||0)}
+        {board("📈 Expected Goals (xG)", pool.slice().sort((a,b)=>(b.stats.xG||0)-(a.stats.xG||0)), p=>(p.stats.xG||0).toFixed(1))}
         {board("🧤 Clean Sheets", pool.filter(p=>p.pos==="GK").sort((a,b)=>b.stats.CS-a.stats.CS), p=>p.stats.CS)}
+        {board("🥅 GK Saves", pool.filter(p=>p.pos==="GK").sort((a,b)=>(b.stats.Sv||0)-(a.stats.Sv||0)), p=>p.stats.Sv||0)}
         {board("⭐ Avg Rating", pool.filter(minApp).sort((a,b)=>avgRating(b.stats)-avgRating(a.stats)), p=>avgRating(p.stats).toFixed(2))}
+        {board("💎 Rating Value", pool.filter(minApp).sort((a,b)=>ratingValue(b.stats)-ratingValue(a.stats)), p=>ratingValue(p.stats))}
       </div>
     </div>
   );
@@ -2247,6 +2339,44 @@ function BoxScore({m, G}){
         </div>
       </div>
       {m.motm && <div className="text-center text-xs text-emerald-300 mt-2">⭐ Man of the Match: {m.motm}</div>}
+      {m.stat && <MatchStats s={m.stat} />}
+      {m.timeline && m.timeline.length>0 && (
+        <div className="mt-3 border-t border-[#1d2940] pt-2">
+          <div className="text-xs text-slate-500 mb-1">Goal timeline</div>
+          <div className="space-y-0.5 text-xs">
+            {m.timeline.map((t,i)=>(
+              <div key={i} className={"flex gap-2 "+(t.side==="H"?"":"justify-end text-right")}>
+                <span className="text-slate-500 w-8">{t.min}'</span>
+                <span className="tnum font-semibold">{t.hs}-{t.as}</span>
+                <span className="text-slate-300">{t.name}{t.assist?<span className="text-slate-500"> ({t.assist})</span>:""}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+// possession / shots / xG comparison bars for a match
+function MatchStats({s}){
+  const Row = ({label, h, a, pct}) => {
+    const tot = (h+a)||1, hp = pct!=null ? h : Math.round(h/tot*100);
+    return (
+      <div className="mb-1.5">
+        <div className="flex justify-between text-xs tnum"><span>{h}{pct?"%":""}</span><span className="text-slate-500">{label}</span><span>{a}{pct?"%":""}</span></div>
+        <div className="flex h-1.5 rounded overflow-hidden bg-[#0d1526]">
+          <div className="bg-emerald-500" style={{width:hp+"%"}}></div>
+          <div className="bg-indigo-500" style={{width:(100-hp)+"%"}}></div>
+        </div>
+      </div>
+    );
+  };
+  return (
+    <div className="mt-3 border-t border-[#1d2940] pt-2">
+      <Row label="Possession" h={s.possH} a={s.possA} pct />
+      <Row label="Shots" h={s.shH} a={s.shA} />
+      <Row label="On target" h={s.sotH} a={s.sotA} />
+      <Row label="xG" h={s.xgH} a={s.xgA} />
     </div>
   );
 }
@@ -2267,6 +2397,7 @@ function PlayerModal({p, G, onClose}){
             <div className="font-bold text-lg">{p.name}</div>
             <div className="text-sm text-slate-400">{posLabel(p)} · {p.age}y · {p.foot==="B"?"Both":p.foot==="L"?"Left":"Right"} footed{club?` · ${club.name}`:" · Free agent"}</div>
             <div className="text-xs text-slate-500 mt-0.5">Potential {p.pot} · Value {money(p.value)} · Wage {money(p.salary)}/yr{p.years>0?` · ${p.years}y left`:""}</div>
+            {(isInjured(p)||isSuspended(p))&&<div className="text-xs mt-0.5">{isInjured(p)&&<span className="text-red-400">✚ {p.injury.type} ({p.injury.weeks}w)</span>}{isInjured(p)&&isSuspended(p)&&" · "}{isSuspended(p)&&<span className="text-orange-400">⛔ banned {p.susp} match{p.susp>1?"es":""}</span>}</div>}
           </div>
           <button onClick={onClose} className="text-slate-400">✕</button>
         </div>
@@ -2309,7 +2440,12 @@ function PlayerModal({p, G, onClose}){
   );
 }
 function StatLine({s, gk}){
-  const cells = [["App",s.App],["Goals",s.G],["Assists",s.A],gk?["Clean Sheets",s.CS]:["MOTM",s.MOTM],["Yellow",s.YC],["Rating",avgRating(s)?avgRating(s).toFixed(2):"—"]];
+  const cells = [["App",s.App||0],["Goals",s.G||0],["Assists",s.A||0],
+    ["Shots",s.SH||0],["On tgt",s.SOT||0],["xG",(s.xG||0).toFixed(1)],
+    ["Key Pass",s.KP||0],
+    gk?["Saves",s.Sv||0]:["MOTM",s.MOTM||0],
+    ["Clean Sh",s.CS||0],["Yellow",s.YC||0],["Red",s.RC||0],
+    ["Rating",avgRating(s)?avgRating(s).toFixed(2):"—"],["Value",ratingValue(s)]];
   return (
     <div className="grid grid-cols-3 gap-2 text-center">
       {cells.map(([k,v])=>(
