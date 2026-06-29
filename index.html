@@ -783,6 +783,8 @@ function playKnockoutRound(G, cup, order){
 const CUP_NAME = "National Cup";
 const CUP_ORDER = ["R32","R16","QF","SF","Final"];
 const CUP_MD = { 6:"R32", 13:"R16", 21:"QF", 29:"SF", 36:"Final" };
+const CUP_MD_REV = { R32:6, R16:13, QF:21, SF:29, Final:36 };          // round → matchday (1-based)
+const CONT_MD_REV = { G1:5, G2:11, G3:17, QF:24, SF:30, Final:36 };
 function cupName(country){ return (COUNTRIES[country]||COUNTRIES[0]).name + " Cup"; }
 function initCountryCup(G, country){
   const top = G.clubs.filter(c=>c.country===country && c.div===0).map(c=>c.id);
@@ -2750,9 +2752,62 @@ function ContCupView({G}){
 }
 
 /* ----------------------------- fixtures -------------------------------- */
+// Build the user's full season fixture feed across ALL competitions, tagged by
+// competition so league / national cup / continental can be told apart.
+const COMP_META = {
+  league: { sym:"⚽", label:"League",   cls:"text-slate-400" },
+  cup:    { sym:"🏆", label:"Nat. Cup", cls:"text-amber-300" },
+  cont:   { sym:"🌍", label:CONT_CUP_NAME, cls:"text-indigo-300" },
+};
+function userFixtureFeed(G){
+  const uid = G.userTeamId, out = [];
+  // league
+  G.schedule.forEach((round, md)=>{
+    const g = round.find(x=>x.home===uid||x.away===uid);
+    if(!g) return;
+    const home = g.home===uid, opp = G.clubs[home?g.away:g.home];
+    out.push({ md:md+1, comp:"league", home, oppName:opp?opp.name:"?", played:!!g.played,
+      gf:home?g.hs:g.as, ga:home?g.as:g.hs, round:"League" });
+  });
+  // domestic cup (current season)
+  const cup = (G.cups||[]).find(c=>c.country===(G.clubs[uid].country||0));
+  if(cup){
+    CUP_ORDER.forEach(r=>{
+      const ties = (cup.results||{})[r]; if(!ties) return;
+      const t = ties.find(x=>x.home===uid||x.away===uid); if(!t) return;
+      const home = t.home===uid;
+      out.push({ md:CUP_MD_REV[r], comp:"cup", home, oppName:(G.clubs[home?t.away:t.home]||{}).name||"?",
+        played:true, gf:home?t.hs:t.as, ga:home?t.as:t.hs, round:r });
+    });
+    if(cup.winner==null && (cup.alive||[]).includes(uid) && !(cup.results||{})[cup.round]){
+      out.push({ md:CUP_MD_REV[cup.round], comp:"cup", home:null, oppName:"to be drawn", played:false, round:cup.round });
+    }
+  }
+  // continental (current season)
+  const cc = G.contCup;
+  if(cc){
+    (cc.groups||[]).forEach(grp=>{
+      (grp.results||[]).forEach(res=>{
+        if(res.home!==uid && res.away!==uid) return;
+        const home = res.home===uid; const mdName = ["G1","G2","G3"][res.md];
+        out.push({ md:CONT_MD_REV[mdName], comp:"cont", home, oppName:(G.clubs[home?res.away:res.home]||{}).name||"?",
+          played:true, gf:home?res.hs:res.as, ga:home?res.as:res.hs, round:"Group" });
+      });
+    });
+    CONT_ORDER.forEach(r=>{
+      const ties=(cc.results||{})[r]; if(!ties) return;
+      const t=ties.find(x=>x.home===uid||x.away===uid); if(!t) return;
+      const home=t.home===uid;
+      out.push({ md:CONT_MD_REV[r], comp:"cont", home, oppName:(G.clubs[home?t.away:t.home]||{}).name||"?",
+        played:true, gf:home?t.hs:t.as, ga:home?t.as:t.hs, round:r });
+    });
+  }
+  return out.sort((a,b)=> a.md-b.md || (a.comp==="league"?-1:1));
+}
 function Fixtures({G}){
   const [mode, setMode] = useState("user");   // user | all
   const user = G.clubs[G.userTeamId];
+  const feed = userFixtureFeed(G);
   return (
     <div className="space-y-3">
       <div className="flex gap-2">
@@ -2760,22 +2815,28 @@ function Fixtures({G}){
         <button onClick={()=>setMode("all")} className={"px-3 py-1.5 rounded text-sm "+(mode==="all"?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>This matchday</button>
       </div>
       {mode==="user" ? (
+        <>
+        <Card className="py-2"><div className="flex gap-4 text-xs text-slate-400 flex-wrap">{Object.values(COMP_META).map(m=><span key={m.label}>{m.sym} <span className={m.cls}>{m.label}</span></span>)}</div></Card>
         <Card className="p-0 overflow-hidden">
-          {G.schedule.map((round, md)=>{
-            const g = round.find(x=>x.home===G.userTeamId||x.away===G.userTeamId);
-            if(!g) return null;
-            const home = g.home===G.userTeamId;
-            const opp = G.clubs[home?g.away:g.home];
+          {feed.map((f,i)=>{
+            const m = COMP_META[f.comp];
+            const win = f.played && f.gf>f.ga, loss = f.played && f.gf<f.ga;
             return (
-              <div key={md} className={"flex items-center gap-2 px-3 py-2 border-b border-[#15203a] text-sm "+(md===G.day?"bg-emerald-500/10":"")}>
-                <span className="text-slate-500 w-10">MD{md+1}</span>
-                <span className="w-6 text-slate-400">{home?"H":"A"}</span>
-                <span className="flex-1">{opp.name}</span>
-                {g.played ? <span className="font-semibold tnum">{home?g.hs:g.as}-{home?g.as:g.hs} <ResultDot home={home} g={g} /></span> : <span className="text-slate-500">—</span>}
+              <div key={i} className={"flex items-center gap-2 px-3 py-2 border-b border-[#15203a] text-sm "+(f.md===G.day+1?"bg-emerald-500/10":"")}>
+                <span className="text-slate-500 w-10 text-xs">MD{f.md}</span>
+                <span className="w-5 text-center" title={m.label}>{m.sym}</span>
+                {f.comp!=="league" && <span className={"text-[10px] w-8 "+m.cls}>{f.round}</span>}
+                <span className="w-5 text-slate-400 text-xs">{f.home==null?"":f.home?"H":"A"}</span>
+                <span className="flex-1">{f.oppName}</span>
+                {f.played
+                  ? <span className="font-semibold tnum">{f.gf}-{f.ga} <span className={"inline-block w-2 h-2 rounded-full ml-1 "+(win?"bg-emerald-500":loss?"bg-red-500":"bg-slate-500")}></span></span>
+                  : <span className="text-slate-500">—</span>}
               </div>
             );
           })}
+          {!feed.length && <div className="px-3 py-4 text-slate-500 text-sm">No fixtures yet.</div>}
         </Card>
+        </>
       ) : (
         <Card className="p-0 overflow-hidden">
           {(G.schedule[Math.min(G.day,G.schedule.length-1)]||[])
@@ -2792,11 +2853,6 @@ function Fixtures({G}){
       )}
     </div>
   );
-}
-function ResultDot({home, g}){
-  const us = home?g.hs:g.as, them = home?g.as:g.hs;
-  const c = us>them?"bg-emerald-500":us<them?"bg-red-500":"bg-slate-500";
-  return <span className={"inline-block w-2 h-2 rounded-full ml-1 "+c}></span>;
 }
 
 /* ----------------------------- transfers ------------------------------- */
