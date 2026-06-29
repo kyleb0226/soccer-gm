@@ -315,7 +315,7 @@ function makePlayer(pos, ageRange, meanAdj=0){
       if(wt > 0.10) p[k] = clamp(p[k] + b, 20, 99);
     });
   }
-  computeOvr(p); setPotential(p); p.peakOvr = p.ovr;
+  computeOvr(p); setPotential(p); p.peakOvr = p.ovr; p.fitness = 100;
   p.salary = wageFor(p); p.years = rint(1,4); p.value = playerValue(p);
   return p;
 }
@@ -399,7 +399,10 @@ function buildSchedule(clubs){
 
 /* ----------------------------- match sim ------------------------------- */
 // Effective rating of player `p` if fielded at formation `slot`.
-function effRating(p, slot){ return Math.max(20, p.ovr - posPenalty(p, slot)); }
+// match-time effective rating: position penalty + a fatigue factor (a tired player is worse, which
+// also makes auto-pick rotate toward fresher legs). fitness 100→×1.0, 50→×0.94, 0→×0.88.
+function fitFactor(p){ const f = p&&p.fitness!=null ? p.fitness : 100; return 0.88 + 0.12*(clamp(f,0,100)/100); }
+function effRating(p, slot){ return Math.max(20, (p.ovr - posPenalty(p, slot)) * fitFactor(p)); }
 // Three unit ratings (DEF / MID / ATT) for a club's current XI, 20..99-ish.
 // The XI a club actually fields: its chosen XI with injured/suspended players
 // auto-replaced by the best available squad member for that slot (so a club is
@@ -484,9 +487,9 @@ function applyMatch(home, away, hs, as, players, box, opts){
   const H = lineupOf(home, players), A = lineupOf(away, players);
   // appearances + minutes for everyone who started (90'); a couple of bench cameos
   function credit(side, club){
-    side.forEach(({p})=>{ p.stats.App++; p.stats.Min += 90; });
+    side.forEach(({p})=>{ p.stats.App++; p.stats.Min += 90; p.fitness = clamp((p.fitness!=null?p.fitness:100) - rint(18,26), 0, 100); });
     const bench = (club.bench||[]).map(id=>players[id]).filter(p=>p && isAvailable(p));
-    bench.slice(0,3).forEach(p=>{ if(chance(0.5)){ p.stats.App++; p.stats.Min += rint(8,30); } });
+    bench.slice(0,3).forEach(p=>{ if(chance(0.5)){ const m=rint(8,30); p.stats.App++; p.stats.Min += m; p.fitness = clamp((p.fitness!=null?p.fitness:100) - round(m/90*22), 0, 100); } });
   }
   credit(H, home); credit(A, away);
   // distribute goals to scorers + assisters
@@ -603,7 +606,8 @@ const YC_BAN_THRESHOLD = 5;   // yellows accumulated -> a one-match ban
 function maybeInjure(club, players, settings){
   if(settings && settings.injuries===false) return;
   const xi = (club.xi||[]).map(id=>players[id]).filter(Boolean);
-  xi.forEach(p=>{ if(!isInjured(p) && chance(0.012)) injure(p, rint(1,6)); });
+  // a knackered player is likelier to pick up a knock (0.012 fresh → ~0.030 exhausted)
+  xi.forEach(p=>{ const f=p.fitness!=null?p.fitness:100; if(!isInjured(p) && chance(0.012 + (100-f)/100*0.018)) injure(p, rint(1,6)); });
 }
 
 /* ----------------------------- XI selection ---------------------------- */
@@ -851,8 +855,10 @@ function simRound(G){
     }
     maybeInjure(home, G.players, G.settings); maybeInjure(away, G.players, G.settings);
   });
-  // injuries heal a week; league suspensions tick down one match
-  Object.values(G.players).forEach(p=>{ if(isInjured(p)) p.injury.weeks--; if(isSuspended(p)) p.susp--; });
+  // injuries heal a week; suspensions tick down; everyone recovers a chunk of match fitness
+  // recover a chunk of the fitness DEFICIT each matchday → a constant starter settles ~80, a rested one climbs to ~95
+  Object.values(G.players).forEach(p=>{ if(isInjured(p)) p.injury.weeks--; if(isSuspended(p)) p.susp--; const f=p.fitness!=null?p.fitness:100; p.fitness = clamp(Math.round(f + (100-f)*0.5 + 2), 0, 100); });
+  if([13,27].includes(G.day+1)) inSeasonDev(G);   // gradual in-season growth checkpoints
   // youth 5v5 game time (drives prospect development)
   accrueYouth(G);
   // domestic cup round (all national cups) on its matchday
@@ -940,7 +946,7 @@ function startNextSeason(G){
       for(const k in p.stats) p.career[k] = (p.career[k]||0) + p.stats[k];
     }
     p.stats = emptyStats();
-    p.susp = 0; p.ycCount = 0;   // bans & yellow tallies clear each season
+    p.susp = 0; p.ycCount = 0; p.fitness = 100; p.seasonDev = 0;   // bans/yellows clear; preseason rest; reset in-season growth tally
   });
   // record club season history + reset table
   G.clubs.forEach(c=>{
@@ -1008,6 +1014,31 @@ function startNextSeason(G){
   G.lastMatch = null;
   setOwnerExpectation(G);
 }
+// In-season development: a small, age-curved + FORM-driven nudge a few times a season, so players
+// progress THROUGH the year (a hot young player climbs as he performs), not only at the rollover.
+// Offseason growth is reduced (×0.55) to compensate — development is spread out, not piled on.
+function inSeasonDev(G){
+  Object.values(G.players).forEach(p=>{
+    if(p.teamId==null || (p.stats.App||0)<3) return;   // needs game time
+    const r = avgRating(p.stats), room = (p.pot||p.ovr) - p.ovr;
+    let center;
+    if(p.age<=21)      center = 0.07 + Math.max(0,room)*0.010;
+    else if(p.age<=25) center = 0.03 + Math.max(0,room)*0.006;
+    else if(p.age<=29) center = -0.02;
+    else if(p.age<=32) center = -0.08;
+    else               center = -0.16;
+    const perf = clamp((r-6.7)*0.5, -0.6, 0.7);        // form modulates growth (6.7 ≈ neutral)
+    if(p.age<=27 && center>0) center *= clamp(1+perf, 0.2, 1.9);
+    else center += perf*0.12;
+    center = clamp(center, -0.45, 0.6);
+    const keys=["pac","sho","pas","dri","def","phy","gk"], w=POS_W[p.pos]||{};
+    const rel=keys.filter(k=>(w[k]||0)>0.05);
+    const before=p.ovr;
+    (rel.length?rel:keys).forEach(k=>{ if(p[k]!=null && chance(0.5)) p[k]=clamp(round(p[k]+gauss(center,0.6)),20,99); });
+    computeOvr(p); p.peakOvr=Math.max(p.peakOvr||p.ovr, p.ovr);
+    if(p.ovr!==before){ p.seasonDev=(p.seasonDev||0)+(p.ovr-before); p.salary=wageFor(p); p.value=playerValue(p); }
+  });
+}
 function developPlayer(p){
   p.age++;
   // `delta` is the intended OVR change this year. Young players with headroom to
@@ -1021,6 +1052,7 @@ function developPlayer(p){
   // youth game time accelerates teenage development
   if(p.age<=20 && room>0){ const ya=p.youthApps||0; delta += ya>=18?2 : ya>=8?1 : 0; }
   p.youthApps = 0; p.youthG = 0;
+  if(delta>0) delta = Math.max(1, Math.round(delta*0.45));   // most growth now happens IN-SEASON (inSeasonDev)
   if(delta>0) delta = Math.min(delta, room);   // never overshoot potential
   // OVR is a weighted average of attributes, so bump attributes until the OVR
   // actually moves by ~delta (the old code added raw points that averaged away to ~0).
@@ -1303,6 +1335,7 @@ function migrate(G){
     if(!Array.isArray(G.awardHistory)) G.awardHistory=[];
     if(!Array.isArray(G.hof)) G.hof=[];
     if(!G.settings) G.settings={ injuries:true };
+    Object.values(G.players||{}).forEach(p=>{ if(p.fitness==null) p.fitness=100; });
     // multi-country migration: default legacy clubs to country 0, build per-country cups
     G.clubs.forEach(c=>{ if(c.country==null) c.country=0; });
     if(!Array.isArray(G.cups)){ if(G.cup){ G.cup.country=0; G.cups=[G.cup]; } else initCups(G); delete G.cup; }
@@ -1680,6 +1713,7 @@ function Squad({G, commit, tShow}){
                   {isSuspended(p) && <span className="ml-1 text-orange-400 text-xs" title="Suspended">⛔{p.susp}</span>}
                   {p.youth && <span className="ml-1 text-amber-300 text-xs">YTH</span>}
                   {p.unhappy && p.years>0 && <span className="ml-1 text-orange-400 text-xs" title="Wants a new contract before it runs down">⚠</span>}
+                  {p.fitness!=null && p.fitness<85 && !isInjured(p) && <span className={"ml-1 text-xs "+(p.fitness<55?"text-red-400":"text-yellow-400")} title="Match fitness — rest him to recover">{p.fitness}%</span>}
                 </td>
                 <td className="p-2 text-center"><PosTag p={p} /></td>
                 <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
