@@ -2,8 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Pocket GM — Soccer</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<meta name="theme-color" content="#0b1220" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Soccer GM" />
 <script src="vendor/react.production.min.js"></script>
 <script src="vendor/react-dom.production.min.js"></script>
 <script src="vendor/babel.min.js"></script>
@@ -2885,6 +2891,28 @@ _root.render(<App />);
       console.error(e);
     }
   })();
+</script>
+<script>
+  // PWA service worker: network-first for the app so a new push always wins,
+  // and auto-reload once when a fresh version takes over.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function(){
+      navigator.serviceWorker.register('sw.js').then(function(reg){
+        // Check for an update on every launch.
+        reg.update();
+        reg.addEventListener('updatefound', function(){
+          var nw = reg.installing;
+          if (!nw) return;
+          nw.addEventListener('statechange', function(){
+            if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+              // A new version is ready — reload to use it.
+              window.location.reload();
+            }
+          });
+        });
+      }).catch(function(e){ console.warn('SW registration failed', e); });
+    });
+  }
 </script>
 </body>
 </html>
