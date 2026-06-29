@@ -331,6 +331,8 @@ function makePlayer(pos, ageRange, meanAdj=0){
   computeOvr(p); setPotential(p); p.peakOvr = p.ovr; p.fitness = 100;
   p.traits = rollTraits(p); p.form = 6.7; p.morale = rint(60,80);
   p.salary = wageFor(p); p.years = rint(1,4); p.value = playerValue(p);
+  p.release = chance(0.45) ? round(p.value*(1.7+_rng())*10)/10 : null;   // some have a release clause
+  p.sellOn = null;   // {pct, toClubId} owed to a former club on the next sale
   return p;
 }
 
@@ -1536,24 +1538,35 @@ function transferWindowLabel(G){
   if(G.day<18) return `🔴 Window closed — January opens at matchday 19 (in ${19-G.day})`;
   return "🔴 Window closed — reopens in the summer";
 }
-function buyPlayer(G, p, fee){
+function buyPlayer(G, p, fee, opts={}){
   const buyer = G.clubs[G.userTeamId];
   if(!transferWindowOpen(G)) return { ok:false, msg:"The transfer window is closed." };
   if(buyer.budget < fee) return { ok:false, msg:"Not enough budget for that fee." };
   const seller = p.teamId!=null ? G.clubs[p.teamId] : null;
   buyer.budget = round((buyer.budget - fee)*10)/10;
   if(seller){ seller.budget = round((seller.budget + fee)*10)/10; }
+  // a sell-on agreed with the selling club is owed on our NEXT sale of this player
+  p.sellOn = (opts.sellOnPct && seller) ? { pct:opts.sellOnPct, toClubId:seller.id } : null;
   p.teamId = buyer.id; p.years = Math.max(p.years||0, rint(2,4)); p.salary = wageFor(p);
+  p.release = opts.release!=null ? opts.release : round(playerValue(p)*2*10)/10;   // new deal carries a fresh release clause
   autoPickXI(buyer, G.players);
-  logNews(G,"transfer",`➡️ Signed ${p.pos} ${p.name} (${p.ovr}) for ${money(fee)}`, buyer.id);
+  logNews(G,"transfer",`➡️ Signed ${p.pos} ${p.name} (${p.ovr}) for ${money(fee)}${opts.via==="release"?" (release clause)":""}`, buyer.id);
   return { ok:true };
 }
-// Sell one of your players to an AI club for a fee.
+// Sell one of your players to an AI club for a fee. Honors any sell-on owed to a former club.
 function sellPlayer(G, p, fee, toClubId){
   if(!transferWindowOpen(G)) return false;
   const seller = G.clubs[G.userTeamId];
   const buyer = toClubId!=null ? G.clubs[toClubId] : null;
-  seller.budget = round((seller.budget + fee)*10)/10;
+  let proceeds = fee;
+  if(p.sellOn && G.clubs[p.sellOn.toClubId] && p.sellOn.toClubId!==seller.id){
+    const cut = round(fee*(p.sellOn.pct/100)*10)/10;
+    proceeds = round((fee-cut)*10)/10;
+    G.clubs[p.sellOn.toClubId].budget = round((G.clubs[p.sellOn.toClubId].budget+cut)*10)/10;
+    logNews(G,"transfer",`💸 ${money(cut)} of the ${p.name} fee went to ${G.clubs[p.sellOn.toClubId].abbr} (sell-on)`, seller.id);
+  }
+  seller.budget = round((seller.budget + proceeds)*10)/10;
+  p.sellOn = null;
   if(buyer){ buyer.budget = round(Math.max(0, buyer.budget - fee)*10)/10; p.teamId = buyer.id; autoPickXI(buyer, G.players); }
   else { p.teamId = null; G.freeAgents=G.freeAgents||[]; G.freeAgents.push(p); }
   autoPickXI(seller, G.players);
@@ -1571,9 +1584,11 @@ function generateTransferOffers(G){
   const suitors = G.clubs.filter(c=>c.id!==G.userTeamId && c.budget>target.value*1.1);
   if(!suitors.length) return;
   const by = pick(suitors);
-  const fee = round(target.value * (0.9 + _rng()*0.6) *10)/10;
-  G.transferOffers.push({ id:"of"+Date.now()+Math.floor(_rng()*999), playerId:target.id, by:by.id, fee });
-  logNews(G,"offer",`💬 ${by.name} bid ${money(fee)} for ${target.name}`, G.userTeamId);
+  // if the player has a release clause a suitor can afford, they'll often just meet it
+  const clauseMet = target.release!=null && by.budget>=target.release && chance(0.6);
+  const fee = clauseMet ? target.release : round(target.value * (0.9 + _rng()*0.6) *10)/10;
+  G.transferOffers.push({ id:"of"+Date.now()+Math.floor(_rng()*999), playerId:target.id, by:by.id, fee, release:clauseMet });
+  logNews(G,"offer",`💬 ${by.name} ${clauseMet?"triggered the release clause for":"bid "+money(fee)+" for"} ${target.name}`, G.userTeamId);
 }
 // Sign an out-of-contract free agent (no fee; wage only). Squad cap keeps it sane.
 function signFreeAgent(G, p){
@@ -2311,9 +2326,12 @@ function RenewModal({G, p, commit, tShow, onClose}){
   const user = G.clubs[G.userTeamId];
   const demand = wageDemand(p);
   const termPremium = { 1:1.0, 2:1.0, 3:1.05, 4:1.10 };
+  const [rel, setRel] = useState(p.release!=null ? String(p.release) : "");
   const sign = yrs => {
     p.salary = clamp(round(demand*termPremium[yrs]*10)/10, 0.2, 40);
     p.years = yrs; p.unhappy = false;
+    const rv = parseFloat(rel);
+    p.release = (rel==="" || isNaN(rv)) ? null : round(Math.max(0,rv)*10)/10;
     commit(G); tShow(`${p.name} signed for ${yrs}y at ${money(p.salary)}/yr`); onClose();
   };
   const bill = wageBill(G, user.id);
@@ -2331,7 +2349,11 @@ function RenewModal({G, p, commit, tShow, onClose}){
           <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-xs text-slate-500">Club wage bill</div><div className="font-semibold tnum">{money(bill)}/yr</div></div>
           <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-xs text-slate-500">Transfer budget</div><div className="font-semibold tnum">{money(user.budget)}</div></div>
         </div>
-        <div className="text-xs text-slate-400 mb-2">Offer a contract length:</div>
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <div className="text-xs text-slate-400">Release clause (£M, blank = none)</div>
+          <input value={rel} onChange={e=>setRel(e.target.value.replace(/[^0-9.]/g,""))} placeholder="none" inputMode="decimal" className="w-24 bg-[#0d1526] rounded px-2 py-1 text-sm text-right tnum" />
+        </div>
+        <div className="text-xs text-slate-400 mb-2">Offer a contract length (sets the clause above):</div>
         <div className="grid grid-cols-4 gap-2">
           {[1,2,3,4].map(yrs=>(
             <button key={yrs} onClick={()=>sign(yrs)}
@@ -2340,7 +2362,7 @@ function RenewModal({G, p, commit, tShow, onClose}){
             </button>
           ))}
         </div>
-        <div className="text-[11px] text-slate-500 mt-3">Wages are paid from your budget each season. Let a deal run down and a rival can poach the player on a free transfer.</div>
+        <div className="text-[11px] text-slate-500 mt-3">A lower release clause makes the player easier for rivals to buy; leave it blank for none. Let a deal run down and a rival can poach him on a free.</div>
       </div>
     </div>
   );
@@ -2870,8 +2892,10 @@ function Transfers({G, commit, tShow}){
   market = market.slice(0,80);
   const squad = Object.values(G.players).filter(p=>p.teamId===user.id);
   const offers = G.transferOffers||[];
-  const feeFor = p => round(p.value * 1.15 *10)/10;
-  const doBuy = p => { const fee=feeFor(p); const r=buyPlayer(G,p,fee); if(r.ok){ commit(G); tShow(`Signed ${p.name}`); } else tShow(r.msg); };
+  const [sellOnDeal, setSellOnDeal] = useState(false);   // give seller 20% sell-on for -25% fee
+  const feeFor = p => round(p.value * 1.15 * (sellOnDeal?0.75:1) *10)/10;
+  const doBuy = p => { const fee=feeFor(p); const r=buyPlayer(G,p,fee,sellOnDeal?{sellOnPct:20}:{}); if(r.ok){ commit(G); tShow(`Signed ${p.name}`); } else tShow(r.msg); };
+  const doRelease = p => { if(p.release==null) return; const r=buyPlayer(G,p,p.release,{via:"release"}); if(r.ok){ commit(G); tShow(`Triggered ${p.name}'s release clause`); } else tShow(r.msg); };
   const doSell = p => { const fee=round(p.value*0.9*10)/10; sellPlayer(G,p,fee,null); commit(G); tShow(`Sold ${p.name} for ${money(fee)}`); };
   const acceptOffer = o => { const p=G.players[o.playerId]; if(!p){ G.transferOffers=offers.filter(x=>x.id!==o.id); commit(G); return; } sellPlayer(G,p,o.fee,o.by); G.transferOffers=offers.filter(x=>x.id!==o.id); commit(G); tShow(`Accepted ${money(o.fee)} for ${p.name}`); };
   const rejectOffer = o => { G.transferOffers=offers.filter(x=>x.id!==o.id); commit(G); };
@@ -2901,9 +2925,10 @@ function Transfers({G, commit, tShow}){
       {tab==="buy" && (
         <>
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search players…" className="w-full bg-[#16213a] rounded px-3 py-2 text-sm" />
+          <label className="flex items-center gap-2 text-xs text-slate-300 px-1"><input type="checkbox" checked={sellOnDeal} onChange={e=>setSellOnDeal(e.target.checked)} /> Offer a 20% sell-on clause to cut fees 25% (the seller takes 20% of your next sale)</label>
           <Card className="p-0 overflow-x-auto">
             <table className="w-full text-sm">
-              <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="text-left p-2">Player</th><th className="p-2">Club</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Age</th><th className="p-2">Fee</th><th className="p-2"></th></tr></thead>
+              <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="text-left p-2">Player</th><th className="p-2">Club</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Age</th><th className="p-2">Fee</th><th className="p-2">Release</th><th className="p-2"></th></tr></thead>
               <tbody>
                 {market.map(p=>(
                   <tr key={p.id} className="border-b border-[#15203a]">
@@ -2913,6 +2938,9 @@ function Transfers({G, commit, tShow}){
                     <td className="p-2 text-center"><ScoutOvrPill p={p} /></td>
                     <td className="p-2 text-center tnum">{p.age}</td>
                     <td className="p-2 text-center tnum">{money(feeFor(p))}</td>
+                    <td className="p-2 text-center tnum text-xs">{p.release!=null
+                      ? <button onClick={()=>doRelease(p)} disabled={!windowOpen||user.budget<p.release} className={"px-1.5 py-0.5 rounded "+((!windowOpen||user.budget<p.release)?"text-slate-500":"bg-amber-500/20 text-amber-300 hover:bg-amber-500/30")} title="Trigger release clause">{money(p.release)}</button>
+                      : <span className="text-slate-600">—</span>}</td>
                     <td className="p-2 text-center"><button onClick={()=>doBuy(p)} disabled={!windowOpen||user.budget<feeFor(p)} className={"px-2 py-1 rounded text-xs font-semibold "+((!windowOpen||user.budget<feeFor(p))?"bg-[#16213a] text-slate-500":"bg-emerald-500 text-slate-900")}>Buy</button></td>
                   </tr>
                 ))}
@@ -3663,6 +3691,7 @@ function PlayerModal({p, G, onClose}){
             <div className="text-xs text-slate-500 mt-0.5">Potential {scoutConf(p)>=0.85?p.pot:scoutedPot(p)+"~"} · Value {money(p.value)} · Wage {money(p.salary)}/yr{p.years>0?` · ${p.years}y left`:""}{p.fitness!=null&&p.fitness<100?` · ${p.fitness}% fit`:""}</div>
             <div className="text-xs text-slate-500 mt-0.5">{p.peakOvr?`Peak OVR ${p.peakOvr}`:""}{p.debutSeason!=null?` · Debut ${p.debutSeason}`:""}{p.hof?" · 🏅 Hall of Fame":""}{(p.awards||0)>0?` · ${p.awards}× POTS`:""}{(p.golden||0)>0?` · ${p.golden}× Golden Boot`:""}{(p.caps||0)>0?` · ${p.caps} caps`:""}{(p.intlG||0)>0?` · ${p.intlG} intl goals`:""}</div>
             {(formTag(p.form)||moraleTag(p.morale))&&<div className="text-xs mt-0.5">{formTag(p.form)&&<span className={formTag(p.form).c}>{formTag(p.form).t}</span>}{formTag(p.form)&&moraleTag(p.morale)&&<span className="text-slate-600"> · </span>}{moraleTag(p.morale)&&<span className={moraleTag(p.morale).c}>{moraleTag(p.morale).t}</span>}</div>}
+            {(p.release!=null||p.sellOn)&&<div className="text-xs mt-0.5 text-slate-500">{p.release!=null?`Release ${money(p.release)}`:""}{p.release!=null&&p.sellOn?" · ":""}{p.sellOn?`${p.sellOn.pct}% sell-on → ${(G.clubs[p.sellOn.toClubId]||{}).abbr||"?"}`:""}</div>}
             {p.traits&&p.traits.length>0&&<div className="mt-1 flex flex-wrap gap-1">{p.traits.map(t=>TRAITS[t]&&<span key={t} className={"text-[11px] px-1.5 py-0.5 rounded "+(TRAITS[t].bad?"bg-red-900/40 text-red-300":"bg-[#16213a] text-slate-300")} title={TRAITS[t].bad?"Negative trait":"Special trait"}>{TRAITS[t].emoji} {TRAITS[t].name}</span>)}</div>}
             {(isInjured(p)||isSuspended(p))&&<div className="text-xs mt-0.5">{isInjured(p)&&<span className="text-red-400">✚ {p.injury.type} ({p.injury.weeks}w)</span>}{isInjured(p)&&isSuspended(p)&&" · "}{isSuspended(p)&&<span className="text-orange-400">⛔ banned {p.susp} match{p.susp>1?"es":""}</span>}</div>}
           </div>
