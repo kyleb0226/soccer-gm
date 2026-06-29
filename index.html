@@ -774,9 +774,10 @@ function playKnockoutRound(G, cup, order){
     if(!b){ winners.push(ids[i]); continue; }
     ensureXI(a, G.players); ensureXI(b, G.players);
     const box = simMatch(a, b, G.players, { cup:true, neutral: isFinal, mustDecide:true, G });
+    const isCont = cup.country==null;   // continental cup has no country field
+    recordUserBox(G, box, isCont ? "Champions Cup" : "National Cup");
     if(isFinal){
       const userCountry = (G.clubs[G.userTeamId]||{}).country||0;
-      const isCont = cup.country==null;   // continental cup has no country field
       if(isCont || cup.country===userCountry) archiveFinal(G, isCont?CONT_CUP_NAME:cupName(cup.country), box);
     }
     const w = box.hs>=box.as ? a.id : b.id;   // mustDecide guarantees no draw
@@ -902,6 +903,7 @@ function playContGroupRound(G, cup){
       const a=G.clubs[aId], b=G.clubs[bId];
       ensureXI(a,G.players); ensureXI(b,G.players);
       const box=simMatch(a,b,G.players,{cup:true, G});   // group games can draw
+      recordUserBox(G, box, "Champions Cup");
       const ta=grp.table[aId], tb=grp.table[bId];
       ta.pld++; tb.pld++; ta.gf+=box.hs; ta.ga+=box.as; tb.gf+=box.as; tb.ga+=box.hs;
       if(box.hs>box.as){ ta.w++; ta.pts+=3; tb.l++; }
@@ -952,7 +954,7 @@ function simRound(G){
         hs:Math.max(box.hs,box.as), as:Math.min(box.hs,box.as) };
     }
     if(home.id===G.userTeamId || away.id===G.userTeamId){
-      G.lastMatch = serializeBox(box, G);
+      recordUserBox(G, box, "League");
       logNews(G, "match", `${home.abbr} ${box.hs}-${box.as} ${away.abbr}`, G.userTeamId);
       const userHome = home.id===G.userTeamId;
       const derby = home.rivalId===away.id;
@@ -998,6 +1000,17 @@ function serializeBox(box, G){
     hScorers: box.hScorers, aScorers: box.aScorers, motm: box.motm,
     stat: box.stat, timeline: box.timeline,
   };
+}
+// Record one of the USER's matches (any competition) so every game they played
+// this matchday is shown separately, not just the league fixture.
+function recordUserBox(G, box, comp){
+  if(box.home.id!==G.userTeamId && box.away.id!==G.userTeamId) return;
+  const m = serializeBox(box, G); m.comp = comp;
+  // reset the set only when a NEW matchday's first user game arrives, so league +
+  // cup games on the same matchday accumulate and byes don't wipe the last result
+  if(G._lmDay !== G.day){ G.lastMatches = []; G._lmDay = G.day; }
+  G.lastMatches.push(m);
+  G.lastMatch = m;
 }
 // Permanently store a cup/continental FINAL's full box score so it can be reopened
 // later from the Records hub. Kept for the user's national cup + the continental cup.
@@ -1107,10 +1120,11 @@ function liveFinish(G, M){
   const uHome=home.id===G.userTeamId; const derby=home.rivalId===away.id; bumpConfidenceForResult(G, uHome?M.hs>M.as:M.as>M.hs, M.hs===M.as, derby?1.8:1);
   const tl=[]; let rh=0,ra=0; M.events.slice().sort((a,b)=>a.min-b.min).forEach(e=>{ if(e.side==="H")rh++; else ra++; tl.push({min:e.min,side:e.side,name:e.name,assist:e.assist,hs:rh,as:ra}); });
   const poss=clamp(round(50+(n01(unitRatings(home,players).MID)-n01(unitRatings(away,players).MID))*45+2),28,72);
-  G.lastMatch={ season:G.season, day:G.day+1, home:home.abbr, away:away.abbr, homeName:home.name, awayName:away.name, hs:M.hs, as:M.as, neutral:false, cup:false,
+  G.lastMatch={ season:G.season, day:G.day+1, comp:"League", home:home.abbr, away:away.abbr, homeName:home.name, awayName:away.name, hs:M.hs, as:M.as, neutral:false, cup:false,
     hScorers:M.events.filter(e=>e.side==="H").map(e=>({name:e.name,min:e.min,assist:e.assist})),
     aScorers:M.events.filter(e=>e.side==="A").map(e=>({name:e.name,min:e.min,assist:e.assist})),
     motm:motm?motm.name:null, stat:{possH:poss,possA:100-poss,shH:M.shH,shA:M.shA,sotH:M.sotH,sotA:M.sotA,xgH:0,xgA:0}, timeline:tl };
+  G.lastMatches=[G.lastMatch]; G._lmDay=G.day;   // seed this week's results with the watched game; cups append below
   logNews(G,"match",`${home.abbr} ${M.hs}-${M.as} ${away.abbr}`,G.userTeamId);
   maybeInjure(home,players,G.settings); maybeInjure(away,players,G.settings);
   simRound(G);   // plays the rest of the round (skips the already-played user game) + upkeep
@@ -1304,7 +1318,7 @@ function startNextSeason(G){
   initCups(G);      // then reset the national cups for the new season
   G.clubs.forEach(c=>autoPickXI(c, G.players));
   G.transferOffers = [];
-  G.lastMatch = null;
+  G.lastMatch = null; G.lastMatches = [];
   setOwnerExpectation(G);
 }
 // In-season development: a small, age-curved + FORM-driven nudge a few times a season, so players
@@ -1768,7 +1782,7 @@ function takeJob(G, clubId){
   const old=G.clubs[G.userTeamId]; if(old) old.userControlled=false;
   G.userTeamId=clubId;
   const nc=G.clubs[clubId]; nc.userControlled=true;
-  G.boardConfidence=58; G.pendingSack=false; G.jobOffers=null; G.lastMatch=null;
+  G.boardConfidence=58; G.pendingSack=false; G.jobOffers=null; G.lastMatch=null; G.lastMatches=[];
   setOwnerExpectation(G);
   logNews(G,"job",`📝 Appointed manager of ${nc.name}`, clubId);
 }
@@ -1898,7 +1912,7 @@ function newGame(userTeamId, opts={}){
     userTeamId, clubs, players,
     schedule: buildSchedule(clubs),
     freeAgents: [], transferOffers: [], news: [], champions: [], contChampions: [], awardHistory: [], hof: [],
-    cups: null, contCup: null, lastMatch: null,
+    cups: null, contCup: null, lastMatch: null, lastMatches: [],
     finalsArchive: [], records: { players:{}, biggestWin:null }, trebles: [],
     intl: { history:[], lastPlayed:null },
     boardConfidence: 60, pendingSack: false, jobOffers: null,
@@ -2261,7 +2275,15 @@ function Hub({G, commit, tShow, setTab}){
         </Card>
       )}
 
-      {G.lastMatch && <Card><div className="text-sm text-slate-400 mb-2">Your last result</div><BoxScore m={G.lastMatch} G={G} /></Card>}
+      {(G.lastMatches&&G.lastMatches.length)
+        ? <Card><div className="text-sm text-slate-400 mb-2">{G.lastMatches.length>1?"Your results this matchday":"Your last result"}</div>
+            <div className="space-y-3">{G.lastMatches.map((m,i)=>(
+              <div key={i} className={i>0?"pt-3 border-t border-[#1d2940]":""}>
+                <div className="text-xs font-semibold mb-1">{m.comp==="League"?"⚽":m.comp==="National Cup"?"🏆":"🌍"} {m.comp||"Match"}</div>
+                <BoxScore m={m} G={G} />
+              </div>))}</div>
+          </Card>
+        : (G.lastMatch && <Card><div className="text-sm text-slate-400 mb-2">Your last result</div><BoxScore m={G.lastMatch} G={G} /></Card>)}
 
       {G.contCup && (()=>{
         const cc=G.contCup;
