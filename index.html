@@ -929,6 +929,7 @@ function computeAwards(G){
 // Roll the franchise into the next season: archive stats, age & develop players, expire
 // contracts, promotion/relegation, youth intake, finances, fresh fixtures + cup.
 function startNextSeason(G){
+  returnLoans(G);   // loanees go back to their owners before aging/contracts
   // archive each player's season into history + career, then reset season stats
   Object.values(G.players).forEach(p=>{
     if(p.stats.App>0){
@@ -1134,8 +1135,22 @@ function hallOfFameCheck(G){
 
 /* ----------------------------- transfers ------------------------------- */
 // Buy a player from another club: pay the fee from your budget; he joins your squad.
+// Paid transfers (buy/sell) + AI bids only happen in the summer or January window.
+// Free agents (out-of-contract) can still be signed any time, as in real football.
+function transferWindowOpen(G){
+  if(G.phase==="offseason") return true;
+  if(G.phase!=="regular") return false;
+  return G.day<=2 || (G.day>=18 && G.day<=21);   // summer tail + January
+}
+function transferWindowLabel(G){
+  if(G.phase==="offseason") return "🟢 Summer transfer window open";
+  if(transferWindowOpen(G)) return G.day<=2 ? "🟢 Summer window — closes after matchday 3" : "🟢 January window — closes after matchday 22";
+  if(G.day<18) return `🔴 Window closed — January opens at matchday 19 (in ${19-G.day})`;
+  return "🔴 Window closed — reopens in the summer";
+}
 function buyPlayer(G, p, fee){
   const buyer = G.clubs[G.userTeamId];
+  if(!transferWindowOpen(G)) return { ok:false, msg:"The transfer window is closed." };
   if(buyer.budget < fee) return { ok:false, msg:"Not enough budget for that fee." };
   const seller = p.teamId!=null ? G.clubs[p.teamId] : null;
   buyer.budget = round((buyer.budget - fee)*10)/10;
@@ -1147,6 +1162,7 @@ function buyPlayer(G, p, fee){
 }
 // Sell one of your players to an AI club for a fee.
 function sellPlayer(G, p, fee, toClubId){
+  if(!transferWindowOpen(G)) return false;
   const seller = G.clubs[G.userTeamId];
   const buyer = toClubId!=null ? G.clubs[toClubId] : null;
   seller.budget = round((seller.budget + fee)*10)/10;
@@ -1158,6 +1174,7 @@ function sellPlayer(G, p, fee, toClubId){
 // AI clubs occasionally bid for your best/surplus players.
 function generateTransferOffers(G){
   G.transferOffers = G.transferOffers || [];
+  if(!transferWindowOpen(G)) return;
   if(G.transferOffers.length>=4) return;
   const squad = Object.values(G.players).filter(p=>p.teamId===G.userTeamId);
   if(squad.length<=18) return;
@@ -1184,6 +1201,48 @@ function signFreeAgent(G, p){
 }
 function wageBill(G, clubId){
   return round(Object.values(G.players).filter(p=>p.teamId===clubId).reduce((s,p)=>s+(p.salary||0),0)*10)/10;
+}
+
+/* ----------------------------- loans ----------------------------------- */
+// A loaned player plays for (and develops at) the destination club this season, then returns to
+// his owner at the rollover. p.loanOwner = the club he belongs to; p.teamId = where he's playing now.
+function isLoaned(p){ return p && p.loanOwner!=null; }
+function loanOut(G, p, toClubId){
+  if(!transferWindowOpen(G)) return { ok:false, msg:"Loans only happen in the transfer window." };
+  if(p.teamId!==G.userTeamId || isLoaned(p)) return { ok:false, msg:"Can't loan that player out." };
+  const to = G.clubs[toClubId]; if(!to || to.id===G.userTeamId) return { ok:false, msg:"No club to loan to." };
+  if(Object.values(G.players).filter(x=>x.teamId===G.userTeamId).length<=16) return { ok:false, msg:"Squad too thin to loan anyone out." };
+  p.loanOwner = G.userTeamId; p.loanUntil = G.season; p.teamId = to.id;
+  autoPickXI(G.clubs[G.userTeamId], G.players); autoPickXI(to, G.players);
+  logNews(G,"loan",`📤 Loaned ${p.pos} ${p.name} (${p.ovr}) to ${to.name} for the season`, G.userTeamId);
+  return { ok:true };
+}
+// pick a sensible destination — a weaker club that will actually play him
+function loanOutAuto(G, p){
+  const cands = G.clubs.filter(c=>c.id!==G.userTeamId && Object.values(G.players).filter(x=>x.teamId===c.id).length<30);
+  if(!cands.length) return { ok:false, msg:"No club available to take him." };
+  cands.sort((a,b)=>clubStrength(a,G.players)-clubStrength(b,G.players));
+  const to = cands[rint(0, Math.min(7, cands.length-1))];
+  return loanOut(G, p, to.id);
+}
+function loanIn(G, p){
+  if(!transferWindowOpen(G)) return { ok:false, msg:"Loans only happen in the transfer window." };
+  if(p.teamId==null || p.teamId===G.userTeamId || isLoaned(p)) return { ok:false, msg:"Can't loan that player in." };
+  if(Object.values(G.players).filter(x=>x.teamId===G.userTeamId).length>=30) return { ok:false, msg:"Squad is full (30)." };
+  const from = G.clubs[p.teamId];
+  p.loanOwner = p.teamId; p.loanUntil = G.season; p.teamId = G.userTeamId;
+  autoPickXI(G.clubs[G.userTeamId], G.players); if(from) autoPickXI(from, G.players);
+  logNews(G,"loan",`📥 Loaned in ${p.pos} ${p.name} (${p.ovr}) from ${from?from.name:"?"} for the season`, G.userTeamId);
+  return { ok:true };
+}
+// Return all loanees to their owners (run at the rollover, before develop/contracts).
+function returnLoans(G){
+  Object.values(G.players).forEach(p=>{
+    if(p.loanOwner==null) return;
+    const ownerId = p.loanOwner, involvedUser = (p.teamId===G.userTeamId || ownerId===G.userTeamId);
+    if(G.clubs[ownerId]){ p.teamId = ownerId; if(involvedUser) logNews(G,"loan",`🔙 ${p.pos} ${p.name} returns from loan`, ownerId); }
+    p.loanOwner = null; p.loanUntil = null;
+  });
 }
 
 /* ----------------------------- owner ----------------------------------- */
@@ -2140,6 +2199,7 @@ function ResultDot({home, g}){
 /* ----------------------------- transfers ------------------------------- */
 function Transfers({G, commit, tShow}){
   const user = G.clubs[G.userTeamId];
+  const windowOpen = transferWindowOpen(G);
   const [tab, setTab] = useState("buy");
   const [q, setQ] = useState("");
   // BUY: other clubs' players, affordable-ish
@@ -2154,6 +2214,13 @@ function Transfers({G, commit, tShow}){
   const doSell = p => { const fee=round(p.value*0.9*10)/10; sellPlayer(G,p,fee,null); commit(G); tShow(`Sold ${p.name} for ${money(fee)}`); };
   const acceptOffer = o => { const p=G.players[o.playerId]; if(!p){ G.transferOffers=offers.filter(x=>x.id!==o.id); commit(G); return; } sellPlayer(G,p,o.fee,o.by); G.transferOffers=offers.filter(x=>x.id!==o.id); commit(G); tShow(`Accepted ${money(o.fee)} for ${p.name}`); };
   const rejectOffer = o => { G.transferOffers=offers.filter(x=>x.id!==o.id); commit(G); };
+  const doLoanOut = p => { const r=loanOutAuto(G,p); if(r.ok){ commit(G); tShow(`${p.name} out on loan`); } else tShow(r.msg); };
+  const doLoanIn = p => { const r=loanIn(G,p); if(r.ok){ commit(G); tShow(`${p.name} in on loan`); } else tShow(r.msg); };
+  // loan-out candidates: your own players (not already loaned), youngest/fringe first
+  const loanOutPool = squad.filter(p=>!isLoaned(p)).sort((a,b)=>(a.ovr-b.ovr)||(a.age-b.age)).slice(0,30);
+  // loan-in candidates: AI fringe players (not in their XI), decent quality
+  const loanInPool = Object.values(G.players).filter(p=>p.teamId!=null && p.teamId!==user.id && !isLoaned(p) && p.ovr>=55 && !(G.clubs[p.teamId].xi||[]).includes(p.id)).sort((a,b)=>b.ovr-a.ovr).slice(0,60);
+  const myLoans = Object.values(G.players).filter(p=>isLoaned(p) && (p.loanOwner===user.id || p.teamId===user.id));
   return (
     <div className="space-y-3">
       <Card>
@@ -2161,8 +2228,9 @@ function Transfers({G, commit, tShow}){
           <div className="font-semibold">Transfer Market</div>
           <div className="text-sm text-slate-400">Budget {money(user.budget)} · Squad {squad.length}/30</div>
         </div>
+        <div className={"text-xs mt-1 "+(windowOpen?"text-emerald-300":"text-amber-300")}>{transferWindowLabel(G)}{!windowOpen && " · free agents still signable"}</div>
         <div className="flex gap-2 mt-2 text-sm">
-          {[["buy","Buy"],["sell","Sell"],["offers","Offers"+(offers.length?` (${offers.length})`:"")]].map(([k,l])=>(
+          {[["buy","Buy"],["sell","Sell"],["loan","Loans"],["offers","Offers"+(offers.length?` (${offers.length})`:"")]].map(([k,l])=>(
             <button key={k} onClick={()=>setTab(k)} className={"px-3 py-1 rounded "+(tab===k?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>{l}</button>
           ))}
           <button onClick={()=>{ generateTransferOffers(G); commit(G); tShow("Market checked"); }} className="ml-auto px-3 py-1 rounded bg-[#16213a] text-slate-300 text-xs">Generate offer</button>
@@ -2184,7 +2252,7 @@ function Transfers({G, commit, tShow}){
                     <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
                     <td className="p-2 text-center tnum">{p.age}</td>
                     <td className="p-2 text-center tnum">{money(feeFor(p))}</td>
-                    <td className="p-2 text-center"><button onClick={()=>doBuy(p)} disabled={user.budget<feeFor(p)} className={"px-2 py-1 rounded text-xs font-semibold "+(user.budget<feeFor(p)?"bg-[#16213a] text-slate-500":"bg-emerald-500 text-slate-900")}>Buy</button></td>
+                    <td className="p-2 text-center"><button onClick={()=>doBuy(p)} disabled={!windowOpen||user.budget<feeFor(p)} className={"px-2 py-1 rounded text-xs font-semibold "+((!windowOpen||user.budget<feeFor(p))?"bg-[#16213a] text-slate-500":"bg-emerald-500 text-slate-900")}>Buy</button></td>
                   </tr>
                 ))}
               </tbody>
@@ -2204,7 +2272,7 @@ function Transfers({G, commit, tShow}){
                   <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
                   <td className="p-2 text-center tnum">{p.age}</td>
                   <td className="p-2 text-center tnum">{money(round(p.value*0.9*10)/10)}</td>
-                  <td className="p-2 text-center"><button onClick={()=>{ if(squad.length<=14){ tShow("Squad too small to sell."); return; } doSell(p); }} className="px-2 py-1 rounded bg-[#16213a] text-slate-200 text-xs">Sell</button></td>
+                  <td className="p-2 text-center"><button onClick={()=>{ if(!windowOpen){ tShow("The transfer window is closed."); return; } if(squad.length<=14){ tShow("Squad too small to sell."); return; } doSell(p); }} disabled={!windowOpen} className={"px-2 py-1 rounded text-xs "+(windowOpen?"bg-[#16213a] text-slate-200":"bg-[#16213a] text-slate-500")}>Sell</button></td>
                 </tr>
               ))}
             </tbody>
@@ -2226,6 +2294,52 @@ function Transfers({G, commit, tShow}){
               </div>
             </Card>
           ); })}
+        </div>
+      )}
+      {tab==="loan" && (
+        <div className="space-y-3">
+          {myLoans.length>0 && <Card>
+            <div className="font-semibold mb-2 text-sm">Active loans</div>
+            <div className="space-y-1 text-sm">
+              {myLoans.map(p=>{ const out=p.loanOwner===user.id; const other=G.clubs[out?p.teamId:p.loanOwner];
+                return <div key={p.id} className="flex items-center gap-2">
+                  <span className={out?"text-amber-300":"text-emerald-300"}>{out?"📤 OUT":"📥 IN"}</span>
+                  <PName p={p} className="flex-1" /><PosTag p={p} /><OvrPill v={p.ovr} />
+                  <span className="text-slate-500 text-xs">{out?"at":"from"} {other?other.abbr:"?"}</span>
+                </div>;
+              })}
+            </div>
+          </Card>}
+          {!windowOpen && <Card><div className="text-amber-300 text-sm">{transferWindowLabel(G)} — loans open in the transfer window.</div></Card>}
+          <Card className="p-0 overflow-x-auto">
+            <div className="px-3 pt-2 text-sm font-semibold">📥 Loan in <span className="text-slate-500 font-normal text-xs">— AI fringe players, returns at season's end</span></div>
+            <table className="w-full text-sm"><thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="text-left p-2">Player</th><th className="p-2">Club</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Age</th><th className="p-2"></th></tr></thead>
+              <tbody>{loanInPool.map(p=>(
+                <tr key={p.id} className="border-b border-[#15203a]">
+                  <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
+                  <td className="p-2 text-center text-slate-400">{G.clubs[p.teamId].abbr}</td>
+                  <td className="p-2 text-center"><PosTag p={p} /></td>
+                  <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
+                  <td className="p-2 text-center tnum">{p.age}</td>
+                  <td className="p-2 text-center"><button onClick={()=>doLoanIn(p)} disabled={!windowOpen} className={"px-2 py-1 rounded text-xs font-semibold "+(windowOpen?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-500")}>Loan</button></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </Card>
+          <Card className="p-0 overflow-x-auto">
+            <div className="px-3 pt-2 text-sm font-semibold">📤 Loan out <span className="text-slate-500 font-normal text-xs">— send a fringe player for game time</span></div>
+            <table className="w-full text-sm"><thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="text-left p-2">Player</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Age</th><th className="p-2"></th></tr></thead>
+              <tbody>{loanOutPool.map(p=>(
+                <tr key={p.id} className="border-b border-[#15203a]">
+                  <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
+                  <td className="p-2 text-center"><PosTag p={p} /></td>
+                  <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
+                  <td className="p-2 text-center tnum">{p.age}</td>
+                  <td className="p-2 text-center"><button onClick={()=>doLoanOut(p)} disabled={!windowOpen} className={"px-2 py-1 rounded text-xs "+(windowOpen?"bg-[#16213a] text-slate-200":"bg-[#16213a] text-slate-500")}>Loan out</button></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </Card>
         </div>
       )}
     </div>
