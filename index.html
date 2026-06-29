@@ -557,15 +557,23 @@ const SCORE_W = { GK:0, RB:0.6, LB:0.6, CB:0.7, RWB:0.9, LWB:0.9, CDM:1.0, CM:2.
 const CREATE_W = { GK:0, RB:1.2, LB:1.2, CB:0.4, RWB:2.0, LWB:2.0, CDM:1.4, CM:3.2, CAM:5.0, RM:4.2, LM:4.2, RW:4.5, LW:4.5, ST:2.2 };
 function applyMatch(home, away, hs, as, players, box, opts){
   const isCup = !!opts.cup;
+  const isCont = !!(opts.cont);
+  // competition key for per-comp stat tracking: "L" league, "C" nat cup, "CC" continental
+  const compKey = isCont ? "CC" : isCup ? "C" : "L";
+  const addComp = (p, k, n=1) => {
+    if(!p.compStats) p.compStats={};
+    if(!p.compStats[compKey]) p.compStats[compKey]=emptyStats();
+    p.compStats[compKey][k] = (p.compStats[compKey][k]||0) + n;
+  };
   const G = opts.G;
   const st = box.stat || {};
   const H = lineupOf(home, players), A = lineupOf(away, players);
   // appearances + minutes for everyone who started (90'); a couple of bench cameos
   function credit(side, club){
     const xiIds = new Set(side.map(({p})=>p.id));
-    side.forEach(({p})=>{ p.stats.App++; p.stats.Min += 90; const loss = rint(18,26) * (hasTrait(p,"engine")?0.6:1); p.fitness = clamp((p.fitness!=null?p.fitness:100) - Math.round(loss), 0, 100); });
+    side.forEach(({p})=>{ p.stats.App++; p.stats.Min += 90; addComp(p,"App"); addComp(p,"Min",90); const loss = rint(18,26) * (hasTrait(p,"engine")?0.6:1); p.fitness = clamp((p.fitness!=null?p.fitness:100) - Math.round(loss), 0, 100); });
     const bench = (club.bench||[]).map(id=>players[id]).filter(p=>p && isAvailable(p) && !xiIds.has(p.id));
-    bench.slice(0,3).forEach(p=>{ if(chance(0.5)){ const m=rint(8,30); p.stats.App++; p.stats.Min += m; p.fitness = clamp((p.fitness!=null?p.fitness:100) - round(m/90*22), 0, 100); } });
+    bench.slice(0,3).forEach(p=>{ if(chance(0.5)){ const m=rint(8,30); p.stats.App++; p.stats.Min += m; addComp(p,"App"); addComp(p,"Min",m); p.fitness = clamp((p.fitness!=null?p.fitness:100) - round(m/90*22), 0, 100); } });
   }
   credit(H, home); credit(A, away);
   // distribute goals to scorers + assisters
@@ -574,13 +582,13 @@ function applyMatch(home, away, hs, as, players, box, opts){
     for(let i=0;i<n;i++){
       const sc = wpick(side, o => (SCORE_W[o.slot]||0) * (0.5 + n01(o.p.sho)) * (hasTrait(o.p,"poacher")?1.6:1) * (isCup&&hasTrait(o.p,"bigGame")?1.3:1));
       if(!sc) continue;
-      sc.p.stats.G++;
+      sc.p.stats.G++; addComp(sc.p,"G");
       const min = rint(1,90);
       let assistName = null, assistId = null;
       if(chance(0.72)){
         const cands = side.filter(o => o !== sc);
         const as2 = wpick(cands, o => (CREATE_W[o.slot]||0) * (0.5 + n01(o.p.pas*0.6 + o.p.dri*0.4)) * (hasTrait(o.p,"playmaker")?1.6:1));
-        if(as2){ as2.p.stats.A++; as2.p.stats.KP++; assistName = as2.p.name; assistId = as2.p.id; }
+        if(as2){ as2.p.stats.A++; as2.p.stats.KP++; addComp(as2.p,"A"); addComp(as2.p,"KP"); assistName = as2.p.name; assistId = as2.p.id; }
       }
       out.push({ name: sc.p.name, id: sc.p.id, min, assist: assistName, assistId });
     }
@@ -594,31 +602,31 @@ function applyMatch(home, away, hs, as, players, box, opts){
     for(let i=0;i<shots;i++){
       const o = wpick(side, q => (SCORE_W[q.slot]||0) * (0.5 + n01(q.p.sho)));
       if(!o) continue;
-      o.p.stats.SH++;
-      if(i < sot) o.p.stats.SOT++;
-      o.p.stats.xG += +(xg/Math.max(1,shots)).toFixed(2);
+      o.p.stats.SH++; addComp(o.p,"SH");
+      if(i < sot){ o.p.stats.SOT++; addComp(o.p,"SOT"); }
+      const xgAdd = +(xg/Math.max(1,shots)).toFixed(2); o.p.stats.xG += xgAdd; addComp(o.p,"xG",xgAdd);
     }
     const kp = Math.max(0, round(shots*0.55) - 0);   // chances created beyond assists
-    for(let i=0;i<kp;i++){ const o = wpick(side, q => (CREATE_W[q.slot]||0) * (0.5 + n01(q.p.pas)) * (hasTrait(q.p,"playmaker")?1.5:1)); if(o) o.p.stats.KP++; }
+    for(let i=0;i<kp;i++){ const o = wpick(side, q => (CREATE_W[q.slot]||0) * (0.5 + n01(q.p.pas)) * (hasTrait(q.p,"playmaker")?1.5:1)); if(o){ o.p.stats.KP++; addComp(o.p,"KP"); } }
   }
   spread(H, st.shH||hs, st.sotH||hs, st.xgH||hs);
   spread(A, st.shA||as, st.sotA||as, st.xgA||as);
   // goalkeeper saves = shots on target faced minus goals conceded
   const gkOf = side => side.find(o=>o.slot==="GK");
   const gH = gkOf(H), gA = gkOf(A);
-  if(gH) gH.p.stats.Sv += Math.max(0, (st.sotA||0) - as);
-  if(gA) gA.p.stats.Sv += Math.max(0, (st.sotH||0) - hs);
+  if(gH){ const sv=Math.max(0,(st.sotA||0)-as); gH.p.stats.Sv+=sv; addComp(gH.p,"Sv",sv); }
+  if(gA){ const sv=Math.max(0,(st.sotH||0)-hs); gA.p.stats.Sv+=sv; addComp(gA.p,"Sv",sv); }
   // clean sheets
-  if(as===0) H.forEach(({p,slot})=>{ if(BAND[slot]<=2 || slot==="GK") p.stats.CS++; });
-  if(hs===0) A.forEach(({p,slot})=>{ if(BAND[slot]<=2 || slot==="GK") p.stats.CS++; });
+  if(as===0) H.forEach(({p,slot})=>{ if(BAND[slot]<=2||slot==="GK"){ p.stats.CS++; addComp(p,"CS"); } });
+  if(hs===0) A.forEach(({p,slot})=>{ if(BAND[slot]<=2||slot==="GK"){ p.stats.CS++; addComp(p,"CS"); } });
   // cards -> suspensions (yellows accumulate to a ban; red = multi-match ban)
   function card(p, slot){
     const yc = clamp(0.10 + (BAND[slot]<=2?0.06:0) - n01(p.phy)*0.04, 0.04, 0.22);
     if(chance(yc)){
-      p.stats.YC++; p.ycCount = (p.ycCount||0) + 1;
+      p.stats.YC++; addComp(p,"YC"); p.ycCount = (p.ycCount||0) + 1;
       if(p.ycCount >= YC_BAN_THRESHOLD){ p.ycCount = 0; banPlayer(G, p, 1, "yellow-card accumulation"); }
     }
-    if(chance(0.01)){ p.stats.RC++; const m = rint(2,3); injure(p, rint(2,4)); banPlayer(G, p, m, "a red card"); }
+    if(chance(0.01)){ p.stats.RC++; addComp(p,"RC"); const m = rint(2,3); injure(p, rint(2,4)); banPlayer(G, p, m, "a red card"); }
     if(MORALE_ON && hasTrait(p,"injuryProne") && G && (!G.settings || G.settings.injuries!==false) && chance(0.03) && !isInjured(p)) injure(p, rint(1,5));
   }
   [H,A].forEach(side => side.forEach(({p,slot})=>card(p,slot)));
@@ -647,7 +655,7 @@ function applyMatch(home, away, hs, as, players, box, opts){
       if(conceded>=3 && (BAND[slot]<=2||slot==="GK")) r -= 0.5;
       if(MORALE_ON && isCup && hasTrait(p,"bigGame")) r += 0.45;
       r = clamp(r + gauss(0, 0.35), 4.0, 10);
-      p.stats.ratingSum += r; p.stats.ratingN++;
+      p.stats.ratingSum += r; p.stats.ratingN++; addComp(p,"ratingSum",r); addComp(p,"ratingN");
       p.form = p.form==null ? r : +(p.form*0.7 + r*0.3).toFixed(2);   // rolling form
       if(r>bestR){ bestR=r; best=p; }
     });
@@ -659,7 +667,7 @@ function applyMatch(home, away, hs, as, players, box, opts){
   const motmH = rate(H, hs, as, res, st.shH||0, st.shA||0, st.possH||50);
   const motmA = rate(A, as, hs, -res, st.shA||0, st.shH||0, st.possA||50);
   const motm = (res>=0 ? motmH : motmA) || motmH || motmA;
-  if(motm) motm.stats.MOTM++;
+  if(motm){ motm.stats.MOTM++; addComp(motm,"MOTM"); }
   box.motm = motm ? motm.name : null;
   // standings (cup matches don't affect the league table)
   if(!isCup){
@@ -773,8 +781,8 @@ function playKnockoutRound(G, cup, order){
     const a = G.clubs[ids[i]], b = G.clubs[ids[i+1]];
     if(!b){ winners.push(ids[i]); continue; }
     ensureXI(a, G.players); ensureXI(b, G.players);
-    const box = simMatch(a, b, G.players, { cup:true, neutral: isFinal, mustDecide:true, G });
     const isCont = cup.country==null;   // continental cup has no country field
+    const box = simMatch(a, b, G.players, { cup:true, cont:isCont, neutral: isFinal, mustDecide:true, G });
     recordUserBox(G, box, isCont ? "Champions Cup" : "National Cup");
     if(isFinal){
       const userCountry = (G.clubs[G.userTeamId]||{}).country||0;
@@ -903,7 +911,7 @@ function playContGroupRound(G, cup){
       const aId=grp.teams[ai], bId=grp.teams[bi]; if(aId==null||bId==null) return;
       const a=G.clubs[aId], b=G.clubs[bId];
       ensureXI(a,G.players); ensureXI(b,G.players);
-      const box=simMatch(a,b,G.players,{cup:true, G});   // group games can draw
+      const box=simMatch(a,b,G.players,{cup:true, cont:true, G});   // group games can draw
       recordUserBox(G, box, "Champions Cup");
       const ta=grp.table[aId], tb=grp.table[bId];
       ta.pld++; tb.pld++; ta.gf+=box.hs; ta.ga+=box.as; tb.gf+=box.as; tb.ga+=box.hs;
@@ -1252,7 +1260,7 @@ function startNextSeason(G){
       if(p.history.length>capH) p.history = p.history.slice(-capH);
       for(const k in p.stats) p.career[k] = (p.career[k]||0) + p.stats[k];
     }
-    p.stats = emptyStats();
+    p.stats = emptyStats(); p.compStats = {};
     p.susp = 0; p.ycCount = 0; p.fitness = 100; p.seasonDev = 0;   // bans/yellows clear; preseason rest; reset in-season growth tally
   });
   // record club season history + reset table
@@ -2303,7 +2311,7 @@ function Hub({G, commit, tShow, setTab}){
   const pos = table.findIndex(c=>c.id===user.id)+1;
   const doSim = fn => { fn(G); commit(G); };
   const [live, setLive] = useState(false);
-  const playMatchday = () => { if(watchOn(G) && userGame && !userGame.played){ setLive(true); } else doSim(simRound); };
+  const playMatchday = () => { if(watchOn(G) && userGame && !userGame.played){ setLive(true); } else doSim(simToNextUserMatch); };
   const offseason = G.phase==="offseason";
   return (
     <div className="space-y-4">
@@ -2343,10 +2351,12 @@ function Hub({G, commit, tShow, setTab}){
             </div>
           ) : <div className="text-slate-400">No fixture this matchday (bye).</div>}
           <div className="flex flex-wrap gap-2 mt-3">
-            <button onClick={playMatchday} className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold">{watchOn(G)&&userGame?"▶ Watch Match":"Play Matchday"}</button>
-            <button onClick={()=>doSim(simToNextUserMatch)} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200">Sim to Next Match</button>
-            <button onClick={()=>{ for(let i=0;i<7 && G.phase==="regular" && !G.pendingSack;i++) simRound(G); commit(G); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200">Sim 7 MD</button>
-            <button onClick={()=>{ generateTransferOffers(G); commit(G); tShow("Checked the market"); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200">Check Market</button>
+            <button onClick={playMatchday} className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold">
+              {watchOn(G)&&userGame?"▶ Watch Match":userGame?"▶ Play My Match":"▶ Next Match"}
+            </button>
+            <button onClick={()=>doSim(simRound)} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200 text-sm">Play whole matchday</button>
+            <button onClick={()=>{ for(let i=0;i<7 && G.phase==="regular" && !G.pendingSack;i++) simToNextUserMatch(G); commit(G); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200 text-sm">Skip 7 weeks</button>
+            <button onClick={()=>{ generateTransferOffers(G); commit(G); tShow("Checked the market"); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200 text-sm">Check Market</button>
           </div>
         </Card>
       )}
@@ -3090,6 +3100,7 @@ function userFixtureFeed(G){
   // domestic cup (current season)
   const cup = (G.cups||[]).find(c=>c.country===(G.clubs[uid].country||0));
   if(cup){
+    // played ties
     CUP_ORDER.forEach(r=>{
       const ties = (cup.results||{})[r]; if(!ties) return;
       const t = ties.find(x=>x.home===uid||x.away===uid); if(!t) return;
@@ -3097,13 +3108,19 @@ function userFixtureFeed(G){
       out.push({ md:CUP_MD_REV[r], comp:"cup", home, oppName:(G.clubs[home?t.away:t.home]||{}).name||"?",
         played:true, gf:home?t.hs:t.as, ga:home?t.as:t.hs, round:r });
     });
-    if(cup.winner==null && (cup.alive||[]).includes(uid) && !(cup.results||{})[cup.round]){
-      out.push({ md:CUP_MD_REV[cup.round], comp:"cup", home:null, oppName:"to be drawn", played:false, round:cup.round });
+    // all future rounds the user is still in (show as upcoming)
+    if(cup.winner==null && (cup.alive||[]).includes(uid)){
+      const doneRounds=new Set(Object.keys(cup.results||{}));
+      CUP_ORDER.filter(r=>!doneRounds.has(r)).forEach(r=>{
+        out.push({ md:CUP_MD_REV[r], comp:"cup", home:null, oppName:"TBD", played:false, round:r });
+      });
     }
   }
   // continental (current season)
   const cc = G.contCup;
-  if(cc){
+  const contQual = cc && (cc.qualifiers||[]).includes(uid);
+  if(cc && contQual){
+    // played group results
     (cc.groups||[]).forEach(grp=>{
       (grp.results||[]).forEach(res=>{
         if(res.home!==uid && res.away!==uid) return;
@@ -3112,6 +3129,16 @@ function userFixtureFeed(G){
           played:true, gf:home?res.hs:res.as, ga:home?res.as:res.hs, round:"Group" });
       });
     });
+    // remaining group matchdays (not yet played)
+    if(cc.phase==="group"){
+      const doneMds=new Set((cc.groups||[]).flatMap(g=>(g.results||[]).map(r=>r.md)));
+      [0,1,2].filter(m=>!doneMds.has(m)).forEach(m=>{
+        const mdName=["G1","G2","G3"][m];
+        out.push({ md:CONT_MD_REV[mdName], comp:"cont", home:null, oppName:"TBD", played:false, round:"Group MD"+(m+1) });
+      });
+    }
+    // played KO ties
+    const alive=(cc.alive||[]).includes(uid);
     CONT_ORDER.forEach(r=>{
       const ties=(cc.results||{})[r]; if(!ties) return;
       const t=ties.find(x=>x.home===uid||x.away===uid); if(!t) return;
@@ -3119,6 +3146,13 @@ function userFixtureFeed(G){
       out.push({ md:CONT_MD_REV[r], comp:"cont", home, oppName:(G.clubs[home?t.away:t.home]||{}).name||"?",
         played:true, gf:home?t.hs:t.as, ga:home?t.as:t.hs, round:r });
     });
+    // upcoming KO rounds
+    if(alive && cc.phase==="ko"){
+      const doneKO=new Set(Object.keys(cc.results||{}));
+      CONT_ORDER.filter(r=>!doneKO.has(r)).forEach(r=>{
+        out.push({ md:CONT_MD_REV[r], comp:"cont", home:null, oppName:"TBD", played:false, round:r });
+      });
+    }
   }
   return out.sort((a,b)=> a.md-b.md || (a.comp==="league"?-1:1));
 }
@@ -4231,7 +4265,17 @@ function PlayerModal({p, G, onClose}){
           </div>
           <div>
             <div className="text-sm font-semibold mb-1">This season</div>
-            <StatLine s={st} gk={p.pos==="GK"} />
+            {/* per-competition filter for this season's stats */}
+            {(()=>{
+              const cs = p.compStats||{};
+              const comps = [["all","All",st],["L","⚽ League",cs.L],["C","🏆 Cup",cs.C],["CC","🌍 Champs Cup",cs.CC]].filter(([k,_,s])=>k==="all"||(s&&s.App>0));
+              const [comp, setComp] = useState("all");
+              const dispSt = comp==="all"?st:(cs[comp]||emptyStats());
+              return <>
+                {comps.length>1 && <div className="flex gap-1 flex-wrap mb-2">{comps.map(([k,l])=><button key={k} onClick={()=>setComp(k)} className={"px-2 py-1 rounded text-xs font-semibold "+(comp===k?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300")}>{l}</button>)}</div>}
+                <StatLine s={dispSt} gk={p.pos==="GK"} />
+              </>;
+            })()}
           </div>
           {leagues.length>1 && (
             <div className="flex gap-1 flex-wrap">
