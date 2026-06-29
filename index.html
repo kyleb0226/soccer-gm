@@ -883,6 +883,8 @@ function simRound(G){
     if(home.id===G.userTeamId || away.id===G.userTeamId){
       G.lastMatch = serializeBox(box, G);
       logNews(G, "match", `${home.abbr} ${box.hs}-${box.as} ${away.abbr}`, G.userTeamId);
+      const userHome = home.id===G.userTeamId;
+      bumpConfidenceForResult(G, userHome?box.hs>box.as:box.as>box.hs, box.hs===box.as);
     }
     maybeInjure(home, G.players, G.settings); maybeInjure(away, G.players, G.settings);
   });
@@ -904,6 +906,12 @@ function simRound(G){
       G.contChampions = G.contChampions || [];
       G.contChampions.unshift({ season:G.season, id:wc.id, abbr:wc.abbr });
     }
+  }
+  // mid-season sacking: confidence bottoms out after enough games played
+  if(jobSecurityOn(G) && !G.pendingSack && G.day>=8 && (G.boardConfidence!=null && G.boardConfidence<=6)){
+    G.pendingSack = true;
+    G.jobOffers = generateJobOffers(G, "sack");
+    logNews(G, "job", `❗ The ${G.clubs[G.userTeamId].name} board has sacked you after a poor run.`, G.userTeamId);
   }
   G.day++;
   if(G.day >= G.schedule.length){ G.phase = "offseason"; finalizeSeason(G); }
@@ -949,7 +957,7 @@ function simToNextUserMatch(G){
   let guard = 0;
   while(G.phase==="regular" && guard++ < 60){
     simRound(G);
-    if(G.phase!=="regular") break;
+    if(G.phase!=="regular" || G.pendingSack) break;
     const next = G.schedule[G.day];
     if(next && next.some(g=>g.home===G.userTeamId || g.away===G.userTeamId)) break;
   }
@@ -967,7 +975,30 @@ function finalizeSeason(G){
     addHonour(G.clubs[champ.id], G.season, "league", `${divName(ci,0)} champions`);
   });
   computeAwards(G);
+  evaluateBoardSeasonEnd(G);
   G.phase = "offseason";
+}
+// End-of-season verdict: did the manager meet the owner's expectation? Adjust
+// confidence sharply, then sack an underperformer or field a poaching approach.
+function evaluateBoardSeasonEnd(G){
+  if(!jobSecurityOn(G) || G.pendingSack) return;
+  const user = G.clubs[G.userTeamId];
+  const pos = leaguePos(G, user) || 12;
+  const target = expTargetPos(G);
+  if(G.boardConfidence==null) G.boardConfidence=60;
+  const beat = target - pos;   // >0 = exceeded expectation
+  G.boardConfidence = clamp(G.boardConfidence + beat*5, 0, 100);
+  const div0 = user.div===0;
+  const relegated = div0 && pos > (tableFor(G,0,user.country||0).length - 3);
+  if((relegated && G.boardConfidence<45) || G.boardConfidence<=12){
+    G.pendingSack = true;
+    G.jobOffers = generateJobOffers(G, "sack");
+    logNews(G, "job", `❗ The ${user.name} board has parted ways with you after the season.`, user.id);
+  } else if(beat>=4 && G.boardConfidence>=70){
+    // overperformed — a bigger club may come calling (optional move)
+    const offers = generateJobOffers(G, "approach");
+    if(offers.length){ G.jobOffers = offers; logNews(G, "job", `📈 Your work has attracted interest from bigger clubs.`, user.id); }
+  }
 }
 function computeAwards(G){
   // a per-country award set (top flight only)
@@ -1382,6 +1413,48 @@ function setOwnerExpectation(G){
   else G.expectation = { text:"Avoid relegation", target:"safe" };
 }
 
+/* ----------------------------- job security ---------------------------- */
+// Board confidence (0-100) reacts to match results during the season and to
+// whether the club meets its owner's expectation. Bottom out → sacked, with
+// job offers to continue a career elsewhere. All gated by settings.jobSecurity.
+function jobSecurityOn(G){ return !G.settings || G.settings.jobSecurity!==false; }
+function expTargetPos(G){
+  const t=(G.expectation||{}).target;
+  if(t==="promo"||t==="top3") return 3;
+  if(t==="top10") return 10;
+  return 17;   // "safe" — anything above the drop zone
+}
+function confLabel(c){ return c>=80?"Secure":c>=60?"Backed":c>=40?"Watching":c>=20?"Under pressure":"On the brink"; }
+function bumpConfidenceForResult(G, win, draw){
+  if(!jobSecurityOn(G)) return;
+  if(G.boardConfidence==null) G.boardConfidence=60;
+  G.boardConfidence = clamp(G.boardConfidence + (win?4: draw?0.5: -4), 0, 100);
+}
+// Pick clubs that would hire the user right now (a sacking) or come calling
+// (a poaching approach when overperforming). Returns up to 3 offers.
+function generateJobOffers(G, kind){
+  const cur = G.clubs[G.userTeamId];
+  const curStr = clubStrength(cur, G.players);
+  let pool = G.clubs.filter(c=>c.id!==G.userTeamId && !c.userControlled);
+  if(kind==="approach"){
+    // bigger / stronger clubs poaching an overperformer
+    pool = pool.filter(c=>clubStrength(c,G.players) > curStr+3).sort((a,b)=>clubStrength(b,G.players)-clubStrength(a,G.players));
+  } else {
+    // after a sacking: clubs roughly at or below the user's level, vacancy-style
+    pool = pool.filter(c=>clubStrength(c,G.players) <= curStr+4).sort((a,b)=>clubStrength(b,G.players)-clubStrength(a,G.players));
+    if(pool.length<3) pool = G.clubs.filter(c=>c.id!==G.userTeamId && !c.userControlled).sort((a,b)=>clubStrength(b,G.players)-clubStrength(a,G.players));
+  }
+  return pool.slice(0,3).map(c=>({ id:c.id, name:c.name, div:c.div, country:c.country||0, str:clubStrength(c,G.players), kind }));
+}
+function takeJob(G, clubId){
+  const old=G.clubs[G.userTeamId]; if(old) old.userControlled=false;
+  G.userTeamId=clubId;
+  const nc=G.clubs[clubId]; nc.userControlled=true;
+  G.boardConfidence=58; G.pendingSack=false; G.jobOffers=null; G.lastMatch=null;
+  setOwnerExpectation(G);
+  logNews(G,"job",`📝 Appointed manager of ${nc.name}`, clubId);
+}
+
 /* ----------------------------- news ------------------------------------ */
 function logNews(G, type, msg, teamId){
   if(!G) return;
@@ -1449,6 +1522,8 @@ function migrate(G){
     G.settings = G.settings || {};
     const defs = { injuries:true, jobSecurity:true, morale:true, internationals:true, watchMatches:false };
     for(const k in defs){ if(G.settings[k]==null) G.settings[k]=defs[k]; }
+    if(G.boardConfidence==null) G.boardConfidence=60;
+    if(G.pendingSack==null) G.pendingSack=false;
     G.version = SAVE_VERSION;
   }catch(e){}
   return G;
@@ -1481,6 +1556,7 @@ function newGame(userTeamId, opts={}){
     freeAgents: [], transferOffers: [], news: [], champions: [], contChampions: [], awardHistory: [], hof: [],
     cups: null, contCup: null, lastMatch: null,
     finalsArchive: [], records: { players:{}, biggestWin:null },
+    boardConfidence: 60, pendingSack: false, jobOffers: null,
     settings: { injuries:true, jobSecurity:true, morale:true, internationals:true, watchMatches:false },
   };
   // seed a free-agent pool sized for a bigger world
@@ -1576,6 +1652,7 @@ function App(){
       {toast && <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-emerald-500 text-slate-900 px-4 py-2 rounded-lg font-semibold shadow-lg z-50">{toast}</div>}
       {globalPlayer && <PlayerModal p={globalPlayer} G={G} onClose={()=>setGlobalPlayer(null)} />}
       {showSettings && <SettingsModal G={G} commit={commit} tShow={tShow} onClose={()=>setShowSettings(false)} />}
+      {G.jobOffers && G.jobOffers.length>0 && <JobModal G={G} commit={commit} tShow={tShow} setTab={setTab} onClose={()=>{ setG({...G}); }} onRetire={toMenu} />}
     </div>
     </PlayerCtx.Provider>
   );
@@ -1698,6 +1775,11 @@ function Hub({G, commit, tShow, setTab}){
             <div className="text-xl font-bold">{user.name}</div>
             <div className="text-sm text-slate-400">{COUNTRIES[user.country||0].flag} {divName(user.country||0,user.div)} · {pos>0?ordinal(pos):"—"} place · {user.pts} pts · GD {gd(user)>=0?"+":""}{gd(user)}</div>
             <div className="text-xs text-amber-300/90 mt-1">Board: {G.expectation?G.expectation.text:"—"}</div>
+            {jobSecurityOn(G) && (()=>{ const c=G.boardConfidence==null?60:G.boardConfidence; const col=c>=60?"bg-emerald-500":c>=40?"bg-yellow-500":c>=20?"bg-orange-500":"bg-red-500";
+              return (<div className="mt-1.5 w-48 max-w-full">
+                <div className="flex justify-between text-[11px] text-slate-400"><span>Job security</span><span className={c<20?"text-red-400":""}>{confLabel(c)}</span></div>
+                <div className="h-1.5 rounded bg-[#0d1526] overflow-hidden"><div className={"h-full "+col} style={{width:c+"%"}}></div></div>
+              </div>); })()}
           </div>
           <div className="text-right">
             <div className="text-3xl font-black">{clubStrength(user, G.players)}</div>
@@ -1723,7 +1805,7 @@ function Hub({G, commit, tShow, setTab}){
           <div className="flex flex-wrap gap-2 mt-3">
             <button onClick={()=>doSim(simRound)} className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold">Play Matchday</button>
             <button onClick={()=>doSim(simToNextUserMatch)} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200">Sim to Next Match</button>
-            <button onClick={()=>{ for(let i=0;i<7 && G.phase==="regular";i++) simRound(G); commit(G); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200">Sim 7 MD</button>
+            <button onClick={()=>{ for(let i=0;i<7 && G.phase==="regular" && !G.pendingSack;i++) simRound(G); commit(G); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200">Sim 7 MD</button>
             <button onClick={()=>{ generateTransferOffers(G); commit(G); tShow("Checked the market"); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200">Check Market</button>
           </div>
         </Card>
@@ -3118,19 +3200,66 @@ function StatLine({s, gk}){
   );
 }
 
+/* ----------------------------- job offers ------------------------------ */
+function JobModal({G, commit, tShow, setTab, onClose, onRetire}){
+  const sack = !!G.pendingSack;
+  const offers = G.jobOffers||[];
+  const accept = o => { takeJob(G, o.id); commit(G); setTab("hub"); tShow(`Appointed manager of ${G.clubs[o.id].name}`); };
+  const decline = () => { G.jobOffers=null; commit(G); onClose(); };
+  return (
+    <div className="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center p-4" onClick={sack?undefined:decline}>
+      <div className="bg-[#101a30] border border-[#1d2940] rounded-2xl w-full max-w-md max-h-[85vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
+        <div className="p-4 border-b border-[#1d2940]">
+          <div className="font-bold text-lg">{sack?"📉 You've been sacked":"📈 A bigger club wants you"}</div>
+          <div className="text-sm text-slate-400 mt-1">{sack?"Pick your next job to continue your management career — or retire.":"You've earned an approach. Take the job, or stay and keep building."}</div>
+        </div>
+        <div className="p-4 space-y-2">
+          {offers.map(o=>(
+            <button key={o.id} onClick={()=>accept(o)} className="w-full text-left bg-[#0d1526] hover:bg-[#16213a] rounded-lg px-3 py-3 flex items-center gap-3">
+              <div className="flex-1">
+                <div className="font-semibold">{COUNTRIES[o.country].flag} {o.name}</div>
+                <div className="text-xs text-slate-400">{divName(o.country,o.div)} · squad rating {o.str}</div>
+              </div>
+              <span className="text-emerald-400 text-sm font-semibold">Take job →</span>
+            </button>
+          ))}
+          {!offers.length && <div className="text-slate-500 text-sm">No clubs are hiring right now.</div>}
+        </div>
+        <div className="p-4 border-t border-[#1d2940]">
+          {sack
+            ? <button onClick={onRetire} className="w-full px-3 py-2 rounded-lg bg-[#16213a] text-slate-300 text-sm">Retire from management (back to menu)</button>
+            : <button onClick={decline} className="w-full px-3 py-2 rounded-lg bg-[#16213a] text-slate-300 text-sm">Stay at my current club</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ----------------------------- settings -------------------------------- */
 function SettingsModal({G, commit, tShow, onClose}){
-  const [inj, setInj] = useState(G.settings?G.settings.injuries!==false:true);
+  const [, force] = useState(0);
+  G.settings = G.settings || {};
+  const set = (k,v) => { G.settings[k]=v; commit(G); force(x=>x+1); };
+  const Toggle = ({k, label, desc, def=true}) => {
+    const on = G.settings[k]!==false && (G.settings[k]!=null?G.settings[k]:def);
+    return (
+      <label className="flex items-start justify-between gap-3">
+        <span><span className="block">{label}</span>{desc&&<span className="block text-xs text-slate-500">{desc}</span>}</span>
+        <input type="checkbox" className="mt-1" checked={!!on} onChange={e=>set(k,e.target.checked)} />
+      </label>
+    );
+  };
   return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-[#101a30] border border-[#1d2940] rounded-xl w-full max-w-sm" onClick={e=>e.stopPropagation()}>
-        <div className="p-4 border-b border-[#1d2940] flex items-center justify-between"><div className="font-semibold">Settings</div><button onClick={onClose} className="text-slate-400">✕</button></div>
-        <div className="p-4 space-y-3 text-sm">
-          <label className="flex items-center justify-between">
-            <span>Injuries</span>
-            <input type="checkbox" checked={inj} onChange={e=>{ setInj(e.target.checked); G.settings=G.settings||{}; G.settings.injuries=e.target.checked; commit(G); }} />
-          </label>
-          <div className="text-xs text-slate-500">Save version {SAVE_VERSION}. Saves persist on this device. Use Save File for backups.</div>
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-[#101a30] border border-[#1d2940] rounded-xl w-full max-w-sm max-h-[85vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
+        <div className="p-4 border-b border-[#1d2940] flex items-center justify-between sticky top-0 bg-[#101a30]"><div className="font-semibold">Settings</div><button onClick={onClose} className="text-slate-400">✕</button></div>
+        <div className="p-4 space-y-4 text-sm">
+          <Toggle k="injuries" label="Injuries" desc="Players can pick up knocks in matches." />
+          <Toggle k="jobSecurity" label="Manager job security" desc="Board confidence, sackings and job offers." />
+          <Toggle k="morale" label="Player morale & form" desc="Form streaks and happiness affect performance." />
+          <Toggle k="internationals" label="International management" desc="Manage your nation between club seasons." />
+          <Toggle k="watchMatches" label="Watch my matches" desc="Live match view with halftime subs (off = instant sim)." def={false} />
+          <div className="text-xs text-slate-500 border-t border-[#1d2940] pt-3">Historical records are always saved regardless of these toggles. Save version {SAVE_VERSION}. Use Save File for backups.</div>
         </div>
       </div>
     </div>
