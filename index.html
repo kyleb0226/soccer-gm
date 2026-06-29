@@ -251,6 +251,12 @@ const DIV_NAMES = COUNTRIES[0].divNames;
 /* ----------------------------- player gen ------------------------------ */
 function emptyStats(){ return { App:0, Min:0, G:0, A:0, CS:0, YC:0, RC:0, MOTM:0, ratingSum:0, ratingN:0, SH:0, SOT:0, KP:0, xG:0, Sv:0 }; }
 function avgRating(s){ return s && s.ratingN ? s.ratingSum/s.ratingN : 0; }
+// Sum the stat fields across a list of season-history rows (used for per-league filtering).
+function sumStats(rows){
+  const s = emptyStats();
+  (rows||[]).forEach(r=>{ for(const k in s) s[k] += (+r[k]||0); });
+  return s;
+}
 // A WAR-style "Rating Value": one number for a player's total contribution this run.
 // Goals/assists/clean sheets/saves weighted, scaled by minutes and rating over baseline.
 function ratingValue(s){
@@ -306,6 +312,7 @@ function makePlayer(pos, ageRange, meanAdj=0){
   const base = 52 + meanAdj;
   const p = {
     id: uid(), name: genName(), age, pos, positions: rollPositions(pos), isGK: pos==="GK",
+    nat: rint(0, NUM_COUNTRIES-1), debutSeason: null,
     foot: chance(0.75) ? "R" : (chance(0.85) ? "L" : "B"), num: rint(1,40),
     pac: rateGauss(base+tilt.pac,11), sho: rateGauss(base+tilt.sho,12),
     pas: rateGauss(base+tilt.pas,11), dri: rateGauss(base+tilt.dri,11),
@@ -947,9 +954,18 @@ function startNextSeason(G){
   Object.values(G.players).forEach(p=>{
     if(p.stats.App>0){
       p.history = p.history || [];
-      p.history.push({ season:G.season, team: p.teamId!=null && G.clubs[p.teamId] ? G.clubs[p.teamId].abbr : "—",
-        App:p.stats.App, G:p.stats.G, A:p.stats.A, CS:p.stats.CS, r:+avgRating(p.stats).toFixed(2) });
-      if(p.history.length>30) p.history = p.history.slice(-30);
+      const club = p.teamId!=null && G.clubs[p.teamId] ? G.clubs[p.teamId] : null;
+      if(p.debutSeason==null) p.debutSeason = G.season;
+      // Full season record: every stat field + league/club context so it can be
+      // sliced by competition later. ratingSum/ratingN are kept so per-league
+      // averages and rating-value can be recomputed from any subset of seasons.
+      p.history.push({ season:G.season,
+        team: club ? club.abbr : "—", teamName: club ? club.name : "Free agent", teamId: p.teamId,
+        country: club ? club.country : null, div: club ? club.div : null,
+        league: club ? divName(club.country, club.div) : "—",
+        age: p.age, ovr: p.ovr,
+        ...p.stats, r:+avgRating(p.stats).toFixed(2) });
+      if(p.history.length>40) p.history = p.history.slice(-40);
       for(const k in p.stats) p.career[k] = (p.career[k]||0) + p.stats[k];
     }
     p.stats = emptyStats();
@@ -1350,8 +1366,9 @@ function migrate(G){
     if(!G.contCup || !G.contCup.phase) initContCup(G);   // (re)build into the group-stage format
     // backfill newer per-player stat fields (shots, key passes, xG, saves, bans)
     const fill = s => { if(s){ ["SH","SOT","KP","xG","Sv"].forEach(k=>{ if(s[k]==null) s[k]=0; }); } };
-    Object.values(G.players||{}).forEach(p=>{ fill(p.stats); fill(p.career); if(p.susp==null) p.susp=0; if(p.ycCount==null) p.ycCount=0; });
-    (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); });
+    const fillP = p => { if(p.nat==null) p.nat=rint(0,NUM_COUNTRIES-1); if(!Array.isArray(p.history)) p.history=[]; };
+    Object.values(G.players||{}).forEach(p=>{ fill(p.stats); fill(p.career); if(p.susp==null) p.susp=0; if(p.ycCount==null) p.ycCount=0; fillP(p); });
+    (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); fillP(p); });
     G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureXI(c, G.players); });
     if(!G.expectation) setOwnerExpectation(G);
     G.version = SAVE_VERSION;
@@ -2783,15 +2800,27 @@ function PlayerModal({p, G, onClose}){
     ? [["GK",p.gk],["Phy",p.phy],["Pas",p.pas],["Pac",p.pac]]
     : [["Pac",p.pac],["Sho",p.sho],["Pas",p.pas],["Dri",p.dri],["Def",p.def],["Phy",p.phy]];
   const st = p.stats, ca = p.career;
+  const [lg, setLg] = useState("all");
+  const hist = p.history || [];
+  // Distinct leagues this player has appeared in, newest-first by last season seen.
+  const lkey = h => h.country!=null ? h.country+"-"+h.div : "_";
+  const leagues = []; const seen = {};
+  hist.forEach(h=>{ const k=lkey(h); if(!seen[k]){ seen[k]=1; leagues.push({ key:k, label:h.league||"—", flag:(COUNTRIES[h.country]||{}).flag||"" }); } });
+  const histShown = lg==="all" ? hist : hist.filter(h=>lkey(h)===lg);
+  const careerShown = lg==="all" ? ca : sumStats(histShown);
+  const sel = leagues.find(l=>l.key===lg);
+  const careerLabel = lg==="all" ? "Career (all leagues)" : `Career — ${sel?sel.flag+" "+sel.label:""}`;
+  const nat = COUNTRIES[p.nat]||null;
   return (
     <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center p-4" onClick={onClose}>
       <div className="bg-[#101a30] border border-[#1d2940] rounded-xl w-full max-w-lg max-h-[85vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
         <div className="p-4 border-b border-[#1d2940] flex items-start gap-3 sticky top-0 bg-[#101a30]">
           <ScoutOvrPill p={p} />
           <div className="flex-1">
-            <div className="font-bold text-lg">{p.name}{scoutConf(p)<0.85&&<span className="text-[10px] text-slate-500 font-normal ml-2">scouted ~{Math.round(scoutConf(p)*100)}%</span>}{p.seasonDev?<span className={"text-[11px] font-semibold ml-2 "+(p.seasonDev>0?"text-emerald-400":"text-red-400")} title="OVR change this season">{p.seasonDev>0?"↗ +":"↘ "}{p.seasonDev}</span>:null}</div>
+            <div className="font-bold text-lg">{nat&&<span className="mr-1" title={nat.name}>{nat.flag}</span>}{p.name}{scoutConf(p)<0.85&&<span className="text-[10px] text-slate-500 font-normal ml-2">scouted ~{Math.round(scoutConf(p)*100)}%</span>}{p.seasonDev?<span className={"text-[11px] font-semibold ml-2 "+(p.seasonDev>0?"text-emerald-400":"text-red-400")} title="OVR change this season">{p.seasonDev>0?"↗ +":"↘ "}{p.seasonDev}</span>:null}</div>
             <div className="text-sm text-slate-400">{posLabel(p)} · {p.age}y · {p.foot==="B"?"Both":p.foot==="L"?"Left":"Right"} footed{club?` · ${club.name}`:" · Free agent"}</div>
             <div className="text-xs text-slate-500 mt-0.5">Potential {scoutConf(p)>=0.85?p.pot:scoutedPot(p)+"~"} · Value {money(p.value)} · Wage {money(p.salary)}/yr{p.years>0?` · ${p.years}y left`:""}{p.fitness!=null&&p.fitness<100?` · ${p.fitness}% fit`:""}</div>
+            <div className="text-xs text-slate-500 mt-0.5">{p.peakOvr?`Peak OVR ${p.peakOvr}`:""}{p.debutSeason!=null?` · Debut ${p.debutSeason}`:""}{p.hof?" · 🏅 Hall of Fame":""}{(p.awards||0)>0?` · ${p.awards}× POTS`:""}{(p.golden||0)>0?` · ${p.golden}× Golden Boot`:""}</div>
             {(isInjured(p)||isSuspended(p))&&<div className="text-xs mt-0.5">{isInjured(p)&&<span className="text-red-400">✚ {p.injury.type} ({p.injury.weeks}w)</span>}{isInjured(p)&&isSuspended(p)&&" · "}{isSuspended(p)&&<span className="text-orange-400">⛔ banned {p.susp} match{p.susp>1?"es":""}</span>}</div>}
           </div>
           <button onClick={onClose} className="text-slate-400">✕</button>
@@ -2809,24 +2838,37 @@ function PlayerModal({p, G, onClose}){
             <div className="text-sm font-semibold mb-1">This season</div>
             <StatLine s={st} gk={p.pos==="GK"} />
           </div>
+          {leagues.length>1 && (
+            <div className="flex gap-1 flex-wrap">
+              <button onClick={()=>setLg("all")} className={"px-2 py-1 rounded text-xs font-semibold "+(lg==="all"?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300")}>All</button>
+              {leagues.map(l=>(
+                <button key={l.key} onClick={()=>setLg(l.key)} className={"px-2 py-1 rounded text-xs font-semibold "+(lg===l.key?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300")}>{l.flag} {l.label}</button>
+              ))}
+            </div>
+          )}
           <div>
-            <div className="text-sm font-semibold mb-1">Career</div>
-            <StatLine s={ca} gk={p.pos==="GK"} />
+            <div className="text-sm font-semibold mb-1">{careerLabel}</div>
+            <StatLine s={careerShown} gk={p.pos==="GK"} />
           </div>
-          {p.history && p.history.length>0 && (
+          {histShown.length>0 && (
             <div>
-              <div className="text-sm font-semibold mb-1">History</div>
+              <div className="text-sm font-semibold mb-1">Season-by-season{lg!=="all"&&sel?` · ${sel.flag} ${sel.label}`:""}</div>
+              <div className="overflow-x-auto">
               <table className="w-full text-xs tnum">
-                <thead><tr className="text-slate-500"><th className="text-left">Yr</th><th>Club</th><th>App</th><th>G</th><th>A</th><th>CS</th><th>Rtg</th></tr></thead>
+                <thead><tr className="text-slate-500"><th className="text-left">Yr</th><th className="text-left">Club</th><th>Age</th><th>App</th><th>G</th><th>A</th><th>KP</th><th>CS</th><th>YC</th><th>RC</th><th>Rtg</th></tr></thead>
                 <tbody>
-                  {p.history.slice().reverse().map((h,i)=>(
+                  {histShown.slice().reverse().map((h,i)=>(
                     <tr key={i} className="border-t border-[#15203a]">
-                      <td className="text-left">{h.season}</td><td className="text-center">{h.team}</td><td className="text-center">{h.App}</td>
-                      <td className="text-center">{h.G}</td><td className="text-center">{h.A}</td><td className="text-center">{h.CS}</td><td className="text-center">{h.r}</td>
+                      <td className="text-left">{h.season}</td>
+                      <td className="text-left whitespace-nowrap">{h.country!=null&&<span className="mr-0.5">{(COUNTRIES[h.country]||{}).flag}</span>}{h.team}{h.div===1&&<span className="text-slate-600 text-[9px]">²</span>}</td>
+                      <td className="text-center">{h.age!=null?h.age:"—"}</td><td className="text-center">{h.App}</td>
+                      <td className="text-center">{h.G}</td><td className="text-center">{h.A}</td><td className="text-center">{h.KP||0}</td>
+                      <td className="text-center">{h.CS}</td><td className="text-center">{h.YC||0}</td><td className="text-center">{h.RC||0}</td><td className="text-center">{h.r}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
           )}
         </div>
