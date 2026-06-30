@@ -1396,10 +1396,13 @@ function startNextSeason(G){
       p.unhappy=true;   // wants a new deal before running down (Bosman risk next year)
     } else { p.unhappy=false; }
   });
-  // retirements (old, low-rated)
+  // retirements (old, low-rated) — move to G.retired so history is preserved
+  G.retired = G.retired || {};
   Object.values(G.players).forEach(p=>{
     if(p.age>=34 && (p.ovr<62 || p.age>=39) && chance(p.age>=37?0.55:0.22)){
       if(p.teamId!=null){ logNews(G,"retire",`${p.name} (${p.pos}) retires at ${p.age}`, p.teamId); }
+      p.retired = true; p.retiredAge = p.age; p.retiredSeason = G.season; p.teamId = null; p.years = 0; p.salary = 0;
+      G.retired[p.id] = p;
       delete G.players[p.id];
     }
   });
@@ -2107,6 +2110,7 @@ function migrate(G){
     if(!Array.isArray(G.intl.history)) G.intl.history=[];
     if(!Array.isArray(G.trebles)) G.trebles=[];
     if(G.intlCycle===undefined) G.intlCycle=null;
+    if(!G.retired || typeof G.retired!=="object") G.retired={};
     ensureCareer(G);
     G.version = SAVE_VERSION;
   }catch(e){}
@@ -3548,10 +3552,29 @@ function Transfers({G, commit, tShow}){
 /* ----------------------------- free agents ----------------------------- */
 function FreeAgents({G, commit, tShow}){
   const [q, setQ] = useState("");
+  const [rq, setRq] = useState("");
+  const [showRetired, setShowRetired] = useState(false);
   let fa = (G.freeAgents||[]).slice();
   if(q) fa = fa.filter(p=>p.name.toLowerCase().includes(q.toLowerCase()));
   fa.sort((a,b)=>b.ovr-a.ovr);
   const sign = p => { const r=signFreeAgent(G,p); if(r.ok){ commit(G); tShow(`Signed ${p.name}`); } else tShow(r.msg); };
+
+  // Retired players — can be coaxed out of retirement (penalty: -3 OVR, 60% fitness, 1-yr contract)
+  const unretire = p => {
+    const sq = Object.values(G.players).filter(x=>x.teamId===G.userTeamId && !x.youth).length;
+    if(sq>=30) return tShow("Senior squad is full (30).");
+    p.retired = false; p.ovr = Math.max(p.ovr-3, 40); p.fitness = 60; p.years = 1;
+    p.salary = Math.max(wageFor(p)*0.7, 0.1); p.teamId = G.userTeamId; p.morale = 70;
+    p.stats = emptyStats(); p.compStats = {};
+    G.players[p.id] = p;
+    delete G.retired[p.id];
+    logNews(G,"transfer",`🔙 ${p.name} comes out of retirement to join ${G.clubs[G.userTeamId].name}`, G.userTeamId);
+    commit(G); tShow(`${p.name} comes out of retirement!`);
+  };
+
+  let retired = Object.values(G.retired||{}).sort((a,b)=>b.retiredSeason-a.retiredSeason||b.ovr-a.ovr);
+  if(rq) retired = retired.filter(p=>p.name.toLowerCase().includes(rq.toLowerCase()));
+
   return (
     <div className="space-y-3">
       <Card><div className="font-semibold">Free Agents</div><div className="text-sm text-slate-400">Out-of-contract players. No fee — you only pay wages.</div></Card>
@@ -3574,6 +3597,36 @@ function FreeAgents({G, commit, tShow}){
           </tbody>
         </table>
       </Card>
+
+      {/* Retired Players */}
+      <button onClick={()=>setShowRetired(v=>!v)} className="w-full text-left px-3 py-2 bg-[#16213a] rounded text-sm font-semibold flex items-center justify-between">
+        <span>🏅 Retired Players ({Object.keys(G.retired||{}).length})</span>
+        <span className="text-slate-400 text-xs">{showRetired?"▲ hide":"▼ show"}</span>
+      </button>
+      {showRetired && (
+        <div className="space-y-2">
+          <div className="text-xs text-slate-400 px-1">Players who have retired. You can convince someone to come out of retirement — they'll take a -3 OVR hit and arrive at 60% fitness on a 1-year deal.</div>
+          <input value={rq} onChange={e=>setRq(e.target.value)} placeholder="Search retired players…" className="w-full bg-[#16213a] rounded px-3 py-2 text-sm" />
+          <Card className="p-0 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="text-left p-2">Player</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Age</th><th className="p-2">Retired</th><th className="p-2"></th></tr></thead>
+              <tbody>
+                {retired.slice(0,200).map(p=>(
+                  <tr key={p.id} className="border-b border-[#15203a]">
+                    <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
+                    <td className="p-2 text-center"><PosTag p={p} /></td>
+                    <td className="p-2 text-center text-slate-300">{p.ovr}</td>
+                    <td className="p-2 text-center tnum">{p.retiredAge||p.age}</td>
+                    <td className="p-2 text-center text-slate-500 text-xs">S{p.retiredSeason}</td>
+                    <td className="p-2 text-center"><button onClick={()=>unretire(p)} className="px-2 py-1 rounded bg-amber-500 text-slate-900 text-xs font-semibold">Unmotivate</button></td>
+                  </tr>
+                ))}
+                {!retired.length && <tr><td colSpan="6" className="p-4 text-center text-slate-500">No retired players yet.</td></tr>}
+              </tbody>
+            </table>
+          </Card>
+        </div>
+      )}
     </div>
   );
 }
