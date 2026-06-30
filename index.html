@@ -249,7 +249,7 @@ function divName(country, div){ return (COUNTRIES[country]||COUNTRIES[0]).divNam
 const DIV_NAMES = COUNTRIES[0].divNames;
 
 /* ----------------------------- player gen ------------------------------ */
-function emptyStats(){ return { App:0, Min:0, G:0, A:0, CS:0, YC:0, RC:0, MOTM:0, ratingSum:0, ratingN:0, SH:0, SOT:0, KP:0, xG:0, Sv:0 }; }
+function emptyStats(){ return { App:0, Min:0, G:0, A:0, CS:0, YC:0, RC:0, MOTM:0, ratingSum:0, ratingN:0, SH:0, SOT:0, KP:0, xG:0, Sv:0, PK:0, PKM:0, FK:0, xGA:0, GA:0 }; }
 function avgRating(s){ return s && s.ratingN ? s.ratingSum/s.ratingN : 0; }
 // Sum the stat fields across a list of season-history rows (used for per-league filtering).
 function sumStats(rows){
@@ -347,7 +347,7 @@ function makeClub(def, idx, div, country){
     stands: { N:each, E:each, S:each, W:each },
     pld:0, w:0, d:0, l:0, gf:0, ga:0, pts:0,
     budget: rint(20,140) + (div===0?60:0), formation: "4-3-3", xi: [], bench: [],
-    academy: { level: 1 }, history: [], honours: [],
+    academy: { level: 1 }, history: [], honours: [], setPieces: { pen:null, fk:null, corner:null },
     userControlled: false,
   };
 }
@@ -576,27 +576,40 @@ function applyMatch(home, away, hs, as, players, box, opts){
     bench.slice(0,3).forEach(p=>{ if(chance(0.5)){ const m=rint(8,30); p.stats.App++; p.stats.Min += m; addComp(p,"App"); addComp(p,"Min",m); p.fitness = clamp((p.fitness!=null?p.fitness:100) - round(m/90*22), 0, 100); } });
   }
   credit(H, home); credit(A, away);
+  ensureSetPieces(home, players); ensureSetPieces(away, players);
   // distribute goals to scorers + assisters
-  function awardGoals(side, n){
+  function awardGoals(side, n, club){
     const out = [];
     for(let i=0;i<n;i++){
-      const sc = wpick(side, o => (SCORE_W[o.slot]||0) * (0.5 + n01(o.p.sho)) * (hasTrait(o.p,"poacher")?1.6:1) * (isCup&&hasTrait(o.p,"bigGame")?1.3:1));
+      let sc = wpick(side, o => (SCORE_W[o.slot]||0) * (0.5 + n01(o.p.sho)) * (hasTrait(o.p,"poacher")?1.6:1) * (isCup&&hasTrait(o.p,"bigGame")?1.3:1));
       if(!sc) continue;
+      // re-attribute some goals to the designated set-piece taker (real role, same scoreline)
+      let tag = null;
+      const penT = club.setPieces && club.setPieces.pen ? side.find(o=>o.p.id===club.setPieces.pen) : null;
+      const fkT = club.setPieces && club.setPieces.fk ? side.find(o=>o.p.id===club.setPieces.fk) : null;
+      if(penT && chance(0.09)){ sc = penT; tag = "PK"; }
+      else if(fkT && chance(0.05)){ sc = fkT; tag = "FK"; }
       sc.p.stats.G++; addComp(sc.p,"G");
+      if(tag){ sc.p.stats[tag]++; addComp(sc.p,tag); }
       const min = rint(1,90);
       let assistName = null, assistId = null;
-      if(chance(0.72)){
+      if(!tag && chance(0.72)){   // penalties/direct free kicks aren't assisted
         const cands = side.filter(o => o !== sc);
         const as2 = wpick(cands, o => (CREATE_W[o.slot]||0) * (0.5 + n01(o.p.pas*0.6 + o.p.dri*0.4)) * (hasTrait(o.p,"playmaker")?1.6:1));
         if(as2){ as2.p.stats.A++; as2.p.stats.KP++; addComp(as2.p,"A"); addComp(as2.p,"KP"); assistName = as2.p.name; assistId = as2.p.id; }
       }
-      out.push({ name: sc.p.name, id: sc.p.id, min, assist: assistName, assistId });
+      out.push({ name: sc.p.name, id: sc.p.id, min, assist: assistName, assistId, pk: tag==="PK", fk: tag==="FK" });
     }
     out.sort((a,b)=>a.min-b.min);
     return out;
   }
-  box.hScorers = awardGoals(H, hs);
-  box.aScorers = awardGoals(A, as);
+  box.hScorers = awardGoals(H, hs, home);
+  box.aScorers = awardGoals(A, as, away);
+  // missed penalty: a flavor event that doesn't change the scoreline
+  [[H,home],[A,away]].forEach(([side,club])=>{
+    const taker = club.setPieces && club.setPieces.pen ? side.find(o=>o.p.id===club.setPieces.pen) : null;
+    if(taker && chance(0.05)){ taker.p.stats.PKM++; addComp(taker.p,"PKM"); }
+  });
   // distribute shots / shots-on-target / xG to attackers, and key passes to creators
   function spread(side, shots, sot, xg){
     for(let i=0;i<shots;i++){
@@ -614,8 +627,10 @@ function applyMatch(home, away, hs, as, players, box, opts){
   // goalkeeper saves = shots on target faced minus goals conceded
   const gkOf = side => side.find(o=>o.slot==="GK");
   const gH = gkOf(H), gA = gkOf(A);
-  if(gH){ const sv=Math.max(0,(st.sotA||0)-as); gH.p.stats.Sv+=sv; addComp(gH.p,"Sv",sv); }
-  if(gA){ const sv=Math.max(0,(st.sotH||0)-hs); gA.p.stats.Sv+=sv; addComp(gA.p,"Sv",sv); }
+  if(gH){ const sv=Math.max(0,(st.sotA||0)-as); gH.p.stats.Sv+=sv; addComp(gH.p,"Sv",sv);
+    gH.p.stats.xGA+=(st.xgA||0); gH.p.stats.GA+=as; addComp(gH.p,"xGA",st.xgA||0); addComp(gH.p,"GA",as); }
+  if(gA){ const sv=Math.max(0,(st.sotH||0)-hs); gA.p.stats.Sv+=sv; addComp(gA.p,"Sv",sv);
+    gA.p.stats.xGA+=(st.xgH||0); gA.p.stats.GA+=hs; addComp(gA.p,"xGA",st.xgH||0); addComp(gA.p,"GA",hs); }
   // clean sheets
   if(as===0) H.forEach(({p,slot})=>{ if(BAND[slot]<=2||slot==="GK"){ p.stats.CS++; addComp(p,"CS"); } });
   if(hs===0) A.forEach(({p,slot})=>{ if(BAND[slot]<=2||slot==="GK"){ p.stats.CS++; addComp(p,"CS"); } });
@@ -749,6 +764,25 @@ function autoPickXI(club, players){
   club.bench = bench;
 }
 function ensureXI(club, players){ if(!club.xi || club.xi.length<11) autoPickXI(club, players); }
+
+/* ----------------------------- set pieces ------------------------------- */
+// Penalty/free-kick/corner takers are real assignable roles: better sho/pas
+// players get goals and assists explicitly attributed to the dead-ball role,
+// not just folded into the generic weighted scorer pool.
+function bestSetPieceTaker(club, players, role){
+  const squad = Object.values(players).filter(p=>p.teamId===club.id && !p.youth && p.pos!=="GK");
+  if(!squad.length) return null;
+  const w = role==="corner" ? p=>p.pas*0.6+p.dri*0.4 : p=>p.sho*0.7+p.pas*0.3;
+  return squad.slice().sort((a,b)=>w(b)-w(a))[0].id;
+}
+function ensureSetPieces(club, players){
+  if(!club.setPieces) club.setPieces = { pen:null, fk:null, corner:null };
+  ["pen","fk","corner"].forEach(role=>{
+    const cur = club.setPieces[role];
+    const valid = cur!=null && players[cur] && players[cur].teamId===club.id && !players[cur].youth && players[cur].pos!=="GK";
+    if(!valid) club.setPieces[role] = bestSetPieceTaker(club, players, role);
+  });
+}
 
 /* ----------------------------- standings ------------------------------- */
 // Standings for one league (a country's division). `country` defaults to country 0
@@ -1092,10 +1126,18 @@ function liveInit(G){
     appeared:{}, minutes:{}, sideOf:{}, slotOf:{}, gBy:{}, aBy:{},
     shH:0, shA:0, sotH:0, sotA:0, done:false };
 }
+// Watched matches are always league fixtures (the user's matchday round only
+// ever contains league games) — so compKey is always "L" here.
+function addCompL(p, k, n=1){
+  if(!p.compStats) p.compStats={};
+  if(!p.compStats.L) p.compStats.L=emptyStats();
+  p.compStats.L[k] = (p.compStats.L[k]||0) + n;
+}
 function livePlayHalf(G, M){
   M.half++;
   const players=G.players, home=G.clubs[M.homeId], away=G.clubs[M.awayId];
   ensureXI(home, players); ensureXI(away, players);
+  ensureSetPieces(home, players); ensureSetPieces(away, players);
   const H=fieldedXI(home, players), A=fieldedXI(away, players);
   MORALE_ON = !G.settings || G.settings.morale!==false;
   const uH=unitRatings(home, players), uA=unitRatings(away, players);
@@ -1109,28 +1151,44 @@ function livePlayHalf(G, M){
   const xgH=clamp(1.32*Math.exp(1.7*(hAtt-aDef))*tH.xgFor*tA.xgAgainst*1.12,0.15,5.5)/2;
   const xgA=clamp(1.32*Math.exp(1.7*(aAtt-hDef))*tA.xgFor*tH.xgAgainst*0.92,0.15,5.5)/2;
   const gh=poisson(xgH), ga=poisson(xgA), base=(M.half-1)*45;
-  const scoreSide=(lineup,n,key)=>{ for(let i=0;i<n;i++){ const sc=wpick(lineup,o=>(SCORE_W[o.slot]||0)*(0.5+n01(o.p.sho))*(hasTrait(o.p,"poacher")?1.6:1)); if(!sc)continue; sc.p.stats.G++; M.gBy[sc.p.id]=(M.gBy[sc.p.id]||0)+1; const min=base+rint(1,45); let assist=null; if(chance(0.72)){ const a2=wpick(lineup.filter(o=>o!==sc),o=>(CREATE_W[o.slot]||0)*(0.5+n01(o.p.pas*0.6+o.p.dri*0.4))*(hasTrait(o.p,"playmaker")?1.6:1)); if(a2){ a2.p.stats.A++; a2.p.stats.KP++; M.aBy[a2.p.id]=(M.aBy[a2.p.id]||0)+1; assist=a2.p.name; } } M.events.push({min,side:key,name:sc.p.name,assist}); if(key==="H")M.hs++; else M.as++; } };
-  scoreSide(H,gh,"H"); scoreSide(A,ga,"A");
+  M.xgHTot=(M.xgHTot||0)+xgH; M.xgATot=(M.xgATot||0)+xgA;
+  const scoreSide=(lineup,n,key,club)=>{ for(let i=0;i<n;i++){
+    let sc=wpick(lineup,o=>(SCORE_W[o.slot]||0)*(0.5+n01(o.p.sho))*(hasTrait(o.p,"poacher")?1.6:1));
+    if(!sc)continue;
+    let tag=null;
+    const penT=club.setPieces&&club.setPieces.pen?lineup.find(o=>o.p.id===club.setPieces.pen):null;
+    const fkT=club.setPieces&&club.setPieces.fk?lineup.find(o=>o.p.id===club.setPieces.fk):null;
+    if(penT&&chance(0.09)){ sc=penT; tag="PK"; } else if(fkT&&chance(0.05)){ sc=fkT; tag="FK"; }
+    sc.p.stats.G++; addCompL(sc.p,"G"); M.gBy[sc.p.id]=(M.gBy[sc.p.id]||0)+1;
+    if(tag){ sc.p.stats[tag]++; addCompL(sc.p,tag); }
+    const min=base+rint(1,45); let assist=null;
+    if(!tag && chance(0.72)){ const a2=wpick(lineup.filter(o=>o!==sc),o=>(CREATE_W[o.slot]||0)*(0.5+n01(o.p.pas*0.6+o.p.dri*0.4))*(hasTrait(o.p,"playmaker")?1.6:1)); if(a2){ a2.p.stats.A++; a2.p.stats.KP++; addCompL(a2.p,"A"); addCompL(a2.p,"KP"); M.aBy[a2.p.id]=(M.aBy[a2.p.id]||0)+1; assist=a2.p.name; } }
+    M.events.push({min,side:key,name:sc.p.name,assist,pk:tag==="PK",fk:tag==="FK"}); if(key==="H")M.hs++; else M.as++; } };
+  scoreSide(H,gh,"H",home); scoreSide(A,ga,"A",away);
+  [[H,home],[A,away]].forEach(([lineup,club])=>{
+    const taker=club.setPieces&&club.setPieces.pen?lineup.find(o=>o.p.id===club.setPieces.pen):null;
+    if(taker&&chance(0.025)){ taker.p.stats.PKM++; addCompL(taker.p,"PKM"); }   // halved per-half vs full-match rate
+  });
   const shH=clamp(round(xgH/0.11+gauss(0,1)),gh,18), shA=clamp(round(xgA/0.11+gauss(0,1)),ga,18);
   const sotH=clamp(round(shH*(0.30+0.12*n01(uH.ATT))),gh,shH), sotA=clamp(round(shA*(0.30+0.12*n01(uA.ATT))),ga,shA);
   M.shH+=shH; M.shA+=shA; M.sotH+=sotH; M.sotA+=sotA;
-  const spread=(lineup,shots,sot,xg)=>{ for(let i=0;i<shots;i++){ const o=wpick(lineup,q=>(SCORE_W[q.slot]||0)*(0.5+n01(q.p.sho))); if(!o)continue; o.p.stats.SH++; if(i<sot)o.p.stats.SOT++; o.p.stats.xG+=+(xg/Math.max(1,shots)).toFixed(2);} const kp=Math.max(0,round(shots*0.55)); for(let i=0;i<kp;i++){ const o=wpick(lineup,q=>(CREATE_W[q.slot]||0)*(0.5+n01(q.p.pas))*(hasTrait(q.p,"playmaker")?1.5:1)); if(o)o.p.stats.KP++; } };
+  const spread=(lineup,shots,sot,xg)=>{ for(let i=0;i<shots;i++){ const o=wpick(lineup,q=>(SCORE_W[q.slot]||0)*(0.5+n01(q.p.sho))); if(!o)continue; o.p.stats.SH++; addCompL(o.p,"SH"); if(i<sot){ o.p.stats.SOT++; addCompL(o.p,"SOT"); } const xgAdd=+(xg/Math.max(1,shots)).toFixed(2); o.p.stats.xG+=xgAdd; addCompL(o.p,"xG",xgAdd);} const kp=Math.max(0,round(shots*0.55)); for(let i=0;i<kp;i++){ const o=wpick(lineup,q=>(CREATE_W[q.slot]||0)*(0.5+n01(q.p.pas))*(hasTrait(q.p,"playmaker")?1.5:1)); if(o){ o.p.stats.KP++; addCompL(o.p,"KP"); } } };
   spread(H,shH,sotH,xgH); spread(A,shA,sotA,xgA);
   if(M.half>=2) M.done=true;
 }
 function liveFinish(G, M){
   const players=G.players, home=G.clubs[M.homeId], away=G.clubs[M.awayId];
   const ids=Object.keys(M.appeared);
-  ids.forEach(id=>{ const p=players[id]; if(!p)return; p.stats.App++; const mins=M.minutes[id]||90; p.stats.Min+=mins; const loss=Math.round(mins/90*rint(18,26)*(hasTrait(p,"engine")?0.6:1)); p.fitness=clamp((p.fitness!=null?p.fitness:100)-loss,0,100); });
+  ids.forEach(id=>{ const p=players[id]; if(!p)return; p.stats.App++; addCompL(p,"App"); const mins=M.minutes[id]||90; p.stats.Min+=mins; addCompL(p,"Min",mins); const loss=Math.round(mins/90*rint(18,26)*(hasTrait(p,"engine")?0.6:1)); p.fitness=clamp((p.fitness!=null?p.fitness:100)-loss,0,100); });
   const gkOf=side=>ids.find(id=>M.sideOf[id]===side && M.slotOf[id]==="GK");
   const gh=gkOf("H"), ga=gkOf("A");
-  if(gh&&players[gh]) players[gh].stats.Sv+=Math.max(0,(M.sotA||0)-M.as);
-  if(ga&&players[ga]) players[ga].stats.Sv+=Math.max(0,(M.sotH||0)-M.hs);
-  ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id], conceded=M.sideOf[id]==="H"?M.as:M.hs; if(conceded===0&&(BAND[slot]<=2||slot==="GK")) p.stats.CS++; });
-  ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id]; const yc=clamp(0.10+(BAND[slot]<=2?0.06:0)-n01(p.phy)*0.04,0.04,0.22); if(chance(yc)){ p.stats.YC++; p.ycCount=(p.ycCount||0)+1; if(p.ycCount>=YC_BAN_THRESHOLD){ p.ycCount=0; banPlayer(G,p,1,"yellow-card accumulation"); } } if(chance(0.01)){ p.stats.RC++; injure(p,rint(2,4)); banPlayer(G,p,rint(2,3),"a red card"); } });
+  if(gh&&players[gh]){ const sv=Math.max(0,(M.sotA||0)-M.as); players[gh].stats.Sv+=sv; addCompL(players[gh],"Sv",sv); players[gh].stats.xGA+=(M.xgATot||0); players[gh].stats.GA+=M.as; addCompL(players[gh],"xGA",M.xgATot||0); addCompL(players[gh],"GA",M.as); }
+  if(ga&&players[ga]){ const sv=Math.max(0,(M.sotH||0)-M.hs); players[ga].stats.Sv+=sv; addCompL(players[ga],"Sv",sv); players[ga].stats.xGA+=(M.xgHTot||0); players[ga].stats.GA+=M.hs; addCompL(players[ga],"xGA",M.xgHTot||0); addCompL(players[ga],"GA",M.hs); }
+  ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id], conceded=M.sideOf[id]==="H"?M.as:M.hs; if(conceded===0&&(BAND[slot]<=2||slot==="GK")){ p.stats.CS++; addCompL(p,"CS"); } });
+  ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id]; const yc=clamp(0.10+(BAND[slot]<=2?0.06:0)-n01(p.phy)*0.04,0.04,0.22); if(chance(yc)){ p.stats.YC++; addCompL(p,"YC"); p.ycCount=(p.ycCount||0)+1; if(p.ycCount>=YC_BAN_THRESHOLD){ p.ycCount=0; banPlayer(G,p,1,"yellow-card accumulation"); } } if(chance(0.01)){ p.stats.RC++; addCompL(p,"RC"); injure(p,rint(2,4)); banPlayer(G,p,rint(2,3),"a red card"); } });
   let motm=null, motmR=0;
-  ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id], side=M.sideOf[id]; const scored=side==="H"?M.hs:M.as, conceded=side==="H"?M.as:M.hs; const result=scored>conceded?1:scored<conceded?-1:0; let r=6.3+(result>0?0.4:result<0?-0.3:0)+0.95*(M.gBy[id]||0)+0.55*(M.aBy[id]||0); if(slot==="GK")r+=clamp(Math.min(p.stats.Sv||0,6)*0.03,0,0.4); if(conceded===0&&(BAND[slot]<=2||slot==="GK"))r+=0.6; if(conceded>=3&&(BAND[slot]<=2||slot==="GK"))r-=0.5; r=clamp(r+gauss(0,0.35),4,10); p.stats.ratingSum+=r; p.stats.ratingN++; p.form=p.form==null?r:+(p.form*0.7+r*0.3).toFixed(2); if(r>motmR){motmR=r;motm=p;} });
-  if(motm) motm.stats.MOTM++;
+  ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id], side=M.sideOf[id]; const scored=side==="H"?M.hs:M.as, conceded=side==="H"?M.as:M.hs; const result=scored>conceded?1:scored<conceded?-1:0; let r=6.3+(result>0?0.4:result<0?-0.3:0)+0.95*(M.gBy[id]||0)+0.55*(M.aBy[id]||0); if(slot==="GK")r+=clamp(Math.min(p.stats.Sv||0,6)*0.03,0,0.4); if(conceded===0&&(BAND[slot]<=2||slot==="GK"))r+=0.6; if(conceded>=3&&(BAND[slot]<=2||slot==="GK"))r-=0.5; r=clamp(r+gauss(0,0.35),4,10); p.stats.ratingSum+=r; p.stats.ratingN++; addCompL(p,"ratingSum",r); addCompL(p,"ratingN"); p.form=p.form==null?r:+(p.form*0.7+r*0.3).toFixed(2); if(r>motmR){motmR=r;motm=p;} });
+  if(motm){ motm.stats.MOTM++; addCompL(motm,"MOTM"); }
   if(!G.settings||G.settings.morale!==false){ ids.forEach(id=>{ const p=players[id]; if(!p)return; const side=M.sideOf[id]; const result=(side==="H"?M.hs-M.as:M.as-M.hs); p.morale=clamp((p.morale==null?70:p.morale)+(result>0?2.5:result<0?-2.5:0.5),0,100); }); }
   home.pld++; away.pld++; home.gf+=M.hs; home.ga+=M.as; away.gf+=M.as; away.ga+=M.hs;
   if(M.hs>M.as){home.w++;home.pts+=3;away.l++;} else if(M.hs<M.as){away.w++;away.pts+=3;home.l++;} else {home.d++;away.d++;home.pts++;away.pts++;}
@@ -1141,8 +1199,8 @@ function liveFinish(G, M){
   const tl=[]; let rh=0,ra=0; M.events.slice().sort((a,b)=>a.min-b.min).forEach(e=>{ if(e.side==="H")rh++; else ra++; tl.push({min:e.min,side:e.side,name:e.name,assist:e.assist,hs:rh,as:ra}); });
   const poss=clamp(round(50+(n01(unitRatings(home,players).MID)-n01(unitRatings(away,players).MID))*45+2),28,72);
   G.lastMatch={ season:G.season, day:G.day+1, comp:"League", home:home.abbr, away:away.abbr, homeName:home.name, awayName:away.name, hs:M.hs, as:M.as, neutral:false, cup:false,
-    hScorers:M.events.filter(e=>e.side==="H").map(e=>({name:e.name,min:e.min,assist:e.assist})),
-    aScorers:M.events.filter(e=>e.side==="A").map(e=>({name:e.name,min:e.min,assist:e.assist})),
+    hScorers:M.events.filter(e=>e.side==="H").map(e=>({name:e.name,min:e.min,assist:e.assist,pk:e.pk,fk:e.fk})),
+    aScorers:M.events.filter(e=>e.side==="A").map(e=>({name:e.name,min:e.min,assist:e.assist,pk:e.pk,fk:e.fk})),
     motm:motm?motm.name:null, stat:{possH:poss,possA:100-poss,shH:M.shH,shA:M.shA,sotH:M.sotH,sotA:M.sotA,xgH:0,xgA:0}, timeline:tl };
   G.lastMatches=[G.lastMatch]; G._lmDay=G.day;   // seed this week's results with the watched game; cups append below
   logNews(G,"match",`${home.abbr} ${M.hs}-${M.as} ${away.abbr}`,G.userTeamId);
@@ -1970,11 +2028,12 @@ function migrate(G){
     G.cups.forEach(cup=>{ if(cup.country==null) cup.country=0; if(cup.runnerUp===undefined) cup.runnerUp=null; });
     if(!G.contCup || !G.contCup.phase) initContCup(G);   // (re)build into the group-stage format
     // backfill newer per-player stat fields (shots, key passes, xG, saves, bans)
-    const fill = s => { if(s){ ["SH","SOT","KP","xG","Sv"].forEach(k=>{ if(s[k]==null) s[k]=0; }); } };
+    const fill = s => { if(s){ ["SH","SOT","KP","xG","Sv","PK","PKM","FK","xGA","GA"].forEach(k=>{ if(s[k]==null) s[k]=0; }); } };
     const fillP = p => { if(p.nat==null) p.nat=rint(0,NUM_COUNTRIES-1); if(!Array.isArray(p.history)) p.history=[]; if(p.youth && p.age>=20) p.youth=false; if(!Array.isArray(p.traits)) p.traits=rollTraits(p); if(p.form==null) p.form=6.7; if(p.morale==null) p.morale=rint(60,80); };
-    Object.values(G.players||{}).forEach(p=>{ fill(p.stats); fill(p.career); if(p.susp==null) p.susp=0; if(p.ycCount==null) p.ycCount=0; fillP(p); });
-    (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); fillP(p); });
-    G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureCommercials(G,c); ensureXI(c, G.players); });
+    const fillCS = p => { if(p.compStats) for(const k in p.compStats) fill(p.compStats[k]); };
+    Object.values(G.players||{}).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); if(p.susp==null) p.susp=0; if(p.ycCount==null) p.ycCount=0; fillP(p); });
+    (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); fillP(p); });
+    G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureCommercials(G,c); if(!c.setPieces) c.setPieces={pen:null,fk:null,corner:null}; ensureXI(c, G.players); });
     if(!G.clubs.some(c=>c.rivalId!=null)) assignRivals(G.clubs);
     if(!G.expectation) setOwnerExpectation(G);
     // history/records + feature-toggle backfill
@@ -2655,6 +2714,8 @@ function Tactics({G, commit, tShow}){
           onPick={pid=>assign(pickSlot, pid)} onClose={()=>setPickSlot(null)} />
       )}
 
+      <SetPieceCard G={G} commit={commit} tShow={tShow} />
+
       <Card>
         <div className="font-semibold mb-2">Bench</div>
         <div className="flex flex-wrap gap-2">
@@ -2666,6 +2727,38 @@ function Tactics({G, commit, tShow}){
         </div>
       </Card>
     </div>
+  );
+}
+function SetPieceCard({G, commit, tShow}){
+  const user = G.clubs[G.userTeamId];
+  ensureSetPieces(user, G.players);
+  const squad = Object.values(G.players).filter(p=>p.teamId===user.id && !p.youth && p.pos!=="GK").sort((a,b)=>b.ovr-a.ovr);
+  const ROLES = [["pen","Penalties","🎯"],["fk","Free Kicks","🥅"],["corner","Corners","🚩"]];
+  const setTaker = (role, pid) => { user.setPieces=user.setPieces||{}; user.setPieces[role]=pid; commit(G); tShow(`${ROLES.find(r=>r[0]===role)[1]} taker set`); };
+  const autoAssign = () => { ["pen","fk","corner"].forEach(role=>{ user.setPieces[role]=bestSetPieceTaker(user, G.players, role); }); commit(G); tShow("Set-piece takers auto-assigned"); };
+  return (
+    <Card>
+      <div className="flex items-center justify-between mb-2">
+        <div className="font-semibold">Set-Piece Takers</div>
+        <button onClick={autoAssign} className="px-2 py-1 rounded bg-[#16213a] text-slate-300 text-xs">Auto-assign</button>
+      </div>
+      <div className="grid sm:grid-cols-3 gap-2">
+        {ROLES.map(([role,label,emoji])=>{
+          const curId = user.setPieces && user.setPieces[role];
+          const cur = curId!=null ? G.players[curId] : null;
+          return (
+            <div key={role} className="bg-[#0d1526] rounded-lg p-2">
+              <div className="text-xs text-slate-400 mb-1">{emoji} {label}</div>
+              <select value={curId||""} onChange={e=>setTaker(role, e.target.value?Number(e.target.value):null)} className="w-full bg-[#16213a] rounded px-2 py-1 text-sm">
+                <option value="">— none —</option>
+                {squad.map(p=><option key={p.id} value={p.id}>{p.name} ({p.ovr})</option>)}
+              </select>
+              {cur && <div className="text-[11px] text-slate-500 mt-1">{cur.pos} · Sho {cur.sho} · Pas {cur.pas}</div>}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
   );
 }
 function autoFillBench(club, players){
@@ -4255,10 +4348,10 @@ function BoxScore({m, G}){
       {m.cup && <div className="text-center text-xs text-amber-300 mb-1">Cup tie</div>}
       <div className="grid grid-cols-2 gap-4 text-sm">
         <div className="text-right">
-          {m.hScorers.map((s,i)=><div key={i} className="text-slate-300">{s.name} {s.min}'{s.assist?<span className="text-slate-500"> ({s.assist})</span>:""}</div>)}
+          {m.hScorers.map((s,i)=><div key={i} className="text-slate-300">{s.name} {s.min}'{s.pk?<span className="text-amber-400"> (pen)</span>:s.fk?<span className="text-amber-400"> (FK)</span>:s.assist?<span className="text-slate-500"> ({s.assist})</span>:""}</div>)}
         </div>
         <div>
-          {m.aScorers.map((s,i)=><div key={i} className="text-slate-300">{s.min}' {s.name}{s.assist?<span className="text-slate-500"> ({s.assist})</span>:""}</div>)}
+          {m.aScorers.map((s,i)=><div key={i} className="text-slate-300">{s.min}' {s.name}{s.pk?<span className="text-amber-400"> (pen)</span>:s.fk?<span className="text-amber-400"> (FK)</span>:s.assist?<span className="text-slate-500"> ({s.assist})</span>:""}</div>)}
         </div>
       </div>
       {m.motm && <div className="text-center text-xs text-emerald-300 mt-2">⭐ Man of the Match: {m.motm}</div>}
@@ -4402,19 +4495,26 @@ function PlayerModal({p, G, onClose}){
     </div>
   );
 }
+// xG Prevented: shot-stopping above/below what an average keeper would allow
+// given the xG they actually faced (PSxG-style metric: xGA - GA). Positive =
+// better than expected, negative = worse. Needs a few appearances to be meaningful.
+function xgPrevented(s){ return s && s.App ? +((s.xGA||0)-(s.GA||0)).toFixed(2) : null; }
 function StatLine({s, gk}){
+  const xgp = gk ? xgPrevented(s) : null;
   const cells = [["App",s.App||0],["Goals",s.G||0],["Assists",s.A||0],
     ["Shots",s.SH||0],["On tgt",s.SOT||0],["xG",(s.xG||0).toFixed(1)],
     ["Key Pass",s.KP||0],
     gk?["Saves",s.Sv||0]:["MOTM",s.MOTM||0],
     ["Clean Sh",s.CS||0],["Yellow",s.YC||0],["Red",s.RC||0],
+    ["Pens",s.PK||0],["Pens Missed",s.PKM||0],["Free Kicks",s.FK||0],
+    ...(gk?[["xG Faced",(s.xGA||0).toFixed(1)],["Goals Allowed",s.GA||0],["xG Prevented",xgp==null?"—":(xgp>0?"+":"")+xgp]]:[]),
     ["Rating",avgRating(s)?avgRating(s).toFixed(2):"—"],["Value",ratingValue(s)]];
   return (
     <div className="grid grid-cols-3 gap-2 text-center">
       {cells.map(([k,v])=>(
         <div key={k} className="bg-[#16213a] rounded p-2">
           <div className="text-[11px] text-slate-400">{k}</div>
-          <div className="font-bold tnum">{v}</div>
+          <div className={"font-bold tnum "+(k==="xG Prevented"&&typeof v==="string"&&v[0]==="+"?"text-emerald-400":k==="xG Prevented"&&typeof v==="string"&&v[0]==="-"?"text-red-400":"")}>{v}</div>
         </div>
       ))}
     </div>
