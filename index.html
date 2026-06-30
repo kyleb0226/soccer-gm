@@ -329,6 +329,7 @@ function makePlayer(pos, ageRange, meanAdj=0){
     });
   }
   computeOvr(p); setPotential(p); p.peakOvr = p.ovr; p.fitness = 100;
+  p.susp = 0; p.ycCount = 0;
   p.traits = rollTraits(p); p.form = 6.7; p.morale = rint(60,80);
   p.salary = wageFor(p); p.years = rint(1,4); p.value = playerValue(p);
   p.release = chance(0.45) ? round(p.value*(1.7+_rng())*10)/10 : null;   // some have a release clause
@@ -346,8 +347,9 @@ function makeClub(def, idx, div, country){
     stadium: STADIUM_NAMES[idx % STADIUM_NAMES.length], capacity: each*4,
     stands: { N:each, E:each, S:each, W:each },
     pld:0, w:0, d:0, l:0, gf:0, ga:0, pts:0,
-    budget: rint(20,140) + (div===0?60:0), formation: "4-3-3", xi: [], bench: [],
+    budget: rint(20,140) + (div===0?60:0), formation: "4-3-3", tactic: "balanced", xi: [], bench: [],
     academy: { level: 1 }, history: [], honours: [], setPieces: { pen:null, fk:null, corner:null },
+    facilityTier: 0, namingRights: null, namingOffers: [],
     userControlled: false,
   };
 }
