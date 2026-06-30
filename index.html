@@ -1304,6 +1304,7 @@ function computeAwards(G){
 // Roll the franchise into the next season: archive stats, age & develop players, expire
 // contracts, promotion/relegation, youth intake, finances, fresh fixtures + cup.
 function startNextSeason(G){
+  ensureCareer(G); G.career.seasonsManaged++;
   returnLoans(G);   // loanees go back to their owners before aging/contracts
   // archive each player's season into history + career, then reset season stats
   Object.values(G.players).forEach(p=>{
@@ -1782,6 +1783,7 @@ function buyPlayer(G, p, fee, opts={}){
   p.release = opts.release!=null ? opts.release : round(playerValue(p)*2*10)/10;   // new deal carries a fresh release clause
   autoPickXI(buyer, G.players);
   logNews(G,"transfer",`➡️ Signed ${p.pos} ${p.name} (${p.ovr}) for ${money(fee)}${opts.via==="release"?" (release clause)":""}`, buyer.id);
+  ensureCareer(G); G.career.transferSpend = round((G.career.transferSpend+fee)*10)/10;
   return { ok:true };
 }
 // Sell one of your players to an AI club for a fee. Honors any sell-on owed to a former club.
@@ -1802,6 +1804,7 @@ function sellPlayer(G, p, fee, toClubId){
   else { p.teamId = null; G.freeAgents=G.freeAgents||[]; G.freeAgents.push(p); }
   autoPickXI(seller, G.players);
   logNews(G,"transfer",`⬅️ Sold ${p.pos} ${p.name} (${p.ovr}) for ${money(fee)}`, seller.id);
+  ensureCareer(G); G.career.transferIncome = round((G.career.transferIncome+proceeds)*10)/10;
 }
 // AI clubs occasionally bid for your best/surplus players.
 function generateTransferOffers(G){
@@ -1950,6 +1953,33 @@ function takeJob(G, clubId){
   G.boardConfidence=58; G.pendingSack=false; G.jobOffers=null; G.lastMatch=null; G.lastMatches=[];
   setOwnerExpectation(G);
   logNews(G,"job",`📝 Appointed manager of ${nc.name}`, clubId);
+  ensureCareer(G);
+  const cur=G.career.clubsManaged[G.career.clubsManaged.length-1];
+  if(cur && cur.to==null) cur.to=G.season;
+  G.career.clubsManaged.push({ id:clubId, name:nc.name, abbr:nc.abbr, from:G.season, to:null });
+}
+
+/* ----------------------------- manager career / legacy ------------------ */
+// Tracks the human manager's WHOLE career, independent of which club they're
+// currently at — survives job changes via takeJob. Trophies are derived (not
+// counted live) by scanning each managed club's honours within the season
+// range the user was actually in charge there, so nothing can drift out of sync.
+function ensureCareer(G){
+  if(!G.career){
+    const c=G.clubs[G.userTeamId];
+    G.career={ seasonsManaged:0, transferSpend:0, transferIncome:0, academyGraduates:0,
+      clubsManaged: c ? [{ id:c.id, name:c.name, abbr:c.abbr, from:G.season, to:null }] : [] };
+  }
+  if(!Array.isArray(G.career.clubsManaged)) G.career.clubsManaged=[];
+}
+function careerTrophies(G){
+  ensureCareer(G);
+  let trophies=[];
+  G.career.clubsManaged.forEach(span=>{
+    const club=G.clubs[span.id]; if(!club) return;
+    (club.honours||[]).forEach(h=>{ if(h.season>=span.from && (span.to==null||h.season<=span.to)) trophies.push({...h, club:club.abbr}); });
+  });
+  return trophies;
 }
 
 /* ----------------------------- news ------------------------------------ */
@@ -2049,6 +2079,7 @@ function migrate(G){
     if(!Array.isArray(G.intl.history)) G.intl.history=[];
     if(!Array.isArray(G.trebles)) G.trebles=[];
     if(G.intlCycle===undefined) G.intlCycle=null;
+    ensureCareer(G);
     G.version = SAVE_VERSION;
   }catch(e){}
   return G;
@@ -2083,6 +2114,8 @@ function newGame(userTeamId, opts={}){
     finalsArchive: [], records: { players:{}, biggestWin:null }, trebles: [],
     intl: { history:[], lastPlayed:null },
     boardConfidence: 60, pendingSack: false, jobOffers: null,
+    career: { seasonsManaged:0, transferSpend:0, transferIncome:0, academyGraduates:0,
+      clubsManaged: [{ id:userTeamId, name:clubs[userTeamId].name, abbr:clubs[userTeamId].abbr, from:2026, to:null }] },
     settings: { injuries:true, jobSecurity:true, morale:true, internationals:true, watchMatches:false },
   };
   // seed a free-agent pool sized for a bigger world
@@ -3529,6 +3562,7 @@ function YouthView({G, commit, tShow}){
     if(!p.years || p.years < 1) p.years = rint(1,3);
     autoPickXI(user, G.players);
     logNews(G, "youth", `🎓 ${p.name} (${p.pos} ${p.ovr}) promoted to the senior squad`, user.id);
+    ensureCareer(G); G.career.academyGraduates++;
     commit(G); tShow(`${p.name} promoted to senior squad`);
   };
   const release = p => {
@@ -4244,6 +4278,42 @@ function NationView({G, commit, tShow}){
 }
 
 /* ----------------------------- records / history ----------------------- */
+function ManagerLegacyCard({G}){
+  ensureCareer(G);
+  const c = G.career;
+  const trophies = careerTrophies(G);
+  const tCount = t => trophies.filter(h=>h.type===t).length;
+  const net = round((c.transferIncome - c.transferSpend)*10)/10;
+  return (
+    <Card>
+      <div className="font-semibold mb-2">👔 Manager Legacy</div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3 text-center">
+        <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-2xl font-black tnum">{c.seasonsManaged}</div><div className="text-[11px] text-slate-400">Seasons managed</div></div>
+        <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-2xl font-black tnum">{c.clubsManaged.length}</div><div className="text-[11px] text-slate-400">Clubs managed</div></div>
+        <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-2xl font-black tnum">{trophies.length}</div><div className="text-[11px] text-slate-400">Career trophies</div></div>
+        <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-2xl font-black tnum">{c.academyGraduates}</div><div className="text-[11px] text-slate-400">Academy graduates</div></div>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-3 text-center text-sm">
+        <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-slate-400 text-[11px]">Transfer spend</div><div className="font-bold tnum text-red-400">-{money(c.transferSpend)}</div></div>
+        <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-slate-400 text-[11px]">Transfer income</div><div className="font-bold tnum text-emerald-400">+{money(c.transferIncome)}</div></div>
+        <div className="bg-[#0d1526] rounded-lg p-2"><div className="text-slate-400 text-[11px]">Net trading</div><div className={"font-bold tnum "+(net>=0?"text-emerald-400":"text-red-400")}>{net>=0?"+":""}{money(net)}</div></div>
+      </div>
+      <div className="text-xs text-slate-400 mb-1">Career path:</div>
+      <div className="space-y-1 text-sm mb-3">
+        {c.clubsManaged.map((span,i)=>(
+          <div key={i} className="flex gap-2"><span className="text-slate-500 tnum w-20">{span.from}–{span.to||"now"}</span><span className="text-slate-200">{span.name}</span></div>
+        ))}
+      </div>
+      {trophies.length>0 && (
+        <div className="flex gap-2 flex-wrap text-xs">
+          {[["league","🏆 Leagues"],["cup","🎖️ Cups"],["continental","🌍 Continental"],["treble","🌟 Trebles"]].map(([t,l])=>tCount(t)>0&&(
+            <span key={t} className="px-2 py-1 rounded bg-[#16213a] text-slate-300">{l}: {tCount(t)}</span>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
 function RecordsView({G}){
   const user = G.clubs[G.userTeamId];
   const [final, setFinal] = useState(null);
@@ -4283,6 +4353,8 @@ function RecordsView({G}){
         <div className="font-semibold">📚 Records & History</div>
         <div className="text-sm text-slate-400">Every champion, every saved final, and all-time leaders that persist even after players retire.</div>
       </Card>
+
+      <ManagerLegacyCard G={G} />
 
       <Card>
         <div className="font-semibold mb-2">🏆 {user.name} trophy cabinet</div>
