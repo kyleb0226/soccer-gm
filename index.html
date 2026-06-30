@@ -813,7 +813,7 @@ const CUP_NAME = "National Cup";
 const CUP_ORDER = ["R32","R16","QF","SF","Final"];
 const CUP_MD = { 6:"R32", 13:"R16", 21:"QF", 29:"SF", 36:"Final" };
 const CUP_MD_REV = { R32:6, R16:13, QF:21, SF:29, Final:36 };          // round → matchday (1-based)
-const CONT_MD_REV = { G1:5, G2:11, G3:17, QF:24, SF:30, Final:36 };
+const CONT_MD_REV = { G1:4, G2:8, G3:12, G4:16, G5:20, G6:24, QF:27, SF:31, Final:35 };
 const INTL_BREAK_MDS = [10, 26];   // matchdays when international friendlies/qualifiers run
 function cupName(country){ return (COUNTRIES[country]||COUNTRIES[0]).name + " Cup"; }
 function initCountryCup(G, country){
@@ -845,7 +845,7 @@ function userCup(G){ const c=G.clubs[G.userTeamId]; return (G.cups||[]).find(x=>
 // PLUS a 4th "cup route" berth (national cup winner -> runner-up -> next finisher).
 const CONT_CUP_NAME = "Continental Champions Cup";
 const CONT_ORDER = ["QF","SF","Final"];   // knockout phase order (groups handled separately)
-const CONT_MD = { 5:"G1", 11:"G2", 17:"G3", 24:"QF", 30:"SF", 36:"Final" };
+const CONT_MD = { 4:"G1", 8:"G2", 12:"G3", 16:"G4", 20:"G5", 24:"G6", 27:"QF", 31:"SF", 35:"Final" };
 // Rank one country's top-flight clubs by last completed season's finish (best first);
 // newly promoted clubs (no top-flight history) and ties fall back to current strength.
 function contRankCountry(G, country){
@@ -882,8 +882,17 @@ function seedBracket16(pool){
 }
 // Continental cup = GROUP STAGE → KNOCKOUT. Each nation sends 4 qualifiers; the 16 are drawn into
 // 4 groups of 4 so every group has exactly ONE club from each country and one from each seeding pot.
-// Single round-robin (3 matchdays); the top 2 of each group advance to an 8-team knockout (QF→Final).
-const CONT_GROUP_FX = [ [[0,3],[1,2]], [[0,2],[3,1]], [[0,1],[2,3]] ];   // round-robin of 4
+// Double round-robin (6 matchdays, 3 home + 3 away); top 2 advance to an 8-team knockout (QF→Final).
+// First leg (MDs 1-3): single round-robin. Second leg (MDs 4-6): reversed (home/away swapped).
+const CONT_GROUP_FX_LEGS = [
+  [[0,3],[1,2]],   // leg 1 MD1
+  [[0,2],[3,1]],   // leg 1 MD2
+  [[0,1],[2,3]],   // leg 1 MD3
+  [[3,0],[2,1]],   // leg 2 MD4 (reversed)
+  [[2,0],[1,3]],   // leg 2 MD5
+  [[1,0],[3,2]],   // leg 2 MD6
+];
+const CONT_GROUP_FX = CONT_GROUP_FX_LEGS;   // alias used in playContGroupRound
 function initContCup(G){
   const perCountry = COUNTRIES.map((_,ci)=>countryContQualifiers(G, ci));   // {ids:[4 by rank], cupRoute}
   const nC = COUNTRIES.length;
@@ -934,7 +943,7 @@ function playContCupRound(G){
   if(cup.phase==="group"){
     playContGroupRound(G, cup);
     cup.groupMd++;
-    if(cup.groupMd>=3) buildContKnockout(G, cup);
+    if(cup.groupMd>=6) buildContKnockout(G, cup);
     else cup.round = "G"+(cup.groupMd+1);
   } else {
     playKnockoutRound(G, cup, CONT_ORDER);
@@ -2973,7 +2982,7 @@ function CupView({G}){
 function ContCupView({G}){
   const cup = G.contCup;
   if(!cup) return <Card>The {CONT_CUP_NAME} has not started yet.</Card>;
-  const roundLabel = { G1:"Group Stage — MD1", G2:"Group Stage — MD2", G3:"Group Stage — MD3", QF:"Quarter-finals", SF:"Semi-finals", Final:"Final" };
+  const roundLabel = { G1:"Group MD1", G2:"Group MD2", G3:"Group MD3", G4:"Group MD4", G5:"Group MD5", G6:"Group MD6", QF:"Quarter-finals", SF:"Semi-finals", Final:"Final" };
   const seedOf = id => (cup.seeds||{})[id];
   const clubLine = (id, win) => {
     const c = G.clubs[id]; if(!c) return null;
@@ -3124,7 +3133,7 @@ function userFixtureFeed(G){
     (cc.groups||[]).forEach(grp=>{
       (grp.results||[]).forEach(res=>{
         if(res.home!==uid && res.away!==uid) return;
-        const home = res.home===uid; const mdName = ["G1","G2","G3"][res.md];
+        const home = res.home===uid; const mdName = ["G1","G2","G3","G4","G5","G6"][res.md];
         out.push({ md:CONT_MD_REV[mdName], comp:"cont", home, oppName:(G.clubs[home?res.away:res.home]||{}).name||"?",
           played:true, gf:home?res.hs:res.as, ga:home?res.as:res.hs, round:"Group" });
       });
@@ -3132,8 +3141,8 @@ function userFixtureFeed(G){
     // remaining group matchdays (not yet played)
     if(cc.phase==="group"){
       const doneMds=new Set((cc.groups||[]).flatMap(g=>(g.results||[]).map(r=>r.md)));
-      [0,1,2].filter(m=>!doneMds.has(m)).forEach(m=>{
-        const mdName=["G1","G2","G3"][m];
+      [0,1,2,3,4,5].filter(m=>!doneMds.has(m)).forEach(m=>{
+        const mdName=["G1","G2","G3","G4","G5","G6"][m];
         out.push({ md:CONT_MD_REV[mdName], comp:"cont", home:null, oppName:"TBD", played:false, round:"Group MD"+(m+1) });
       });
     }
