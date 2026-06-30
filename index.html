@@ -1389,7 +1389,17 @@ function startNextSeason(G){
     const club = G.clubs[p.teamId];
     if(p.years<=0){
       // AI clubs re-sign most of their useful players (at the player's demand); the rest hit the market
-      if(club && club.userControlled){ p.years=0; p.unhappy=true; }   // user must decide (renew in squad)
+      if(club && club.userControlled){
+        // First expiry = one season of grace with a clear warning. If still not
+        // re-signed by the NEXT rollover, he leaves on a free (Bosman).
+        if(p.expiredGrace){
+          logNews(G,"transfer",`🚪 ${p.name} (${p.pos} ${p.ovr}) left ${club.abbr} on a free transfer — his expired contract was never renewed`, club.id);
+          releaseToFA(G, p);
+        } else {
+          p.years=0; p.unhappy=true; p.expiredGrace=true;
+          logNews(G,"contract",`⏳ ${p.name}'s contract has expired — re-sign him now or he walks away on a free next season`, club.id);
+        }
+      }
       else if(p.ovr>=58 && chance(0.78)){ p.years=rint(2,4); p.salary=wageDemand(p); p.unhappy=false; }
       else { releaseToFA(G, p); }
     } else if(p.years<=1 && club && club.userControlled && p.ovr>=60){
@@ -2666,6 +2676,7 @@ function Squad({G, commit, tShow}){
                   {isSuspended(p) && <span className="ml-1 text-orange-400 text-xs" title="Suspended">⛔{p.susp}</span>}
                   {p.youth && <span className="ml-1 text-amber-300 text-xs">YTH</span>}
                   {p.unhappy && p.years>0 && <span className="ml-1 text-orange-400 text-xs" title="Wants a new contract before it runs down">⚠</span>}
+                  {p.expiredGrace && p.years<=0 && <span className="ml-1 text-red-400 text-xs font-bold" title="Contract EXPIRED — re-sign him now or he leaves on a free next season">⏳ EXPIRED</span>}
                   {p.wantsOut && <span className="ml-1 text-xs" title="Has handed in a transfer request">✈️</span>}
                   {p.listed && !p.wantsOut && <span className="ml-1 text-xs" title="Transfer-listed">🏷️</span>}
                   {p.form!=null && p.form>=7.3 && <span className="ml-1 text-xs" title="In hot form">🔥</span>}
@@ -2702,7 +2713,7 @@ function RenewModal({G, p, commit, tShow, onClose}){
   const [rel, setRel] = useState(p.release!=null ? String(p.release) : "");
   const sign = yrs => {
     p.salary = clamp(round(demand*termPremium[yrs]*10)/10, 0.2, 40);
-    p.years = yrs; p.unhappy = false;
+    p.years = yrs; p.unhappy = false; p.expiredGrace = false;
     const rv = parseFloat(rel);
     p.release = (rel==="" || isNaN(rv)) ? null : round(Math.max(0,rv)*10)/10;
     commit(G); tShow(`${p.name} signed for ${yrs}y at ${money(p.salary)}/yr`); onClose();
