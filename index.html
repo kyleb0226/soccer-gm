@@ -1270,7 +1270,7 @@ function startNextSeason(G){
       for(const k in p.stats) p.career[k] = (p.career[k]||0) + p.stats[k];
     }
     p.stats = emptyStats(); p.compStats = {};
-    p.susp = 0; p.ycCount = 0; p.fitness = 100; p.seasonDev = 0;   // bans/yellows clear; preseason rest; reset in-season growth tally
+    p.susp = 0; p.ycCount = 0; p.fitness = 100; p.seasonDev = 0; p.injury = null;   // bans/yellows clear; preseason rest heals everyone; reset in-season growth tally
   });
   // record club season history + reset table
   G.clubs.forEach(c=>{
@@ -1339,6 +1339,15 @@ function startNextSeason(G){
     processCommercials(G, c);
     c.pld=0;c.w=0;c.d=0;c.l=0;c.gf=0;c.ga=0;c.pts=0;
   });
+  // Keep AI wage bills sane relative to their actual income BEFORE they go
+  // into crisis — without this, wages drift up via renewals every season
+  // while income stays roughly flat, and the whole league's budgets erode
+  // year over year (not just a few badly-run clubs).
+  G.clubs.forEach(c=>capAIWageBill(G, c));
+  // financial distress: a club that's badly run can't just spiral forever.
+  // AI clubs get force-restructured (fire-sale a player, or release expensive
+  // wages); the user's club instead takes a real consequence — board confidence.
+  G.clubs.forEach(c=>relieveFinancialDistress(G, c));
   // youth intake into every club, refill thin squads
   G.clubs.forEach(c=>youthIntake(G, c));
   G.clubs.forEach(c=>refillSquad(G, c));
@@ -3236,7 +3245,9 @@ function Transfers({G, commit, tShow}){
   const doSell = p => {
     const fee=round(p.value*0.9*10)/10;
     // always sell to an actual AI club so the player stays in the world
-    const buyer=G.clubs.filter(c=>c.id!==user.id && c.budget>=fee).sort((a,b)=>b.budget-a.budget)[0];
+    const buyer=G.clubs.filter(c=>c.id!==user.id && c.budget>=fee
+      && Object.values(G.players).filter(x=>x.teamId===c.id && !x.youth).length<28)
+      .sort((a,b)=>b.budget-a.budget)[0];
     if(!buyer){ tShow("No club can afford that player right now."); return; }
     sellPlayer(G,p,fee,buyer.id); commit(G); tShow(`Sold ${p.name} to ${buyer.name} for ${money(fee)}`);
   };
@@ -3599,6 +3610,67 @@ function processCommercials(G, club){
     logNews(G,"finance",`📩 ${offer.name} (${offer.tier}) want to sponsor ${club.name}: ${money(offer.val)}/yr for ${offer.yrs} years`, club.id);
   }
 }
+// Preventative check: an AI club's wage bill shouldn't run far ahead of its
+// actual income (TV+prize+gate+commercial). Real clubs operate under FFP-style
+// constraints; without this, renewals quietly inflate every club's wages each
+// season while income stays flat, and the whole league's finances erode over
+// a long save. Releases the worst value-for-wage player until back in line.
+function capAIWageBill(G, club){
+  if(club.userControlled) return;
+  const pnl = club.lastPnl||{};
+  const income = (pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.shirt||0)+(pnl.sponsor||0)+(pnl.cup||0);
+  let guard=0;
+  while(wageBill(G,club.id) > income*0.78 && guard++<6){
+    const squad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth);
+    if(squad.length<=14) break;
+    const worst = squad.slice().sort((a,b)=>(b.salary/(b.ovr||1))-(a.salary/(a.ovr||1)))[0];
+    releaseToFA(G, worst);
+  }
+}
+// A badly-run club can't spiral into bottomless debt forever — that's not how
+// football clubs actually work (administration, FFP, forced sales kick in).
+// AI clubs in crisis get force-restructured; the user instead faces a real
+// consequence (board confidence hit) so financial mismanagement has teeth
+// without taking away the user's agency over their own transfers.
+const FINANCIAL_CRISIS = -25;     // budget below this triggers action
+function relieveFinancialDistress(G, club){
+  if(club.budget >= FINANCIAL_CRISIS) return;
+  if(club.userControlled){
+    if(jobSecurityOn(G)){
+      G.boardConfidence = clamp((G.boardConfidence==null?60:G.boardConfidence) - 12, 0, 100);
+      logNews(G,"finance",`⚠️ The board is alarmed by the club's finances (${money(club.budget)}). Balance the books or risk your job.`, club.id);
+    }
+    return;   // no auto-rescue for the user — they must fix it themselves
+  }
+  // AI fire-sale: sell the most valuable player to whichever solvent club can
+  // afford it; if nobody can, release the highest earners to cut the wage bill.
+  let squad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth).sort((a,b)=>b.value-a.value);
+  let guard=0;
+  while(club.budget < FINANCIAL_CRISIS && squad.length>14 && guard++<10){
+    const target = squad[0];
+    const fee = round(target.value*0.75*10)/10;
+    const buyer = G.clubs.filter(c=>c.id!==club.id && c.budget>=fee+10
+      && Object.values(G.players).filter(p=>p.teamId===c.id && !p.youth).length<26)
+      .sort((a,b)=>b.budget-a.budget)[0];
+    if(buyer){
+      buyer.budget = round((buyer.budget-fee)*10)/10;
+      club.budget = round((club.budget+fee)*10)/10;
+      target.teamId = buyer.id; autoPickXI(buyer, G.players);
+      logNews(G,"finance",`💰 Financial trouble forces ${club.name} to sell ${target.name} to ${buyer.name} for ${money(fee)}`, club.id);
+    } else {
+      // no buyer — release the most expensive wage instead, to cut costs
+      const cutSquad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth).sort((a,b)=>b.salary-a.salary);
+      if(!cutSquad.length) break;
+      releaseToFA(G, cutSquad[0]);
+      logNews(G,"finance",`📉 ${club.name} release ${cutSquad[0].name} to cut their wage bill amid financial trouble`, club.id);
+    }
+    squad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth).sort((a,b)=>b.value-a.value);
+  }
+  // last resort: if fire-sales alone couldn't fully recover, a board loan/admin
+  // restructuring normalizes them so no AI club ends a season bottomlessly broke
+  if(club.budget < FINANCIAL_CRISIS) club.budget = round((FINANCIAL_CRISIS+rint(2,8))*10)/10;
+  autoPickXI(club, G.players);
+}
 
 /* ----------------------------- finances UI ----------------------------- */
 const ACADEMY_UPGRADE_COST = [0, 5, 12, 25, 50];  // cost to go from level N to N+1 (£M)
@@ -3644,9 +3716,15 @@ function Finances({G, commit, tShow}){
   const depth = s => 14 + 26*(s/maxStand);
   return (
     <div className="space-y-3">
+      {user.budget < FINANCIAL_CRISIS && (
+        <Card className="border-red-500/50 bg-red-900/20">
+          <div className="font-semibold text-red-300">⚠️ Financial crisis</div>
+          <div className="text-sm text-slate-300 mt-1">The board won't bail you out — sell players, cut wages, or sign a sponsor before they lose patience with you.</div>
+        </Card>
+      )}
       {/* top-line budget */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        <Card><div className="text-xs text-slate-400">Transfer Budget</div><div className="text-2xl font-bold">{money(user.budget)}</div></Card>
+        <Card><div className="text-xs text-slate-400">Transfer Budget</div><div className={"text-2xl font-bold "+(user.budget<0?"text-red-400":"")}>{money(user.budget)}</div></Card>
         <Card><div className="text-xs text-slate-400">Wage Bill / yr</div><div className="text-2xl font-bold text-red-400">-{money(bill)}</div></Card>
         <Card><div className="text-xs text-slate-400">Net Commercial / yr</div><div className="text-2xl font-bold text-emerald-400">+{money(round((gateYrly+shirtYrly+sponsorYrly)*10)/10)}</div><div className="text-xs text-slate-500">gate + shirt + sponsors</div></Card>
       </div>
