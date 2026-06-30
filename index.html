@@ -120,7 +120,7 @@ const POS_W = {
 // Attribute tilts (added to a base mean) so a generated player's raw attributes suit
 // his position (a striker shoots, a centre-back defends, a keeper has 'keeping').
 const POS_TILT = {
-  GK:  {pac:-18, sho:-26, pas:-2, dri:-12, def:-10, phy:6,  gk:20},
+  GK:  {pac:-18, sho:-26, pas:-2, dri:-12, def:-10, phy:6,  gk:12},
   CB:  {pac:-6,  sho:-18, pas:-6, dri:-12, def:18,  phy:12, gk:-30},
   RB:  {pac:8,   sho:-10, pas:2,  dri:2,   def:8,   phy:2,  gk:-30},
   LB:  {pac:8,   sho:-10, pas:2,  dri:2,   def:8,   phy:2,  gk:-30},
@@ -317,7 +317,11 @@ function makePlayer(pos, ageRange, meanAdj=0){
     pac: rateGauss(base+tilt.pac,11), sho: rateGauss(base+tilt.sho,12),
     pas: rateGauss(base+tilt.pas,11), dri: rateGauss(base+tilt.dri,11),
     def: rateGauss(base+tilt.def,12), phy: rateGauss(base+tilt.phy,11),
-    gk:  rateGauss(base+tilt.gk,12),
+    gk:  rateGauss(base+tilt.gk,8),   // tighter SD: gk carries 70% of a keeper's OVR weight, so a
+                                       // wide spread here would swing OVR far more than any single
+                                       // outfield attribute swings an outfielder's — keeps the OVR
+                                       // distribution comparable across positions instead of GKs
+                                       // dominating both the very top and very bottom of rankings.
     stats: emptyStats(), career: emptyStats(), history: [],
   };
   // ~7% of players are standouts — a fat top end so elite talent stands apart
@@ -490,7 +494,8 @@ function fieldedXI(club, players){
   slots.forEach((slot,i)=>{
     let p = players[xi[i]];
     if(!p || !isAvailable(p) || used.has(p.id)){
-      const pool = subs.filter(q=>!used.has(q.id));
+      // a keeper is never fielded outfield, even as an emergency substitute
+      const pool = subs.filter(q=>!used.has(q.id) && (slot==="GK" ? true : q.pos!=="GK"));
       const naturals = pool.filter(q=>(q.positions||[q.pos]).includes(slot));
       p = (naturals.length ? naturals.sort((a,b)=>b.ovr-a.ovr)
                            : pool.sort((a,b)=>effRating(b,slot)-effRating(a,slot)))[0];
@@ -749,7 +754,7 @@ function autoPickXI(club, players){
   const naturalCount = i => squad.filter(p=>!used.has(p.id) && canPlay(p, slots[i])).length;
   const outIdx = slots.map((s,i)=>i).filter(i=>slots[i]!=="GK").sort((a,b)=>naturalCount(a)-naturalCount(b));
   outIdx.forEach(i=>{
-    const slot = slots[i], pool = avail();
+    const slot = slots[i], pool = avail().filter(p=>!isKeeper(p));   // a keeper is NEVER fielded outfield, even as a last resort
     const naturals = pool.filter(p=>canPlay(p, slot));
     const pick = naturals.length ? naturals.sort((a,b)=>b.ovr-a.ovr)[0]
                                  : pool.sort((a,b)=>effRating(b,slot)-effRating(a,slot))[0];
@@ -1620,7 +1625,7 @@ function pickXIFrom(squad, formation){
     if(pk){ used.add(pk.id); out[i]={p:pk,slot}; } });
   const naturalCount = i => avail().filter(p=>canPlay(p,slots[i])).length;
   const outIdx = slots.map((s,i)=>i).filter(i=>slots[i]!=="GK").sort((a,b)=>naturalCount(a)-naturalCount(b));
-  outIdx.forEach(i=>{ const slot=slots[i], pool=avail();
+  outIdx.forEach(i=>{ const slot=slots[i], pool=avail().filter(p=>!isKeeper(p));   // a keeper is never fielded outfield
     const nat = pool.filter(p=>canPlay(p,slot));
     const pk = nat.length ? nat.sort((a,b)=>b.ovr-a.ovr)[0] : pool.sort((a,b)=>effRating(b,slot)-effRating(a,slot))[0];
     if(pk){ used.add(pk.id); out[i]={p:pk,slot}; } });
