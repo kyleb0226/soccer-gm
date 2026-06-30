@@ -546,16 +546,16 @@ function simMatch(home, away, players, opts={}){
   // derby: the form book goes out the window — compress the gap toward the mean
   if(home.rivalId===away.id){ const m=(xgH+xgA)/2; xgH=xgH*0.82+m*0.18; xgA=xgA*0.82+m*0.18; }
   // Clinical finishing traits genuinely create a few extra goals for the TEAM (not
-  // just redistribute credit among teammates, which is all SCORE_W weighting does
-  // inside awardGoals). Each Poacher fielded adds a small xG bump, capped at two;
-  // Big-Game Player adds the same but only in cup matches, matching its theme.
+  // just redistribute credit among teammates, which is all SCORE_W/CREATE_W weighting
+  // does inside awardGoals). Each Poacher or Playmaker fielded adds a small xG bump,
+  // capped at two each; Big-Game Player adds the same but only in cup matches.
   if(MORALE_ON && !opts.skipTraitBoost){
     const isCupMatch = !!opts.cup;
     const traitBoost = side => {
       const lineup = fieldedXI(side, players);
-      let pk=0, bg=0;
-      lineup.forEach(({p})=>{ if(hasTrait(p,"poacher")) pk++; if(isCupMatch && hasTrait(p,"bigGame")) bg++; });
-      return 1 + Math.min(pk,2)*0.04 + Math.min(bg,2)*0.04;
+      let pk=0, bg=0, pm=0;
+      lineup.forEach(({p})=>{ if(hasTrait(p,"poacher")) pk++; if(isCupMatch && hasTrait(p,"bigGame")) bg++; if(hasTrait(p,"playmaker")) pm++; });
+      return 1 + Math.min(pk,2)*0.04 + Math.min(bg,2)*0.04 + Math.min(pm,2)*0.04;
     };
     xgH = clamp(xgH * traitBoost(home), 0.15, 6);
     xgA = clamp(xgA * traitBoost(away), 0.15, 6);
@@ -1172,10 +1172,10 @@ function livePlayHalf(G, M){
   const tH=TACTIC_MOD[home.tactic||"balanced"], tA=TACTIC_MOD[away.tactic||"balanced"];
   let xgH=clamp(1.32*Math.exp(1.7*(hAtt-aDef))*tH.xgFor*tA.xgAgainst*1.12,0.15,5.5)/2;
   let xgA=clamp(1.32*Math.exp(1.7*(aAtt-hDef))*tA.xgFor*tH.xgAgainst*0.92,0.15,5.5)/2;
-  // Clinical finishers genuinely create a few extra goals for the team, on top of
-  // getting disproportionate credit when a goal happens (see SCORE_W weighting below).
+  // Clinical finishers/creators genuinely create a few extra goals for the team, on
+  // top of getting disproportionate credit when a goal happens (SCORE_W/CREATE_W below).
   if(MORALE_ON){
-    const traitBoost = lineup => { let pk=0; lineup.forEach(({p})=>{ if(hasTrait(p,"poacher")) pk++; }); return 1+Math.min(pk,2)*0.04; };
+    const traitBoost = lineup => { let pk=0, pm=0; lineup.forEach(({p})=>{ if(hasTrait(p,"poacher")) pk++; if(hasTrait(p,"playmaker")) pm++; }); return 1+Math.min(pk,2)*0.04+Math.min(pm,2)*0.04; };
     xgH = clamp(xgH*traitBoost(H), 0.15, 6); xgA = clamp(xgA*traitBoost(A), 0.15, 6);
   }
   const gh=poisson(xgH), ga=poisson(xgA), base=(M.half-1)*45;
