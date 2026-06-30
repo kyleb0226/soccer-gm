@@ -3369,7 +3369,9 @@ function Transfers({G, commit, tShow}){
   if(q) market = market.filter(p=>p.name.toLowerCase().includes(q.toLowerCase()));
   market.sort((a,b)=>b.ovr-a.ovr);
   market = market.slice(0,80);
-  const squad = Object.values(G.players).filter(p=>p.teamId===user.id);
+  // Senior squad only — academy players never count toward roster slots or
+  // appear as loan-out candidates (they have to be promoted first, see loanOut).
+  const squad = Object.values(G.players).filter(p=>p.teamId===user.id && !p.youth);
   const offers = G.transferOffers||[];
   const [sellOnDeal, setSellOnDeal] = useState(false);   // give seller 20% sell-on for -25% fee
   const feeFor = p => round(p.value * 1.15 * (sellOnDeal?0.75:1) *10)/10;
@@ -3398,7 +3400,7 @@ function Transfers({G, commit, tShow}){
       <Card>
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="font-semibold">Transfer Market</div>
-          <div className="text-sm text-slate-400">Budget {money(user.budget)} · Squad {squad.length}/30</div>
+          <div className="text-sm text-slate-400">Budget {money(user.budget)} · Senior squad {squad.length}/30 <span className="text-slate-600">(academy players don't count)</span></div>
         </div>
         <div className={"text-xs mt-1 "+(windowOpen?"text-emerald-300":"text-amber-300")}>{transferWindowLabel(G)}{!windowOpen && " · free agents still signable"}</div>
         <div className="flex gap-2 mt-2 text-sm">
