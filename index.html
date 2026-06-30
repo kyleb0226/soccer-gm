@@ -1448,10 +1448,18 @@ function startNextSeason(G){
     const sen = Object.values(G.players).filter(p=>p.teamId===c.id && !p.youth).sort((a,b)=>b.ovr-a.ovr);
     sen.slice(24).forEach(p=>releaseToFA(G, p));
     const yth = Object.values(G.players).filter(p=>p.teamId===c.id && p.youth).sort((a,b)=>(b.pot||b.ovr)-(a.pot||a.ovr));
-    yth.slice(7).forEach(p=>{ delete G.players[p.id]; });
+    yth.slice(7).forEach(p=>retireOrDrop(G, p));
   });
-  // thin the free-agent pool (already aged above + the just-released surplus)
-  G.freeAgents = G.freeAgents.filter(p=>p.ovr>=48 || p.age<=23).slice(0,300);
+  // thin the free-agent pool (already aged above + the just-released surplus).
+  // Anyone purged here who had a real career is preserved in G.retired so old
+  // legends never silently disappear from the world.
+  G.retired = G.retired || {};
+  const keepFA = [], dropFA = [];
+  G.freeAgents.forEach(p=>{ (p.ovr>=48 || p.age<=23) ? keepFA.push(p) : dropFA.push(p); });
+  dropFA.forEach(p=>retireOrDrop(G, p));
+  keepFA.sort((a,b)=>b.ovr-a.ovr);
+  keepFA.slice(300).forEach(p=>retireOrDrop(G, p));
+  G.freeAgents = keepFA.slice(0,300);
   // fresh fixtures + cups + reset XIs
   G.season++; G.day=0; G.phase="regular";
   G.schedule = buildSchedule(G.clubs);
@@ -1541,6 +1549,29 @@ function releaseToFA(G, p){
   G.freeAgents = G.freeAgents || [];
   if(!G.freeAgents.some(x=>x.id===p.id)) G.freeAgents.push(p);
   // keep in G.players so they're still visible in the world — just teamId=null
+}
+// Called when a player would otherwise be permanently purged from the world
+// (surplus youth, or overflow/low-quality free agents trimmed at the rollover).
+// Anyone with a real footprint — a career, decent peak, or who ever played for
+// the user — is preserved in G.retired instead of being deleted, so old players
+// and legends never silently disappear. Only true filler is dropped, to keep
+// the save bounded over decades.
+function retireOrDrop(G, p){
+  G.retired = G.retired || {};
+  const ca = p.career || {};
+  const notable = (ca.App||0)>=30 || (ca.G||0)>=15 || (p.peakOvr||p.ovr||0)>=72
+    || (p.caps||0)>0 || p.hof || (p.history && p.history.some(h=>h.userClub));
+  // remove from any live collections
+  if(G.players[p.id]===p || G.players[p.id]) delete G.players[p.id];
+  G.freeAgents = (G.freeAgents||[]).filter(x=>x.id!==p.id);
+  if(notable){
+    p.retired = true;
+    if(p.retiredAge==null) p.retiredAge = p.age;
+    if(p.retiredSeason==null) p.retiredSeason = G.season;
+    p.teamId = null; p.years = 0; p.salary = 0;
+    G.retired[p.id] = p;
+  }
+  // else: genuinely anonymous filler — let it go.
 }
 function youthIntake(G, club){
   const lvl = (club.academy && club.academy.level) || 1;
@@ -2073,6 +2104,7 @@ function migrate(G){
   try{
     let maxId=0; Object.values(G.players||{}).forEach(p=>{ if(typeof p.id==="number"&&p.id>maxId) maxId=p.id; });
     (G.freeAgents||[]).forEach(p=>{ if(p&&typeof p.id==="number"&&p.id>maxId) maxId=p.id; });
+    Object.values(G.retired||{}).forEach(p=>{ if(p&&typeof p.id==="number"&&p.id>maxId) maxId=p.id; });
     uid.atLeast(maxId);
     if(!Array.isArray(G.news)) G.news=[];
     if(!Array.isArray(G.freeAgents)) G.freeAgents=[];
