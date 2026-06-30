@@ -1377,9 +1377,14 @@ function startNextSeason(G){
   // Academy players auto-graduate to the senior squad once they're 20+ (they've
   // aged out of youth football) so prospects never get stuck in the academy.
   Object.values(G.players).forEach(p=>{
-    if(p.youth && p.age>=20){
+    if(!p.youth) return;
+    const club = p.teamId!=null ? G.clubs[p.teamId] : null;
+    // everyone auto-graduates at 20; AI clubs also fast-track standout teen
+    // prospects (already senior-quality or high-ceiling) straight into the squad
+    const aiFastTrack = club && !club.userControlled && p.age>=17 && (p.ovr>=62 || (p.pot||0)>=78);
+    if(p.age>=20 || aiFastTrack){
       p.youth = false;
-      if(p.teamId!=null && G.clubs[p.teamId] && G.clubs[p.teamId].userControlled){
+      if(club && club.userControlled){
         logNews(G,"youth",`🎓 ${p.name} (${p.pos} ${p.ovr}) graduates from the academy to the senior squad`, p.teamId);
       }
     }
@@ -1405,8 +1410,18 @@ function startNextSeason(G){
           logNews(G,"contract",`⏳ ${p.name}'s contract has expired — re-sign him now or he walks away on a free next season`, club.id);
         }
       }
-      else if(p.ovr>=58 && chance(0.78)){ p.years=rint(2,4); p.salary=wageDemand(p); p.unhappy=false; }
-      else { releaseToFA(G, p); }
+      else {
+        // AI re-signs smartly: keep the players you can afford and your key men;
+        // let the rest walk so the wage bill stays inside income.
+        const incomeEst = aiIncomeEstimate(G, club);
+        const wageRoom = incomeEst*0.78 - wageBill(G, club.id);   // headroom under a sane wage:income ratio
+        const demand = wageDemand(p);
+        const keyMan = p.ovr>=72;                                  // genuine first-teamers are kept harder
+        const affordable = demand <= Math.max(wageRoom, 0) + (keyMan?1.5:0.4);
+        if(p.ovr>=58 && (keyMan || affordable) && chance(keyMan?0.94:0.80)){
+          p.years=rint(2,4); p.salary=demand; p.unhappy=false;
+        } else { releaseToFA(G, p); }
+      }
     } else if(p.years<=1 && club && club.userControlled && p.ovr>=60){
       p.unhappy=true;   // wants a new deal before running down (Bosman risk next year)
     } else { p.unhappy=false; }
@@ -3925,6 +3940,34 @@ function cupPrizeMoney(G, clubId){
   return round(total*10)/10;
 }
 
+// Rough estimate of a club's annual income, from last season's settled P&L
+// (falls back to a division baseline for a club with no history yet). Used by
+// the AI to make affordability-aware contract and wage decisions.
+function aiIncomeEstimate(G, club){
+  const p=club.lastPnl||{};
+  const inc=(p.tv||0)+(p.prize||0)+(p.gate||0)+(p.shirt||0)+(p.sponsor||0)+(p.cup||0)+(p.naming||0);
+  return inc>5 ? inc : (club.div===0?70:30);
+}
+// AI clubs grow their commercial income so they can compete financially: they
+// keep a sponsor portfolio topped up (scaled by prestige/division) and bigger
+// clubs may sell stadium naming rights. New deals start paying next season.
+function aiManageCommercials(G, club){
+  const str=clubStrength(club, G.players);
+  const target = club.div===0 ? (str>=74?3:str>=66?2:1) : 1;
+  club.sponsors = club.sponsors || [];
+  let guard=0;
+  while(club.sponsors.length < target && guard++<4){
+    const o=generateSponsorOffer(G, club);
+    club.sponsors.push({ name:o.name, tier:o.tier, val:o.val, yrs:o.yrs });
+  }
+  if(!club.namingRights && chance(club.div===0?0.18:0.08)){
+    const o=generateNamingOffer(G, club);
+    if(!club.traditionalStadiumName) club.traditionalStadiumName=club.stadium;
+    club.namingRights={ sponsor:o.sponsor, name:o.name, val:o.val, yrs:o.yrs };
+    club.stadium=o.name;
+  }
+}
+
 // Ensure club has shirt/sponsor data (backfill & first-time init).
 function ensureCommercials(G, club){
   if(!club.shirt){ const str=clubStrength(club,G.players); club.shirt={ brand:pick(SHIRT_BRANDS), value:shirtDealValue(str,(club.honours||[]).length), yrs:rint(2,4) }; }
@@ -3977,6 +4020,8 @@ function processCommercials(G, club){
   // the season settlement above; replacing the object wiped them and made AI
   // income look near-zero to capAIWageBill)
   club.lastPnl = { ...(club.lastPnl||{}), shirt:shirtIncome, sponsor:sponsorIncome, cup:cupPrize, naming:namingIncome };
+  // AI clubs proactively grow commercial income so they can compete to pay players
+  if(!isUser) aiManageCommercials(G, club);
   // generate a new sponsor offer for the user
   if(isUser && chance(0.6) && (club.sponsorOffers||[]).length<3){
     const offer=generateSponsorOffer(G, club);
