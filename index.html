@@ -1505,15 +1505,18 @@ function startNextSeason(G){
   Object.values(G.players).forEach(p=>{
     if(p.stats.App>0){
       p.history = p.history || [];
-      const club = p.teamId!=null && G.clubs[p.teamId] ? G.clubs[p.teamId] : null;
+      // if he spent this season on loan, archive it under the loan club (marked)
+      const loanClub = p._loanArchiveTeam!=null && G.clubs[p._loanArchiveTeam] ? G.clubs[p._loanArchiveTeam] : null;
+      const club = loanClub || (p.teamId!=null && G.clubs[p.teamId] ? G.clubs[p.teamId] : null);
       if(p.debutSeason==null) p.debutSeason = G.season;
       // Full season record: every stat field + league/club context so it can be
       // sliced by competition later. ratingSum/ratingN are kept so per-league
       // averages and rating-value can be recomputed from any subset of seasons.
       p.history.push({ season:G.season,
-        team: club ? club.abbr : "—", teamId: p.teamId,
+        team: club ? club.abbr : "—", teamId: club ? club.id : p.teamId,
         country: club ? club.country : null, div: club ? club.div : null,
         league: club ? divName(club.country, club.div) : "—",
+        loan: !!loanClub,
         age: p.age, ovr: p.ovr,
         ...p.stats, r:+avgRating(p.stats).toFixed(2) });
       // Keep a long history for players the user cares about; trim the AI filler
@@ -1531,7 +1534,7 @@ function startNextSeason(G){
         for(const k in src) p.careerComp[ck][k] = (p.careerComp[ck][k]||0) + src[k];
       }
     }
-    p.stats = emptyStats(); p.compStats = {};
+    p.stats = emptyStats(); p.compStats = {}; p._loanArchiveTeam = null;
     p.susp = 0; p.ycCount = 0; p.fitness = 100; p.seasonDev = 0; p.injury = null;   // bans/yellows clear; preseason rest heals everyone; reset in-season growth tally
   });
   // record club season history + reset table
@@ -2149,6 +2152,9 @@ function returnLoans(G){
   Object.values(G.players).forEach(p=>{
     if(p.loanOwner==null) return;
     const ownerId = p.loanOwner, involvedUser = (p.teamId===G.userTeamId || ownerId===G.userTeamId);
+    // remember where he actually played this season so the rollover archives the
+    // season under the loan club (marked as a loan), not the parent club
+    if(p.teamId!=null && p.teamId!==ownerId) p._loanArchiveTeam = p.teamId;
     if(G.clubs[ownerId]){ p.teamId = ownerId; if(involvedUser) logNews(G,"loan",`🔙 ${p.pos} ${p.name} returns from loan`, ownerId); }
     p.loanOwner = null; p.loanUntil = null;
   });
@@ -3720,23 +3726,29 @@ function Transfers({G, commit, tShow}){
         </>
       )}
       {tab==="sell" && (
+        <>
+        <Card><div className="text-xs text-slate-400">Sell for a fee, or <span className="text-sky-300">loan out</span> a young player who needs game time — he keeps developing and plays a full season for the loan club (his stats there are logged with a 🔁 loan marker), then returns to you at season's end.</div></Card>
         <Card className="p-0 overflow-x-auto">
           <table className="w-full text-sm">
             <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="text-left p-2">Player</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Age</th><th className="p-2">Sale</th><th className="p-2"></th></tr></thead>
             <tbody>
               {squad.slice().sort((a,b)=>b.value-a.value).map(p=>(
                 <tr key={p.id} className="border-b border-[#15203a]">
-                  <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
+                  <td className="p-2 text-left"><PName p={p} className="font-medium" />{isLoaned(p)&&<span className="ml-1 text-sky-300 text-xs" title="Out on loan">🔁</span>}</td>
                   <td className="p-2 text-center"><PosTag p={p} /></td>
                   <td className="p-2 text-center"><OvrPill v={p.ovr} /></td>
                   <td className="p-2 text-center tnum">{p.age}</td>
                   <td className="p-2 text-center tnum">{money(round(p.value*0.9*10)/10)}</td>
-                  <td className="p-2 text-center"><button onClick={()=>{ if(!windowOpen){ tShow("The transfer window is closed."); return; } if(squad.length<=14){ tShow("Squad too small to sell."); return; } doSell(p); }} disabled={!windowOpen} className={"px-2 py-1 rounded text-xs "+(windowOpen?"bg-[#16213a] text-slate-200":"bg-[#16213a] text-slate-500")}>Sell</button></td>
+                  <td className="p-2 text-center whitespace-nowrap">
+                    <button onClick={()=>{ if(!windowOpen){ tShow("The transfer window is closed."); return; } if(squad.length<=14){ tShow("Squad too small to sell."); return; } doSell(p); }} disabled={!windowOpen||isLoaned(p)} className={"px-2 py-1 rounded text-xs "+((windowOpen&&!isLoaned(p))?"bg-[#16213a] text-slate-200":"bg-[#16213a] text-slate-500")}>Sell</button>
+                    <button onClick={()=>{ if(!windowOpen){ tShow("The transfer window is closed."); return; } doLoanOut(p); }} disabled={!windowOpen||isLoaned(p)} className={"ml-1 px-2 py-1 rounded text-xs font-semibold "+((windowOpen&&!isLoaned(p))?"bg-sky-500/20 text-sky-300 hover:bg-sky-500/30":"bg-[#16213a] text-slate-500")} title="Loan out for the season (he develops and plays for the loan club)">🔁 Loan</button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </Card>
+        </>
       )}
       {tab==="offers" && (
         <div className="space-y-2">
@@ -5200,7 +5212,7 @@ function PlayerModal({p, G, onClose}){
                   {histShown.slice().reverse().map((h,i)=>(
                     <tr key={i} className="border-t border-[#15203a]">
                       <td className="text-left">{h.season}</td>
-                      <td className="text-left whitespace-nowrap">{h.country!=null&&<span className="mr-0.5">{(COUNTRIES[h.country]||{}).flag}</span>}{h.team}{h.div===1&&<span className="text-slate-600 text-[9px]">²</span>}</td>
+                      <td className="text-left whitespace-nowrap">{h.country!=null&&<span className="mr-0.5">{(COUNTRIES[h.country]||{}).flag}</span>}{h.team}{h.div===1&&<span className="text-slate-600 text-[9px]">²</span>}{h.loan&&<span className="ml-0.5 text-sky-300 text-[10px]" title="Loan spell">🔁</span>}</td>
                       <td className="text-center">{h.age!=null?h.age:"—"}</td><td className="text-center">{h.App}</td>
                       <td className="text-center">{h.G}</td><td className="text-center">{h.A}</td><td className="text-center">{h.KP||0}</td>
                       <td className="text-center">{h.CS}</td><td className="text-center">{h.YC||0}</td><td className="text-center">{h.RC||0}</td><td className="text-center">{h.r}</td>
