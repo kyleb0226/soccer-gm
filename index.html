@@ -249,11 +249,11 @@ function divName(country, div){ return (COUNTRIES[country]||COUNTRIES[0]).divNam
 const DIV_NAMES = COUNTRIES[0].divNames;
 
 /* ----------------------------- player gen ------------------------------ */
-function emptyStats(){ return { App:0, Min:0, G:0, A:0, CS:0, YC:0, RC:0, MOTM:0, ratingSum:0, ratingN:0, SH:0, SOT:0, KP:0, xG:0, Sv:0, PK:0, PKM:0, FK:0, xGA:0, GA:0,
+function emptyStats(){ return { App:0, Start:0, Min:0, G:0, A:0, CS:0, YC:0, RC:0, MOTM:0, ratingSum:0, ratingN:0, SH:0, SOT:0, KP:0, xG:0, Sv:0, PK:0, PKM:0, FK:0, xGA:0, GA:0,
   // defensive / possession / keeper stats (generated per match from attributes + context)
   Tkl:0, Int:0, Clr:0, Blk:0, Aer:0, DuW:0, DuT:0, Err:0, Pass:0, PassA:0, PrgP:0, Drb:0, Crs:0, Swp:0, PKSv:0 }; }
 // stat keys added after the original release — used to backfill old saves in migrate()
-const NEW_STAT_KEYS = ["SH","SOT","KP","xG","Sv","PK","PKM","FK","xGA","GA","Tkl","Int","Clr","Blk","Aer","DuW","DuT","Err","Pass","PassA","PrgP","Drb","Crs","Swp","PKSv"];
+const NEW_STAT_KEYS = ["Start","SH","SOT","KP","xG","Sv","PK","PKM","FK","xGA","GA","Tkl","Int","Clr","Blk","Aer","DuW","DuT","Err","Pass","PassA","PrgP","Drb","Crs","Swp","PKSv"];
 function avgRating(s){ return s && s.ratingN ? s.ratingSum/s.ratingN : 0; }
 // Sum the stat fields across a list of season-history rows (used for per-league filtering).
 function sumStats(rows){
@@ -680,7 +680,7 @@ function applyMatch(home, away, hs, as, players, box, opts){
   // appearances + minutes for everyone who started (90'); a couple of bench cameos
   function credit(side, club){
     const xiIds = new Set(side.map(({p})=>p.id));
-    side.forEach(({p})=>{ p.stats.App++; p.stats.Min += 90; addComp(p,"App"); addComp(p,"Min",90); const loss = rint(18,26) * (hasTrait(p,"engine")?0.6:1); p.fitness = clamp((p.fitness!=null?p.fitness:100) - Math.round(loss), 0, 100); });
+    side.forEach(({p})=>{ p.stats.App++; p.stats.Start++; p.stats.Min += 90; addComp(p,"App"); addComp(p,"Start"); addComp(p,"Min",90); const loss = rint(18,26) * (hasTrait(p,"engine")?0.6:1); p.fitness = clamp((p.fitness!=null?p.fitness:100) - Math.round(loss), 0, 100); });
     const bench = (club.bench||[]).map(id=>players[id]).filter(p=>p && isAvailable(p) && !xiIds.has(p.id));
     bench.slice(0,3).forEach(p=>{ if(chance(0.5)){ const m=rint(8,30); p.stats.App++; p.stats.Min += m; addComp(p,"App"); addComp(p,"Min",m); p.fitness = clamp((p.fitness!=null?p.fitness:100) - round(m/90*22), 0, 100); } });
   }
@@ -1326,7 +1326,7 @@ function liveInit(G){
   const user=G.clubs[G.userTeamId];
   if(user && user.autoRotate) rotateXI(user, G.players, false);
   return { gref:g, homeId:g.home, awayId:g.away, half:0, hs:0, as:0, events:[],
-    appeared:{}, minutes:{}, sideOf:{}, slotOf:{}, gBy:{}, aBy:{},
+    appeared:{}, minutes:{}, started:{}, sideOf:{}, slotOf:{}, gBy:{}, aBy:{},
     shH:0, shA:0, sotH:0, sotA:0, done:false };
 }
 // Watched matches are always league fixtures (the user's matchday round only
@@ -1344,7 +1344,7 @@ function livePlayHalf(G, M){
   const H=fieldedXI(home, players), A=fieldedXI(away, players);
   MORALE_ON = !G.settings || G.settings.morale!==false;
   const uH=unitRatings(home, players), uA=unitRatings(away, players);
-  const note=(lineup,side)=>lineup.forEach(({p,slot})=>{ M.appeared[p.id]=true; M.minutes[p.id]=(M.minutes[p.id]||0)+45; M.sideOf[p.id]=side; M.slotOf[p.id]=slot; });
+  const note=(lineup,side)=>lineup.forEach(({p,slot})=>{ M.appeared[p.id]=true; if(M.half===1) M.started[p.id]=true; M.minutes[p.id]=(M.minutes[p.id]||0)+45; M.sideOf[p.id]=side; M.slotOf[p.id]=slot; });
   note(H,"H"); note(A,"A");
   const hAtt=(0.55*n01(uH.ATT)+0.30*n01(uH.MID)+0.15*n01(uH.DEF));
   const hDef=(0.55*n01(uH.DEF)+0.30*n01(uH.MID)+0.15*n01(uH.ATT));
@@ -1388,7 +1388,7 @@ function livePlayHalf(G, M){
 function liveFinish(G, M){
   const players=G.players, home=G.clubs[M.homeId], away=G.clubs[M.awayId];
   const ids=Object.keys(M.appeared);
-  ids.forEach(id=>{ const p=players[id]; if(!p)return; p.stats.App++; addCompL(p,"App"); const mins=M.minutes[id]||90; p.stats.Min+=mins; addCompL(p,"Min",mins); const loss=Math.round(mins/90*rint(18,26)*(hasTrait(p,"engine")?0.6:1)); p.fitness=clamp((p.fitness!=null?p.fitness:100)-loss,0,100); });
+  ids.forEach(id=>{ const p=players[id]; if(!p)return; p.stats.App++; addCompL(p,"App"); if(M.started[id]){ p.stats.Start=(p.stats.Start||0)+1; addCompL(p,"Start"); } const mins=M.minutes[id]||90; p.stats.Min+=mins; addCompL(p,"Min",mins); const loss=Math.round(mins/90*rint(18,26)*(hasTrait(p,"engine")?0.6:1)); p.fitness=clamp((p.fitness!=null?p.fitness:100)-loss,0,100); });
   const gkOf=side=>ids.find(id=>M.sideOf[id]===side && M.slotOf[id]==="GK");
   const gh=gkOf("H"), ga=gkOf("A");
   if(gh&&players[gh]){ const sv=Math.max(0,(M.sotA||0)-M.as); players[gh].stats.Sv+=sv; addCompL(players[gh],"Sv",sv); players[gh].stats.xGA+=(M.xgATot||0); players[gh].stats.GA+=M.as; addCompL(players[gh],"xGA",M.xgATot||0); addCompL(players[gh],"GA",M.as); }
@@ -5302,13 +5302,14 @@ function PlayerModal({p, G, onClose}){
               <div className="text-sm font-semibold mb-1">Season-by-season{lg!=="all"&&sel?` · ${sel.flag} ${sel.label}`:""}</div>
               <div className="overflow-x-auto">
               <table className="w-full text-xs tnum">
-                <thead><tr className="text-slate-500"><th className="text-left">Yr</th><th className="text-left">Club</th><th>Age</th><th>App</th><th>G</th><th>A</th><th>KP</th><th>CS</th><th>YC</th><th>RC</th><th>Rtg</th></tr></thead>
+                <thead><tr className="text-slate-500"><th className="text-left">Yr</th><th className="text-left">Club</th><th>Age</th><th>App</th><th title="Starts">St</th><th title="Minutes">Min</th><th>G</th><th>A</th><th>KP</th><th>CS</th><th>YC</th><th>RC</th><th>Rtg</th></tr></thead>
                 <tbody>
                   {histShown.slice().reverse().map((h,i)=>(
                     <tr key={i} className="border-t border-[#15203a]">
                       <td className="text-left">{h.season}</td>
                       <td className="text-left whitespace-nowrap">{h.country!=null&&<span className="mr-0.5">{(COUNTRIES[h.country]||{}).flag}</span>}{h.team}{h.div===1&&<span className="text-slate-600 text-[9px]">²</span>}{h.loan&&<span className="ml-0.5 text-sky-300 text-[10px]" title="Loan spell">🔁</span>}</td>
                       <td className="text-center">{h.age!=null?h.age:"—"}</td><td className="text-center">{h.App}</td>
+                      <td className="text-center text-slate-400">{h.Start||0}</td><td className="text-center text-slate-400">{(h.Min||0).toLocaleString()}</td>
                       <td className="text-center">{h.G}</td><td className="text-center">{h.A}</td><td className="text-center">{h.KP||0}</td>
                       <td className="text-center">{h.CS}</td><td className="text-center">{h.YC||0}</td><td className="text-center">{h.RC||0}</td><td className="text-center">{h.r}</td>
                     </tr>
@@ -5330,7 +5331,10 @@ function xgPrevented(s){ return s && s.App ? +((s.xGA||0)-(s.GA||0)).toFixed(2) 
 function StatLine({s, gk}){
   const xgp = gk ? xgPrevented(s) : null;
   const dq = duelPct(s), pq = passPct(s), sq = savePct(s);
-  const cells = [["App",s.App||0],["Goals",s.G||0],["Assists",s.A||0],
+  const starts=s.Start||0, subApps=Math.max(0,(s.App||0)-starts);
+  const cells = [["App",s.App||0],["Starts",starts],["Sub apps",subApps],
+    ["Minutes",(s.Min||0).toLocaleString()],
+    ["Goals",s.G||0],["Assists",s.A||0],
     ["Shots",s.SH||0],["On tgt",s.SOT||0],["xG",(s.xG||0).toFixed(1)],
     ["Key Pass",s.KP||0],
     gk?["Saves",s.Sv||0]:["MOTM",s.MOTM||0],
