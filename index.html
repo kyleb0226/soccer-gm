@@ -372,6 +372,7 @@ function makeClub(def, idx, div, country){
     academy: { level: 1 }, history: [], honours: [], setPieces: { pen:null, fk:null, corner:null },
     facilityTier: 0, namingRights: null, namingOffers: [],
     ticketTier: 1, concessionTier: 1, seasonGate: 0, seasonConcession: 0, gateLog: [],
+    autoRotate: false,
     userControlled: false,
   };
 }
@@ -876,6 +877,57 @@ function autoPickXI(club, players){
   club.bench = bench;
 }
 function ensureXI(club, players){ if(!club.xi || club.xi.length<11) autoPickXI(club, players); }
+// Fitness-aware XI selection for squad rotation. Like autoPickXI, but scores
+// every candidate by ability × freshness so tired starters get rested when a
+// fresh deputy is close in quality. `aggressive` (midweek/double-game weeks)
+// weights freshness much harder, so managers rotate more when fixtures pile up.
+function rotateXI(club, players, aggressive){
+  const slots = FORMATIONS[club.formation] || FORMATIONS["4-3-3"];
+  let squad = Object.values(players).filter(p=>p.teamId===club.id && !p.youth && isAvailable(p));
+  if(squad.length < 13){ autoPickXI(club, players); return; }   // too thin to rotate — just field the best available
+  const used=new Set(), xi=new Array(slots.length).fill(null);
+  const isKeeper=p=>p.pos==="GK"||(p.positions||[]).includes("GK");
+  const canPlay=(p,slot)=>(p.positions||[p.pos]).includes(slot);
+  const avail=()=>squad.filter(p=>!used.has(p.id));
+  const fw=p=>{ const f=p.fitness!=null?p.fitness:100; return aggressive ? (0.64+0.36*f/100) : (0.84+0.16*f/100); };
+  const rotScore=(p,slot)=>(p.ovr - posPenalty(p,slot))*fw(p);
+  // keeper: rotate to a backup only in congested weeks when the No.1 is tired and the deputy is fresh & close
+  slots.forEach((slot,i)=>{ if(slot!=="GK") return;
+    const ks=avail().filter(isKeeper).sort((a,b)=>b.gk-a.gk); let pick=ks[0];
+    if(aggressive && ks[1] && pick && (pick.fitness!=null&&pick.fitness<68) && (ks[1].fitness||100)>85 && ks[1].gk>=pick.gk-6) pick=ks[1];
+    pick = pick || avail().sort((a,b)=>rotScore(b,slot)-rotScore(a,slot))[0];
+    if(pick){ used.add(pick.id); xi[i]=pick.id; }
+  });
+  const naturalCount=i=>squad.filter(p=>!used.has(p.id)&&canPlay(p,slots[i])).length;
+  const outIdx=slots.map((s,i)=>i).filter(i=>slots[i]!=="GK").sort((a,b)=>naturalCount(a)-naturalCount(b));
+  outIdx.forEach(i=>{ const slot=slots[i], pool=avail().filter(p=>!isKeeper(p));
+    const naturals=pool.filter(p=>canPlay(p,slot));
+    const pick=(naturals.length?naturals:pool).sort((a,b)=>rotScore(b,slot)-rotScore(a,slot))[0];
+    if(pick){ used.add(pick.id); xi[i]=pick.id; }
+  });
+  club.xi = xi.filter(x=>x!=null);
+  const rest=squad.filter(p=>!used.has(p.id));
+  const benchGK=rest.filter(isKeeper).sort((a,b)=>b.gk-a.gk)[0];
+  const bench=[]; if(benchGK) bench.push(benchGK.id);
+  rest.filter(p=>!benchGK||p.id!==benchGK.id).sort((a,b)=>b.ovr-a.ovr).forEach(p=>{ if(bench.length<9) bench.push(p.id); });
+  club.bench=bench;
+}
+// A matchday is "congested" (has a midweek game) when a cup or continental round
+// also falls on it — those are played on legs already tired from the league game.
+function isCongestedMatchday(G){
+  const md=G.day+1;
+  return !!((CUP_MD[md] && G.cups) || (CONT_MD[md] && G.contCup && G.contCup.winner==null));
+}
+// Rotate every club's XI for the upcoming games: AI clubs always manage their
+// fitness; the user's club only if they've switched Auto-Rotate on (otherwise
+// their hand-picked XI is respected).
+function rotateForMatchday(G, aggressive){
+  const user=G.clubs[G.userTeamId];
+  G.clubs.forEach(c=>{
+    if(c.id===G.userTeamId){ if(user && user.autoRotate) rotateXI(c, G.players, aggressive); }
+    else rotateXI(c, G.players, aggressive);
+  });
+}
 
 /* ----------------------------- set pieces ------------------------------- */
 // Penalty/free-kick/corner takers are real assignable roles: better sho/pas
@@ -1102,6 +1154,8 @@ function playContCupRound(G){
 function simRound(G){
   if(G.phase!=="regular") return;
   const round = G.schedule[G.day]; if(!round) return;
+  // squad rotation for this matchday's league games (AI always; user if opted in)
+  rotateForMatchday(G, false);
   // tactic context for the user's club (its chosen formation/tactic already on the club)
   round.forEach(g=>{
     if(g.played) return;   // already played (e.g. the user's match was watched live)
@@ -1130,15 +1184,17 @@ function simRound(G){
     }
     maybeInjure(home, G.players, G.settings); maybeInjure(away, G.players, G.settings);
   });
-  // injuries heal a week; suspensions tick down; everyone recovers a chunk of match fitness
-  // recover a chunk of the fitness DEFICIT each matchday → a constant starter settles ~80, a rested one climbs to ~95
-  Object.values(G.players).forEach(p=>{ if(isInjured(p)) p.injury.weeks--; if(isSuspended(p)) p.susp--; const f=p.fitness!=null?p.fitness:100; p.fitness = clamp(Math.round(f + (100-f)*0.5 + 2), 0, 100); if(p.morale!=null && p.morale!==60) p.morale = clamp(p.morale + (p.morale<60?1:-1), 0, 100); });
   processTransferRequests(G);   // unhappy players may agitate to leave
   if([13,27].includes(G.day+1)) inSeasonDev(G);   // gradual in-season growth checkpoints
   // youth 5v5 game time (drives prospect development)
   accrueYouth(G);
   // international break: nations play a qualifier/friendly
   if(INTL_BREAK_MDS.includes(G.day+1) && intlOn(G)){ playIntlBreak(G); }
+  // MIDWEEK games — cup / continental rounds are played on legs still tired from
+  // the league game (fitness only recovers AFTER, below), so double-game weeks
+  // genuinely punish thin squads. Managers rotate harder here.
+  const midweek = isCongestedMatchday(G);
+  if(midweek) rotateForMatchday(G, true);
   // domestic cup round (all national cups) on its matchday
   if(CUP_MD[G.day+1] && G.cups){ playCupRound(G); }
   // continental champions cup round on its matchday
@@ -1152,6 +1208,10 @@ function simRound(G){
       G.contChampions.unshift({ season:G.season, id:wc.id, abbr:wc.abbr });
     }
   }
+  // END OF WEEK: injuries heal a week, suspensions tick down, and everyone
+  // recovers a chunk of their fitness deficit (a rested player climbs to ~95, a
+  // player who featured twice this week recovers from a lower base).
+  Object.values(G.players).forEach(p=>{ if(isInjured(p)) p.injury.weeks--; if(isSuspended(p)) p.susp--; const f=p.fitness!=null?p.fitness:100; p.fitness = clamp(Math.round(f + (100-f)*0.5 + 2), 0, 100); if(p.morale!=null && p.morale!==60) p.morale = clamp(p.morale + (p.morale<60?1:-1), 0, 100); });
   // mid-season sacking: confidence bottoms out after enough games played
   if(jobSecurityOn(G) && !G.pendingSack && G.day>=8 && (G.boardConfidence!=null && G.boardConfidence<=6)){
     G.pendingSack = true;
@@ -1238,6 +1298,12 @@ function liveInit(G){
   const round=G.schedule[G.day]; if(!round) return null;
   const g=round.find(x=>(x.home===G.userTeamId||x.away===G.userTeamId) && !x.played);
   if(!g) return null;
+  // rotate the two participants for this matchday before kickoff (opponent always
+  // manages fitness; the user's side only if Auto-Rotate is on)
+  const opp=G.clubs[g.home===G.userTeamId?g.away:g.home];
+  if(opp) rotateXI(opp, G.players, false);
+  const user=G.clubs[G.userTeamId];
+  if(user && user.autoRotate) rotateXI(user, G.players, false);
   return { gref:g, homeId:g.home, awayId:g.away, half:0, hs:0, as:0, events:[],
     appeared:{}, minutes:{}, sideOf:{}, slotOf:{}, gBy:{}, aBy:{},
     shH:0, shA:0, sotH:0, sotA:0, done:false };
@@ -2275,7 +2341,7 @@ function migrate(G){
     };
     Object.values(G.players||{}).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); fillCareerComp(p); if(p.susp==null) p.susp=0; if(p.ycCount==null) p.ycCount=0; fillP(p); });
     (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); fillCareerComp(p); fillP(p); });
-    G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureCommercials(G,c); if(!c.setPieces) c.setPieces={pen:null,fk:null,corner:null}; if(c.ticketTier==null) c.ticketTier=1; if(c.concessionTier==null) c.concessionTier=1; if(c.seasonGate==null) c.seasonGate=0; if(c.seasonConcession==null) c.seasonConcession=0; if(!Array.isArray(c.gateLog)) c.gateLog=[]; ensureXI(c, G.players); });
+    G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureCommercials(G,c); if(!c.setPieces) c.setPieces={pen:null,fk:null,corner:null}; if(c.ticketTier==null) c.ticketTier=1; if(c.concessionTier==null) c.concessionTier=1; if(c.seasonGate==null) c.seasonGate=0; if(c.seasonConcession==null) c.seasonConcession=0; if(!Array.isArray(c.gateLog)) c.gateLog=[]; if(c.autoRotate==null) c.autoRotate=false; ensureXI(c, G.players); });
     if(!G.clubs.some(c=>c.rivalId!=null)) assignRivals(G.clubs);
     if(!G.expectation) setOwnerExpectation(G);
     // history/records + feature-toggle backfill
@@ -2922,7 +2988,9 @@ function Tactics({G, commit, tShow}){
             <button key={t} onClick={()=>setTactic(t)} className={"px-2 py-1 rounded text-xs capitalize "+((user.tactic||"balanced")===t?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300")}>{t}</button>
           ))}
           <button onClick={()=>{ autoPickXI(user, G.players); commit(G); tShow("Auto-picked best XI"); }} className="ml-auto px-3 py-1 rounded bg-[#16213a] text-slate-200 text-xs">Auto-pick XI</button>
+          <button onClick={()=>{ user.autoRotate=!user.autoRotate; if(user.autoRotate) rotateXI(user, G.players, false); commit(G); tShow(user.autoRotate?"Auto-Rotate ON — the assistant will rest tired players":"Auto-Rotate OFF — you pick the XI"); }} className={"px-3 py-1 rounded text-xs font-semibold "+(user.autoRotate?"bg-sky-500 text-slate-900":"bg-[#16213a] text-slate-300")} title="Let the assistant manager rotate fresh legs in to protect fitness, especially in midweek double-game weeks">🔄 Auto-Rotate {user.autoRotate?"ON":"OFF"}</button>
         </div>
+        {user.autoRotate && <div className="text-xs text-sky-300/80 mt-2">🔄 Assistant manager is handling selection — it rests tired starters and rotates harder in midweek cup/continental weeks. Turn off to pick the XI yourself.</div>}
         <div className="flex gap-4 mt-2 text-xs text-slate-400">
           <span>DEF <b className="text-slate-200">{round(u.DEF)}</b></span>
           <span>MID <b className="text-slate-200">{round(u.MID)}</b></span>
