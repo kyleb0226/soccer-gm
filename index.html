@@ -1626,10 +1626,11 @@ function startNextSeason(G){
     if(p.age>=34 && (p.ovr<62 || p.age>=39) && chance(p.age>=37?0.55:0.22)){
       if(p.teamId!=null){ logNews(G,"retire",`${p.name} (${p.pos}) retires at ${p.age}`, p.teamId); }
       p.retired = true; p.retiredAge = p.age; p.retiredSeason = G.season; p.teamId = null; p.years = 0; p.salary = 0;
-      G.retired[p.id] = p;
+      G.retired[p.id] = slimRetired(p);
       delete G.players[p.id];
     }
   });
+  capRetired(G);
   // promotion / relegation WITHIN each country: bottom 3 of the top flight swap
   // with the top 3 of the second tier.
   COUNTRIES.forEach((C,ci)=>{
@@ -1795,6 +1796,28 @@ function releaseToFA(G, p){
 // the user — is preserved in G.retired instead of being deleted, so old players
 // and legends never silently disappear. Only true filler is dropped, to keep
 // the save bounded over decades.
+// A retired player only needs enough to be browsed in the Retired list and to be
+// coaxed out of retirement — NOT full per-match/per-competition history. Strip the
+// heavy stuff (history, compStats, careerComp, live match state); keep identity,
+// attributes (for un-retirement + dev), career totals, and honours. This keeps the
+// retired archive from ballooning the save (it was ~half the file).
+const RETIRED_KEEP = new Set(["id","name","pos","positions","nat","foot","num","age","ovr","pot","peakOvr",
+  "pac","sho","pas","dri","def","phy","gk","isGK","career","golden","awards","ballonDor","caps","intlG","hof",
+  "traits","retired","retiredAge","retiredSeason","debutSeason","value"]);
+function slimRetired(p){
+  const s = {};
+  for(const k in p){ if(RETIRED_KEEP.has(k)) s[k] = p[k]; }
+  return s;
+}
+// Keep the retired archive bounded: the most decorated ~400 by a simple legacy
+// score, so it never grows without limit over many decades.
+function capRetired(G){
+  if(!G.retired) return;
+  const ids = Object.keys(G.retired);
+  if(ids.length<=400) return;
+  const score = p => { const c=p.career||{}; return (c.G||0)*2 + (c.A||0) + (c.App||0)*0.1 + (p.peakOvr||0) + (p.golden||0)*5 + (p.ballonDor||0)*15 + (p.hof?200:0); };
+  ids.sort((a,b)=>score(G.retired[b])-score(G.retired[a])).slice(400).forEach(id=>{ delete G.retired[id]; });
+}
 function retireOrDrop(G, p){
   G.retired = G.retired || {};
   const ca = p.career || {};
@@ -1808,7 +1831,7 @@ function retireOrDrop(G, p){
     if(p.retiredAge==null) p.retiredAge = p.age;
     if(p.retiredSeason==null) p.retiredSeason = G.season;
     p.teamId = null; p.years = 0; p.salary = 0;
-    G.retired[p.id] = p;
+    G.retired[p.id] = slimRetired(p);
   }
   // else: genuinely anonymous filler — let it go.
 }
@@ -2392,6 +2415,10 @@ function migrate(G){
     if(!Array.isArray(G.trebles)) G.trebles=[];
     if(G.intlCycle===undefined) G.intlCycle=null;
     if(!G.retired || typeof G.retired!=="object") G.retired={};
+    // slim + cap the retired archive (older saves stored full player data here,
+    // which bloated the file and made every save/compress slow)
+    for(const id in G.retired){ const r=G.retired[id]; if(r && (r.history||r.compStats||r.careerComp)) G.retired[id]=slimRetired(r); }
+    capRetired(G);
     ensureCareer(G);
     backfillHonours(G);
     G.version = SAVE_VERSION;
@@ -2451,7 +2478,14 @@ function App(){
   const [globalPlayer, setGlobalPlayer] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
 
-  const commit = g => { const ok=saveGame(g); if(!ok) tShow("⚠️ Save failed — storage full. Use Save File to back up."); setG({...g}); };
+  // Compressing the (large) save takes a beat, so DON'T block the click on it:
+  // update the screen immediately, then persist shortly after (debounced, so a
+  // burst of actions coalesces into one write). Pending saves are flushed when the
+  // tab is hidden/closed so nothing is lost.
+  const saveRef = React.useRef({ timer:null, g:null });
+  const flushSave = () => { const s=saveRef.current; if(s.timer){ clearTimeout(s.timer); s.timer=null; } if(s.g){ const g=s.g; s.g=null; const ok=saveGame(g); if(!ok) tShow("⚠️ Save failed — storage full. Use Save File to back up."); } };
+  const commit = g => { setG({...g}); saveRef.current.g=g; if(!saveRef.current.timer){ saveRef.current.timer=setTimeout(()=>{ saveRef.current.timer=null; flushSave(); }, 300); } };
+  React.useEffect(()=>{ const h=()=>{ if(document.visibilityState==="hidden") flushSave(); }; const b=()=>flushSave(); document.addEventListener("visibilitychange",h); window.addEventListener("pagehide",b); window.addEventListener("beforeunload",b); return ()=>{ document.removeEventListener("visibilitychange",h); window.removeEventListener("pagehide",b); window.removeEventListener("beforeunload",b); }; }, []);
   const tShow = msg => { setToast(msg); setTimeout(()=>setToast(""),2400); };
   const openSlot = id => { const g=loadSlot(id); if(g){ setG(g); setTab("hub"); setScreen("play"); } else tShow("Couldn't load that save."); };
   const toMenu = () => { if(G) saveGame(G); setG(null); setScreen("menu"); };
