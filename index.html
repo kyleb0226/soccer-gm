@@ -249,7 +249,11 @@ function divName(country, div){ return (COUNTRIES[country]||COUNTRIES[0]).divNam
 const DIV_NAMES = COUNTRIES[0].divNames;
 
 /* ----------------------------- player gen ------------------------------ */
-function emptyStats(){ return { App:0, Min:0, G:0, A:0, CS:0, YC:0, RC:0, MOTM:0, ratingSum:0, ratingN:0, SH:0, SOT:0, KP:0, xG:0, Sv:0, PK:0, PKM:0, FK:0, xGA:0, GA:0 }; }
+function emptyStats(){ return { App:0, Min:0, G:0, A:0, CS:0, YC:0, RC:0, MOTM:0, ratingSum:0, ratingN:0, SH:0, SOT:0, KP:0, xG:0, Sv:0, PK:0, PKM:0, FK:0, xGA:0, GA:0,
+  // defensive / possession / keeper stats (generated per match from attributes + context)
+  Tkl:0, Int:0, Clr:0, Blk:0, Aer:0, DuW:0, DuT:0, Err:0, Pass:0, PassA:0, PrgP:0, Drb:0, Crs:0, Swp:0, PKSv:0 }; }
+// stat keys added after the original release — used to backfill old saves in migrate()
+const NEW_STAT_KEYS = ["SH","SOT","KP","xG","Sv","PK","PKM","FK","xGA","GA","Tkl","Int","Clr","Blk","Aer","DuW","DuT","Err","Pass","PassA","PrgP","Drb","Crs","Swp","PKSv"];
 function avgRating(s){ return s && s.ratingN ? s.ratingSum/s.ratingN : 0; }
 // Sum the stat fields across a list of season-history rows (used for per-league filtering).
 function sumStats(rows){
@@ -259,11 +263,24 @@ function sumStats(rows){
 }
 // A WAR-style "Rating Value": one number for a player's total contribution this run.
 // Goals/assists/clean sheets/saves weighted, scaled by minutes and rating over baseline.
+// Derived success rates (need a sample to be meaningful).
+function duelPct(s){ return s && s.DuT ? Math.round((s.DuW||0)/s.DuT*100) : null; }
+function passPct(s){ return s && s.PassA ? Math.round((s.Pass||0)/s.PassA*100) : null; }
+function savePct(s){ const faced=(s.Sv||0)+(s.GA||0); return faced>=5 ? Math.round((s.Sv||0)/faced*100) : null; }
+// Defensive Contribution: a single number for out-of-possession + build-up worth,
+// so a great defender's value shows up the way goals show up for a striker.
+function defContribution(s){
+  if(!s) return 0;
+  const dq = duelPct(s);
+  const duelBonus = dq!=null ? ((dq-50)/100) * Math.min((s.DuT||0)/60, 1.5) : 0;
+  return +((s.Tkl||0)*0.020 + (s.Int||0)*0.020 + (s.Clr||0)*0.008 + (s.Blk||0)*0.030
+    + (s.Aer||0)*0.008 + (s.CS||0)*0.10 + (s.PrgP||0)*0.006 + duelBonus - (s.Err||0)*0.45).toFixed(1);
+}
 function ratingValue(s){
   if(!s || !s.App) return 0;
   const perf = (avgRating(s) - 6.5) * (s.Min/90) * 0.22;
   const out = (s.G||0)*0.42 + (s.A||0)*0.26 + (s.CS||0)*0.12 + (s.Sv||0)*0.015 + (s.KP||0)*0.01;
-  return +(perf + out).toFixed(1);
+  return +(perf + out + defContribution(s)).toFixed(1);
 }
 function computeOvr(p){
   const w = POS_W[p.pos] || POS_W.CM;
@@ -578,6 +595,74 @@ function lineupOf(club, players){ return fieldedXI(club, players); }
 // attacking weight of a slot (who tends to score) and creative weight (who assists)
 const SCORE_W = { GK:0, RB:0.6, LB:0.6, CB:0.7, RWB:0.9, LWB:0.9, CDM:1.0, CM:2.2, CAM:4.5, RM:3.2, LM:3.2, RW:5.5, LW:5.5, ST:9 };
 const CREATE_W = { GK:0, RB:1.2, LB:1.2, CB:0.4, RWB:2.0, LWB:2.0, CDM:1.4, CM:3.2, CAM:5.0, RM:4.2, LM:4.2, RW:4.5, LW:4.5, ST:2.2 };
+// Per-slot propensity for defensive actions (tackles/interceptions/clearances/
+// blocks/aerials) and possession actions (passes/progressive/dribbles/crosses).
+// The engine is Poisson-based and doesn't model individual duels, so these are
+// generated per match from a player's attributes + how much his side defended or
+// had the ball — the same technique already used to spread shots and xG.
+const DEF_ACT = {
+  GK:{tkl:0.1,int:0.2,clr:0.8,blk:0.3,aer:0.3}, CB:{tkl:1.6,int:2.0,clr:4.0,blk:1.4,aer:3.2},
+  RB:{tkl:2.0,int:1.6,clr:1.6,blk:0.8,aer:1.2}, LB:{tkl:2.0,int:1.6,clr:1.6,blk:0.8,aer:1.2},
+  RWB:{tkl:2.0,int:1.5,clr:1.3,blk:0.7,aer:1.1}, LWB:{tkl:2.0,int:1.5,clr:1.3,blk:0.7,aer:1.1},
+  CDM:{tkl:2.6,int:2.4,clr:1.8,blk:1.0,aer:1.8}, CM:{tkl:1.8,int:1.6,clr:0.9,blk:0.6,aer:1.0},
+  CAM:{tkl:1.0,int:1.0,clr:0.4,blk:0.3,aer:0.7}, RM:{tkl:1.3,int:1.1,clr:0.6,blk:0.4,aer:0.7},
+  LM:{tkl:1.3,int:1.1,clr:0.6,blk:0.4,aer:0.7}, RW:{tkl:0.8,int:0.7,clr:0.3,blk:0.2,aer:0.6},
+  LW:{tkl:0.8,int:0.7,clr:0.3,blk:0.2,aer:0.6}, ST:{tkl:0.6,int:0.5,clr:0.3,blk:0.2,aer:1.6},
+};
+const POSS_ACT = {
+  GK:{pass:22,prg:1.0,drb:0.1,crs:0.1}, CB:{pass:60,prg:3.5,drb:0.3,crs:0.2},
+  RB:{pass:48,prg:3.5,drb:1.2,crs:2.2}, LB:{pass:48,prg:3.5,drb:1.2,crs:2.2},
+  RWB:{pass:46,prg:3.8,drb:1.6,crs:2.8}, LWB:{pass:46,prg:3.8,drb:1.6,crs:2.8},
+  CDM:{pass:62,prg:4.5,drb:0.8,crs:0.4}, CM:{pass:64,prg:5.0,drb:1.4,crs:0.7},
+  CAM:{pass:48,prg:5.2,drb:2.4,crs:1.0}, RM:{pass:42,prg:4.0,drb:2.6,crs:2.4},
+  LM:{pass:42,prg:4.0,drb:2.6,crs:2.4}, RW:{pass:36,prg:3.8,drb:3.4,crs:2.6},
+  LW:{pass:36,prg:3.8,drb:3.4,crs:2.6}, ST:{pass:28,prg:2.2,drb:2.0,crs:0.5},
+};
+// Poisson-ish sampler around an expected count (never negative).
+function sampCount(exp){ if(exp<=0) return 0; return Math.max(0, Math.round(exp + gauss(0, Math.sqrt(Math.max(exp,0.4))))); }
+// Distribute a match's defensive + possession stats across one side's XI.
+// bump(player, statKey, n) applies to BOTH p.stats and the per-competition split.
+function accrueSecondaryStats(lineup, shotsFor, shotsAgainst, conceded, bump){
+  const dl = clamp(shotsAgainst/6, 0.5, 2.3);          // defensive workload (under siege = more)
+  const pf = clamp(0.7 + shotsFor/14, 0.7, 1.7);       // possession/attacking share
+  lineup.forEach(({p,slot})=>{
+    const d=DEF_ACT[slot]||DEF_ACT.CM, q=POSS_ACT[slot]||POSS_ACT.CM;
+    const defQ=0.55+n01(p.def)*0.7, phyQ=0.55+n01(p.phy)*0.7, posQ=0.55+n01(p.pas)*0.7;
+    const tkl=sampCount(d.tkl*defQ*dl);
+    const intc=sampCount(d.int*(0.55+n01(p.def*0.6+p.pas*0.4)*0.7)*dl);
+    const clr=sampCount(d.clr*defQ*dl);
+    const blk=sampCount(d.blk*defQ*(shotsAgainst/6));
+    const aer=sampCount(d.aer*phyQ);
+    if(tkl) bump(p,"Tkl",tkl);
+    if(intc) bump(p,"Int",intc);
+    if(clr) bump(p,"Clr",clr);
+    if(blk) bump(p,"Blk",blk);
+    if(aer) bump(p,"Aer",aer);
+    // duels: won = tackles + aerials; lost count falls as defensive quality rises
+    const duelWon=tkl+aer, duelLost=sampCount((tkl+aer)*(0.7-0.4*n01(p.def*0.5+p.phy*0.5)));
+    if(duelWon+duelLost>0){ bump(p,"DuW",duelWon); bump(p,"DuT",duelWon+duelLost); }
+    // passing / carrying
+    const passA=sampCount(q.pass*pf);
+    if(passA>0){ const rate=clamp(0.62+0.30*n01(p.pas)+gauss(0,0.04), 0.5, 0.96); const passC=clamp(Math.round(passA*rate),0,passA); bump(p,"Pass",passC); bump(p,"PassA",passA); }
+    const prg=sampCount(q.prg*posQ*pf);   if(prg) bump(p,"PrgP",prg);
+    const drb=sampCount(q.drb*(0.5+n01(p.dri)*0.8)); if(drb) bump(p,"Drb",drb);
+    const crs=sampCount(q.crs*(0.5+n01(p.pas*0.5+p.dri*0.5))); if(crs) bump(p,"Crs",crs);
+    // keeper: sweeper actions off the line + the odd penalty save
+    if(slot==="GK"){
+      const swp=sampCount((0.4+n01(p.pac*0.5+p.def*0.5))*1.1); if(swp) bump(p,"Swp",swp);
+      if(chance(0.03)) bump(p,"PKSv",1);
+    }
+  });
+  // errors leading to goals — occasionally pinned on a defender/keeper when conceding
+  if(conceded>0){
+    for(let i=0;i<conceded;i++){
+      if(chance(0.07)){
+        const cand=wpick(lineup, o=>(BAND[o.slot]<=2?1.5:o.slot==="GK"?1.0:0.3)*(1.2-n01(o.p.def)));
+        if(cand) bump(cand.p,"Err",1);
+      }
+    }
+  }
+}
 function applyMatch(home, away, hs, as, players, box, opts){
   const isCup = !!opts.cup;
   const isCont = !!(opts.cont);
@@ -647,6 +732,10 @@ function applyMatch(home, away, hs, as, players, box, opts){
   }
   spread(H, st.shH||hs, st.sotH||hs, st.xgH||hs);
   spread(A, st.shA||as, st.sotA||as, st.xgA||as);
+  // defensive + possession stats for both sides
+  const bump = (p,k,n)=>{ p.stats[k]=(p.stats[k]||0)+n; addComp(p,k,n); };
+  accrueSecondaryStats(H, st.shH||hs, st.shA||as, as, bump);
+  accrueSecondaryStats(A, st.shA||as, st.shH||hs, hs, bump);
   // goalkeeper saves = shots on target faced minus goals conceded
   const gkOf = side => side.find(o=>o.slot==="GK");
   const gH = gkOf(H), gA = gkOf(A);
@@ -1114,6 +1203,7 @@ function updateRecords(G){
     if((ca.App||0)>=150 || (ca.G||0)>=60 || (ca.A||0)>=60 || (p.peakOvr||0)>=84 || p.hof){
       pool[p.id] = { id:p.id, name:p.name, pos:p.pos, nat:p.nat,
         G:ca.G||0, A:ca.A||0, App:ca.App||0, CS:ca.CS||0, MOTM:ca.MOTM||0,
+        Tkl:ca.Tkl||0, Int:ca.Int||0, Clr:ca.Clr||0, Blk:ca.Blk||0, Aer:ca.Aer||0, PrgP:ca.PrgP||0, Err:ca.Err||0,
         peak:p.peakOvr||p.ovr, hof:!!p.hof,
         club: p.teamId!=null && G.clubs[p.teamId] ? G.clubs[p.teamId].abbr : "—",
         season:G.season, retired:false };
@@ -1217,6 +1307,12 @@ function liveFinish(G, M){
   if(gh&&players[gh]){ const sv=Math.max(0,(M.sotA||0)-M.as); players[gh].stats.Sv+=sv; addCompL(players[gh],"Sv",sv); players[gh].stats.xGA+=(M.xgATot||0); players[gh].stats.GA+=M.as; addCompL(players[gh],"xGA",M.xgATot||0); addCompL(players[gh],"GA",M.as); }
   if(ga&&players[ga]){ const sv=Math.max(0,(M.sotH||0)-M.hs); players[ga].stats.Sv+=sv; addCompL(players[ga],"Sv",sv); players[ga].stats.xGA+=(M.xgHTot||0); players[ga].stats.GA+=M.hs; addCompL(players[ga],"xGA",M.xgHTot||0); addCompL(players[ga],"GA",M.hs); }
   ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id], conceded=M.sideOf[id]==="H"?M.as:M.hs; if(conceded===0&&(BAND[slot]<=2||slot==="GK")){ p.stats.CS++; addCompL(p,"CS"); } });
+  // defensive + possession stats (same distribution as the quick-sim engine)
+  { const bumpL=(p,k,n)=>{ p.stats[k]=(p.stats[k]||0)+n; addCompL(p,k,n); };
+    const Hl=ids.filter(id=>M.sideOf[id]==="H").map(id=>({p:players[id],slot:M.slotOf[id]})).filter(o=>o.p);
+    const Al=ids.filter(id=>M.sideOf[id]==="A").map(id=>({p:players[id],slot:M.slotOf[id]})).filter(o=>o.p);
+    accrueSecondaryStats(Hl, M.shH||M.hs, M.shA||M.as, M.as, bumpL);
+    accrueSecondaryStats(Al, M.shA||M.as, M.shH||M.hs, M.hs, bumpL); }
   ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id]; const yc=clamp(0.10+(BAND[slot]<=2?0.06:0)-n01(p.phy)*0.04,0.04,0.22); if(chance(yc)){ p.stats.YC++; addCompL(p,"YC"); p.ycCount=(p.ycCount||0)+1; if(p.ycCount>=YC_BAN_THRESHOLD){ p.ycCount=0; banPlayer(G,p,1,"yellow-card accumulation"); } } if(chance(0.01)){ p.stats.RC++; addCompL(p,"RC"); injure(p,rint(2,4)); banPlayer(G,p,rint(2,3),"a red card"); } });
   let motm=null, motmR=0;
   ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id], side=M.sideOf[id]; const scored=side==="H"?M.hs:M.as, conceded=side==="H"?M.as:M.hs; const result=scored>conceded?1:scored<conceded?-1:0; let r=6.3+(result>0?0.4:result<0?-0.3:0)+0.95*(M.gBy[id]||0)+0.55*(M.aBy[id]||0); if(slot==="GK")r+=clamp(Math.min(p.stats.Sv||0,6)*0.03,0,0.4); if(conceded===0&&(BAND[slot]<=2||slot==="GK"))r+=0.6; if(conceded>=3&&(BAND[slot]<=2||slot==="GK"))r-=0.5; r=clamp(r+gauss(0,0.35),4,10); p.stats.ratingSum+=r; p.stats.ratingN++; addCompL(p,"ratingSum",r); addCompL(p,"ratingN"); p.form=p.form==null?r:+(p.form*0.7+r*0.3).toFixed(2); if(r>motmR){motmR=r;motm=p;} });
@@ -2167,7 +2263,7 @@ function migrate(G){
     G.cups.forEach(cup=>{ if(cup.country==null) cup.country=0; if(cup.runnerUp===undefined) cup.runnerUp=null; });
     if(!G.contCup || !G.contCup.phase) initContCup(G);   // (re)build into the group-stage format
     // backfill newer per-player stat fields (shots, key passes, xG, saves, bans)
-    const fill = s => { if(s){ ["SH","SOT","KP","xG","Sv","PK","PKM","FK","xGA","GA"].forEach(k=>{ if(s[k]==null) s[k]=0; }); } };
+    const fill = s => { if(s){ NEW_STAT_KEYS.forEach(k=>{ if(s[k]==null) s[k]=0; }); } };
     const fillP = p => { if(p.nat==null) p.nat=rint(0,NUM_COUNTRIES-1); if(!Array.isArray(p.history)) p.history=[]; if(p.youth && p.age>=20) p.youth=false; if(!Array.isArray(p.traits)) p.traits=rollTraits(p); if(p.form==null) p.form=6.7; if(p.morale==null) p.morale=rint(60,80); };
     const fillCS = p => { if(p.compStats) for(const k in p.compStats) fill(p.compStats[k]); };
     // Seed per-competition career totals. Pre-feature saves have no comp split, so
@@ -3184,6 +3280,12 @@ function Leaders({G}){
         {board("📈 Expected Goals (xG)", pool.slice().sort((a,b)=>(b.stats.xG||0)-(a.stats.xG||0)), p=>(p.stats.xG||0).toFixed(1))}
         {board("🧤 Clean Sheets", pool.filter(p=>p.pos==="GK").sort((a,b)=>b.stats.CS-a.stats.CS), p=>p.stats.CS)}
         {board("🥅 GK Saves", pool.filter(p=>p.pos==="GK").sort((a,b)=>(b.stats.Sv||0)-(a.stats.Sv||0)), p=>p.stats.Sv||0)}
+        {board("🛡️ Tackles", pool.slice().sort((a,b)=>(b.stats.Tkl||0)-(a.stats.Tkl||0)), p=>p.stats.Tkl||0)}
+        {board("🧠 Interceptions", pool.slice().sort((a,b)=>(b.stats.Int||0)-(a.stats.Int||0)), p=>p.stats.Int||0)}
+        {board("🚧 Clearances", pool.slice().sort((a,b)=>(b.stats.Clr||0)-(a.stats.Clr||0)), p=>p.stats.Clr||0)}
+        {board("💪 Duel % (min 30)", pool.filter(p=>(p.stats.DuT||0)>=30).sort((a,b)=>duelPct(b.stats)-duelPct(a.stats)), p=>duelPct(p.stats)+"%")}
+        {board("🎯 Progressive Passes", pool.slice().sort((a,b)=>(b.stats.PrgP||0)-(a.stats.PrgP||0)), p=>p.stats.PrgP||0)}
+        {board("🏰 Ball-Winner (Def. Value)", pool.filter(minApp).sort((a,b)=>defContribution(b.stats)-defContribution(a.stats)), p=>defContribution(p.stats))}
         {board("⭐ Avg Rating", pool.filter(minApp).sort((a,b)=>avgRating(b.stats)-avgRating(a.stats)), p=>avgRating(p.stats).toFixed(2))}
         {board("💎 Rating Value", pool.filter(minApp).sort((a,b)=>ratingValue(b.stats)-ratingValue(a.stats)), p=>ratingValue(p.stats))}
       </div>
@@ -4732,6 +4834,9 @@ function RecordsView({G}){
         <LeaderTable title="👟 Most appearances" rows={lead("App")} valKey="App" valLabel="Apps" />
         <LeaderTable title="🅰️ Most assists" rows={lead("A")} valKey="A" valLabel="Assists" />
         <LeaderTable title="⭐ Most MOTM awards" rows={lead("MOTM")} valKey="MOTM" valLabel="MOTM" />
+        <LeaderTable title="🛡️ Most tackles" rows={lead("Tkl")} valKey="Tkl" valLabel="Tackles" />
+        <LeaderTable title="🧠 Most interceptions" rows={lead("Int")} valKey="Int" valLabel="Interc." />
+        <LeaderTable title="🚧 Most clearances" rows={lead("Clr")} valKey="Clr" valLabel="Clear." />
       </div>
 
       <Card>
@@ -5049,13 +5154,23 @@ function PlayerModal({p, G, onClose}){
 function xgPrevented(s){ return s && s.App ? +((s.xGA||0)-(s.GA||0)).toFixed(2) : null; }
 function StatLine({s, gk}){
   const xgp = gk ? xgPrevented(s) : null;
+  const dq = duelPct(s), pq = passPct(s), sq = savePct(s);
   const cells = [["App",s.App||0],["Goals",s.G||0],["Assists",s.A||0],
     ["Shots",s.SH||0],["On tgt",s.SOT||0],["xG",(s.xG||0).toFixed(1)],
     ["Key Pass",s.KP||0],
     gk?["Saves",s.Sv||0]:["MOTM",s.MOTM||0],
     ["Clean Sh",s.CS||0],["Yellow",s.YC||0],["Red",s.RC||0],
     ["Pens",s.PK||0],["Pens Missed",s.PKM||0],["Free Kicks",s.FK||0],
-    ...(gk?[["xG Faced",(s.xGA||0).toFixed(1)],["Goals Allowed",s.GA||0],["xG Prevented",xgp==null?"—":(xgp>0?"+":"")+xgp]]:[]),
+    // defensive
+    ["Tackles",s.Tkl||0],["Interc.",s.Int||0],["Clearances",s.Clr||0],
+    ["Blocks",s.Blk||0],["Aerials",s.Aer||0],["Duel %",dq==null?"—":dq+"%"],
+    ["Errors",s.Err||0],
+    // possession
+    ["Passes",s.Pass||0],["Pass %",pq==null?"—":pq+"%"],["Prog. Pass",s.PrgP||0],
+    ["Dribbles",s.Drb||0],["Crosses",s.Crs||0],
+    ...(gk?[["Sweeper",s.Swp||0],["Pen Saves",s.PKSv||0],["Save %",sq==null?"—":sq+"%"],
+      ["xG Faced",(s.xGA||0).toFixed(1)],["Goals Allowed",s.GA||0],["xG Prevented",xgp==null?"—":(xgp>0?"+":"")+xgp]]:[]),
+    ["Def. Value",defContribution(s)],
     ["Rating",avgRating(s)?avgRating(s).toFixed(2):"—"],["Value",ratingValue(s)]];
   return (
     <div className="grid grid-cols-3 gap-2 text-center">
