@@ -2197,62 +2197,9 @@ function migrate(G){
     if(G.intlCycle===undefined) G.intlCycle=null;
     if(!G.retired || typeof G.retired!=="object") G.retired={};
     ensureCareer(G);
-    restoreMarcoGomez(G);
     G.version = SAVE_VERSION;
   }catch(e){}
   return G;
-}
-// One-time recovery: a user's serial league top scorer, "Marco Gomez", was lost
-// to the old delete-on-retirement bug (fixed since). If the save still remembers
-// him as a Golden Boot winner but he no longer exists anywhere in the world,
-// rebuild him as an elite striker and drop him back onto a club. Runs once per
-// save (guarded by G._marcoRestored) so it never duplicates him.
-// Named legends the user asked to bring back. Each is restored at most once
-// (tracked in G._restoredLegends) so adding more names later never duplicates
-// anyone already handled.
-const LOST_LEGENDS = ["Marco Gomez", "Kai Toney"];
-function restoreMarcoGomez(G){
-  G._restoredLegends = G._restoredLegends || {};
-  // migrate the old single-player flag into the new per-name tracker
-  if(G._marcoRestored) G._restoredLegends["Marco Gomez"] = true;
-  LOST_LEGENDS.forEach(name=>restoreLostLegend(G, name));
-}
-function restoreLostLegend(G, NAME){
-  if(G._restoredLegends[NAME]) return;
-  G._restoredLegends[NAME] = true;
-  const exists = Object.values(G.players||{}).some(p=>p.name===NAME)
-              || Object.values(G.retired||{}).some(p=>p.name===NAME)
-              || (G.freeAgents||[]).some(p=>p.name===NAME);
-  if(exists) return;
-  // pull any Golden Boot record out of the award history (may be none)
-  let boots=0, bestG=0, lastTeamAbbr=null;
-  (G.awardHistory||[]).forEach(e=>{ (e.countries||[]).forEach(c=>{
-    if(c.boot && c.boot.name===NAME){ boots++; bestG=Math.max(bestG, c.boot.g||0); lastTeamAbbr=c.boot.team; }
-  }); });
-  // prefer his last-known club, else a random top-flight club (never the user's)
-  let club = G.clubs.find(c=>c.abbr===lastTeamAbbr && !c.userControlled);
-  if(!club){ const pool=G.clubs.filter(c=>c.div===0 && !c.userControlled); club = pool.length ? pool[Math.floor(_rng()*pool.length)] : G.clubs.find(c=>!c.userControlled); }
-  if(!club) return;
-  const p = makePlayer("ST",[26,29]);
-  p.name = NAME;
-  // rebuild him as an elite finisher; scale up further per Golden Boot on record
-  p.sho = clamp(84 + Math.min(boots,4), 82, 93);
-  p.pac = clamp(80 + rint(0,6), 78, 92);
-  p.dri = clamp(78 + rint(0,6), 74, 90);
-  p.phy = clamp(76 + rint(0,6), 72, 88);
-  p.pas = clamp(70 + rint(0,6), 66, 84);
-  p.def = clamp(34 + rint(0,8), 28, 48);
-  computeOvr(p); setPotential(p); p.peakOvr = Math.max(p.ovr, 84);
-  if(boots>0){
-    p.golden = boots;                                 // credit his Golden Boots
-    p.career = Object.assign(emptyStats(), { App: boots*34 + rint(20,60), G: bestG*Math.max(boots,3) + rint(10,40), A: rint(15,45) });
-    p.debutSeason = Math.max(1, (G.season||1) - Math.max(boots+2, 4));
-  }
-  p.teamId = club.id; p.youth = false; p.years = rint(2,4); p.salary = wageFor(p);
-  G.players[p.id] = p;
-  ensureXI(club, G.players);
-  const suffix = boots>0 ? ` (${boots}× Golden Boot)` : "";
-  logNews(G,"transfer",`🔙 ${NAME}${suffix} has signed for ${club.name}!`, club.id);
 }
 function exportSave(G){
   try{
