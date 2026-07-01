@@ -322,7 +322,7 @@ function makePlayer(pos, ageRange, meanAdj=0){
                                        // outfield attribute swings an outfielder's — keeps the OVR
                                        // distribution comparable across positions instead of GKs
                                        // dominating both the very top and very bottom of rankings.
-    stats: emptyStats(), career: emptyStats(), history: [],
+    stats: emptyStats(), career: emptyStats(), careerComp: {}, history: [],
   };
   // ~7% of players are standouts — a fat top end so elite talent stands apart
   if(chance(0.07)){
@@ -1360,6 +1360,14 @@ function startNextSeason(G){
       const capH = notable ? 22 : 3;
       if(p.history.length>capH) p.history = p.history.slice(-capH);
       for(const k in p.stats) p.career[k] = (p.career[k]||0) + p.stats[k];
+      // accumulate per-competition career totals (League / Cup / Champs Cup) so
+      // all-time stats can be sliced by competition just like the season view
+      p.careerComp = p.careerComp || {};
+      for(const ck in (p.compStats||{})){
+        if(!p.careerComp[ck]) p.careerComp[ck] = emptyStats();
+        const src = p.compStats[ck];
+        for(const k in src) p.careerComp[ck][k] = (p.careerComp[ck][k]||0) + src[k];
+      }
     }
     p.stats = emptyStats(); p.compStats = {};
     p.susp = 0; p.ycCount = 0; p.fitness = 100; p.seasonDev = 0; p.injury = null;   // bans/yellows clear; preseason rest heals everyone; reset in-season growth tally
@@ -2162,8 +2170,15 @@ function migrate(G){
     const fill = s => { if(s){ ["SH","SOT","KP","xG","Sv","PK","PKM","FK","xGA","GA"].forEach(k=>{ if(s[k]==null) s[k]=0; }); } };
     const fillP = p => { if(p.nat==null) p.nat=rint(0,NUM_COUNTRIES-1); if(!Array.isArray(p.history)) p.history=[]; if(p.youth && p.age>=20) p.youth=false; if(!Array.isArray(p.traits)) p.traits=rollTraits(p); if(p.form==null) p.form=6.7; if(p.morale==null) p.morale=rint(60,80); };
     const fillCS = p => { if(p.compStats) for(const k in p.compStats) fill(p.compStats[k]); };
-    Object.values(G.players||{}).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); if(p.susp==null) p.susp=0; if(p.ycCount==null) p.ycCount=0; fillP(p); });
-    (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); fillP(p); });
+    // Seed per-competition career totals. Pre-feature saves have no comp split, so
+    // assume the accumulated career was league play (Cup/Champs Cup start fresh and
+    // grow from here); fill each comp bucket's newer stat fields.
+    const fillCareerComp = p => {
+      if(!p.careerComp){ p.careerComp = { L: Object.assign(emptyStats(), p.career||{}) }; }
+      for(const k in p.careerComp) fill(p.careerComp[k]);
+    };
+    Object.values(G.players||{}).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); fillCareerComp(p); if(p.susp==null) p.susp=0; if(p.ycCount==null) p.ycCount=0; fillP(p); });
+    (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); fillCareerComp(p); fillP(p); });
     G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureCommercials(G,c); if(!c.setPieces) c.setPieces={pen:null,fk:null,corner:null}; if(c.ticketTier==null) c.ticketTier=1; if(c.concessionTier==null) c.concessionTier=1; if(c.seasonGate==null) c.seasonGate=0; if(c.seasonConcession==null) c.seasonConcession=0; if(!Array.isArray(c.gateLog)) c.gateLog=[]; ensureXI(c, G.players); });
     if(!G.clubs.some(c=>c.rivalId!=null)) assignRivals(G.clubs);
     if(!G.expectation) setOwnerExpectation(G);
@@ -4988,8 +5003,19 @@ function PlayerModal({p, G, onClose}){
             </div>
           )}
           <div>
-            <div className="text-sm font-semibold mb-1">{careerLabel}</div>
-            <StatLine s={careerShown} gk={p.pos==="GK"} />
+            {/* all-time career, sliceable by competition (All / League / Cup / Champs Cup) */}
+            {(()=>{
+              const cc = p.careerComp||{};
+              const comps = [["all","All",ca],["L","⚽ League",cc.L],["C","🏆 Cup",cc.C],["CC","🌍 Champs Cup",cc.CC]].filter(([k,_,s])=>k==="all"||(s&&s.App>0));
+              const [ccomp, setCcomp] = useState("all");
+              const dispCa = ccomp==="all" ? careerShown : (cc[ccomp]||emptyStats());
+              const cLbl = ccomp==="all" ? careerLabel : ("All-time — "+(comps.find(c=>c[0]===ccomp)||[])[1]);
+              return <>
+                <div className="text-sm font-semibold mb-1">{cLbl}</div>
+                {comps.length>1 && <div className="flex gap-1 flex-wrap mb-2">{comps.map(([k,l])=><button key={k} onClick={()=>setCcomp(k)} className={"px-2 py-1 rounded text-xs font-semibold "+(ccomp===k?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300")}>{l}</button>)}</div>}
+                <StatLine s={dispCa} gk={p.pos==="GK"} />
+              </>;
+            })()}
           </div>
           {histShown.length>0 && (
             <div>
