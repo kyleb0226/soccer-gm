@@ -965,6 +965,27 @@ function addHonour(club, season, type, label){
   if(!Array.isArray(club.honours)) club.honours = [];
   club.honours.push({ season, type, label });
 }
+// Retroactively reconstruct trophy cabinets from the history the save already
+// keeps (league champions, continental champions, and archived cup finals), so
+// clubs show their past titles even on saves that predate the honours system.
+// Runs once per save; dedupes against honours already recorded live.
+function backfillHonours(G){
+  if(G._honoursBackfilled) return;
+  G._honoursBackfilled = true;
+  const has = (club,season,type) => (club.honours||[]).some(h=>h.season===season && h.type===type);
+  const add = (club,season,type,label) => { if(!club) return; if(!Array.isArray(club.honours)) club.honours=[]; if(!has(club,season,type)) club.honours.push({season,type,label}); };
+  // domestic league titles (top flight, all countries)
+  (G.champions||[]).forEach(c=>{ const club=G.clubs[c.id]; if(club) add(club, c.season, "league", `${divName(c.country!=null?c.country:(club.country||0),0)} champions`); });
+  // continental titles
+  (G.contChampions||[]).forEach(c=>{ const club=G.clubs[c.id]; if(club) add(club, c.season, "continental", `${CONT_CUP_NAME} winners`); });
+  // domestic cup winners from archived finals (winner = higher score; match by abbr)
+  (G.finalsArchive||[]).forEach(m=>{ if(!m||!m.comp || m.comp===CONT_CUP_NAME || !/cup/i.test(m.comp)) return;
+    const winAbbr = (m.hs>=m.as) ? m.home : m.away; const club=G.clubs.find(c=>c.abbr===winAbbr);
+    if(club) add(club, m.season, "cup", `${m.comp} winners`); });
+  // current-season cup winners already decided but not yet rolled over
+  (G.cups||[]).forEach(cup=>{ if(cup && cup.winner!=null){ const club=G.clubs[cup.winner]; if(club) add(club, cup.season!=null?cup.season:G.season, "cup", `${cupName(cup.country||0)} winners`); } });
+  G.clubs.forEach(c=>{ if(Array.isArray(c.honours)) c.honours.sort((a,b)=>a.season-b.season); });
+}
 
 /* ----------------------------- knockout core --------------------------- */
 // Resolve one round of any single-leg knockout cup, in place. `order` lists the
@@ -2365,6 +2386,7 @@ function migrate(G){
     if(G.intlCycle===undefined) G.intlCycle=null;
     if(!G.retired || typeof G.retired!=="object") G.retired={};
     ensureCareer(G);
+    backfillHonours(G);
     G.version = SAVE_VERSION;
   }catch(e){}
   return G;
@@ -3268,6 +3290,26 @@ function ClubBrowser({G, commit, tShow}){
           <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-400">Clean Sh</div><div className="font-bold tnum">{totals.cs}</div></div>
         </div>
       </Card>
+
+      {/* trophy cabinet */}
+      {(()=>{
+        const hon = (club.honours||[]).slice().sort((a,b)=>b.season-a.season);
+        const cnt = t => hon.filter(h=>h.type===t).length;
+        return (
+          <Card>
+            <div className="font-semibold mb-2">🏆 {club.name} trophy cabinet</div>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-2 text-center">
+              {[["league","Leagues"],["cup","Cups"],["continental","Continental"],["treble","🌟 Trebles"],["promo","Promotions"]].map(([t,l])=>(
+                <div key={t} className={"rounded-lg p-2 "+(t==="treble"&&cnt(t)>0?"bg-amber-500/15 border border-amber-500/40":t==="continental"&&cnt(t)>0?"bg-sky-500/15 border border-sky-500/30":"bg-[#0d1526]")}><div className="text-2xl font-black tnum">{cnt(t)}</div><div className="text-[11px] text-slate-400">{l}</div></div>
+              ))}
+            </div>
+            <div className="space-y-1 text-sm max-h-48 overflow-y-auto">
+              {hon.map((h,i)=>(<div key={i} className="text-slate-300 flex gap-2"><span className="text-slate-500 tnum">{h.season}</span><span>{h.type==="league"?"🏆":h.type==="cup"?"🎖️":h.type==="continental"?"🌍":h.type==="treble"?"🌟":"⬆️"} {h.label}</span></div>))}
+              {!hon.length && <div className="text-slate-500">No trophies in the cabinet yet.</div>}
+            </div>
+          </Card>
+        );
+      })()}
 
       {/* senior squad */}
       <Card className="p-0 overflow-x-auto">
