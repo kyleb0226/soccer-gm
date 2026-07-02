@@ -372,7 +372,7 @@ function makeClub(def, idx, div, country){
     academy: { level: 1 }, history: [], honours: [], setPieces: { pen:null, fk:null, corner:null },
     facilityTier: 0, namingRights: null, namingOffers: [],
     ticketTier: 1, concessionTier: 1, seasonGate: 0, seasonConcession: 0, gateLog: [],
-    autoRotate: false,
+    autoRotate: false, instr: { press:"mid", tempo:"normal", width:"normal" }, formFam: 100, formFamOf: "4-3-3",
     userControlled: false,
   };
 }
@@ -548,6 +548,30 @@ const TACTIC_MOD = {
   balanced:  { xgFor:1.0,  xgAgainst:1.0 },
   defensive: { xgFor:0.86, xgAgainst:0.83 },
 };
+// Tactical INSTRUCTIONS layered on top of the mentality preset. Each nudges the
+// team's expected goals for/against and how fast it tires (drain). High press &
+// fast tempo create more but concede more space and burn fitness; low/slow are
+// the opposite. Formation familiarity dips when you switch shapes and rebuilds
+// with games played — a settled side is more organised (creates more).
+const PRESS_MOD = { high:{xgFor:1.06,xgAgainst:1.08,drain:1.15}, mid:{xgFor:1,xgAgainst:1,drain:1}, low:{xgFor:0.95,xgAgainst:0.92,drain:0.9} };
+const TEMPO_MOD = { fast:{xgFor:1.05,xgAgainst:1.04,drain:1.08}, normal:{xgFor:1,xgAgainst:1,drain:1}, slow:{xgFor:0.96,xgAgainst:0.97,drain:0.93} };
+const WIDTH_MOD = { wide:{xgFor:1.05,xgAgainst:1.03}, normal:{xgFor:1,xgAgainst:1}, narrow:{xgFor:0.95,xgAgainst:0.95} };
+function tacticMods(club){
+  const m = TACTIC_MOD[club.tactic||"balanced"], instr = club.instr||{};
+  const pr=PRESS_MOD[instr.press||"mid"], te=TEMPO_MOD[instr.tempo||"normal"], wi=WIDTH_MOD[instr.width||"normal"];
+  const fam = club.formFam!=null?clamp(club.formFam,0,100):100;
+  const famFor = 0.92 + 0.08*(fam/100);   // an unsettled shape creates fewer clear chances
+  return {
+    xgFor: m.xgFor*pr.xgFor*te.xgFor*wi.xgFor*famFor,
+    xgAgainst: m.xgAgainst*pr.xgAgainst*te.xgAgainst*wi.xgAgainst,
+    drain: (pr.drain||1)*(te.drain||1),
+  };
+}
+// Rebuild formation familiarity a little each matchday (played clubs settle into
+// their shape); a change of formation resets it (see setFormation in the UI).
+function updateFormFamiliarity(G){
+  G.clubs.forEach(c=>{ if(c.formFamOf!==c.formation){ c.formFamOf=c.formation; if(c.formFam==null||c.formFam>60) c.formFam=52; } else { c.formFam=Math.min(100,(c.formFam!=null?c.formFam:100)+8); } });
+}
 // Penalty shootout: best-of-5, then sudden death. Conversion ~75% with a small
 // edge to the stronger side. Returns { h, a, winner:"H"|"A" }.
 function penaltyShootout(home, away, players){
@@ -570,7 +594,7 @@ function simMatch(home, away, players, opts={}){
   const hDef = (0.55*n01(uH.DEF) + 0.30*n01(uH.MID) + 0.15*n01(uH.ATT));
   const aAtt = (0.55*n01(uA.ATT) + 0.30*n01(uA.MID) + 0.15*n01(uA.DEF));
   const aDef = (0.55*n01(uA.DEF) + 0.30*n01(uA.MID) + 0.15*n01(uA.ATT));
-  const tH = TACTIC_MOD[home.tactic||"balanced"], tA = TACTIC_MOD[away.tactic||"balanced"];
+  const tH = tacticMods(home), tA = tacticMods(away);
   const homeAdv = neutral ? 1 : 1.12, awayAdv = neutral ? 1 : 0.92;
   let xgH = clamp(1.32 * Math.exp(1.7*(hAtt - aDef)) * tH.xgFor * tA.xgAgainst * homeAdv, 0.15, 5.5);
   let xgA = clamp(1.32 * Math.exp(1.7*(aAtt - hDef)) * tA.xgFor * tH.xgAgainst * awayAdv, 0.15, 5.5);
@@ -706,6 +730,7 @@ function applyMatch(home, away, hs, as, players, box, opts){
   // minutes reduced accordingly. Events are recorded for the box score.
   function credit(side, club, sideKey){
     const matchEnd = box.extraTime ? 120 : 90;
+    const drain = tacticMods(club).drain;   // high press / fast tempo tires players faster
     const maxSubs = box.extraTime ? 5 : 3;
     const xiIds = new Set(side.map(({p})=>p.id));
     const bench = (club.bench||[]).map(id=>players[id]).filter(p=>p && isAvailable(p) && !xiIds.has(p.id) && p.pos!=="GK" && !(p.positions||[]).includes("GK"));
@@ -726,7 +751,7 @@ function applyMatch(home, away, hs, as, players, box, opts){
     side.forEach(entry=>{ const p=entry.p; const mins = offMin[p.id]!=null ? offMin[p.id] : matchEnd;
       p.stats.App++; p.stats.Start++; p.stats.Min += mins; addComp(p,"App"); addComp(p,"Start"); addComp(p,"Min",mins);
       entry.onMin=0; entry.offMin=mins; entry.mf=mins/matchEnd;
-      const loss = Math.round(rint(18,26)*(mins/90)*(hasTrait(p,"engine")?0.6:1)); p.fitness = clamp((p.fitness!=null?p.fitness:100)-loss,0,100);
+      const loss = Math.round(rint(18,26)*(mins/90)*drain*(hasTrait(p,"engine")?0.6:1)); p.fitness = clamp((p.fitness!=null?p.fitness:100)-loss,0,100);
     });
     const subEvents = sideKey==="H" ? box.hSubs : box.aSubs;
     subs.forEach(x=>{ const on=x.on, playMin=matchEnd-x.min;
@@ -856,7 +881,35 @@ function applyMatch(home, away, hs, as, players, box, opts){
     if(hs>as){ home.w++; home.pts+=3; away.l++; }
     else if(hs<as){ away.w++; away.pts+=3; home.l++; }
     else { home.d++; away.d++; home.pts++; away.pts++; }
+    recordStreak(G, home, hs>as?1:hs<as?-1:0); recordStreak(G, away, as>hs?1:as<hs?-1:0);
   }
+}
+// Win / unbeaten streaks — tracked on every club, announced for the user's.
+function recordStreak(G, club, res){
+  if(!club) return;
+  club.winStreak = res>0 ? (club.winStreak||0)+1 : 0;
+  club.unbeaten  = res>=0 ? (club.unbeaten||0)+1 : 0;
+  if(!club.userControlled) return;
+  if(res>0 && [5,8,10,12,15,20,25].includes(club.winStreak)) logNews(G,"streak",`🔥 ${club.name} have won ${club.winStreak} league games in a row!`, club.id);
+  else if(res===0 && club.unbeaten>=10 && [10,15,20,25,30,40].includes(club.unbeaten)) logNews(G,"streak",`🛡️ ${club.name} extend their unbeaten run to ${club.unbeaten} matches`, club.id);
+  else if(res<0 && (club.unbeaten>=15)) logNews(G,"streak",`💔 ${club.name}'s ${club.unbeaten}-match unbeaten run is over`, club.id);
+}
+// Career landmark news for the user's players (goals / apps / clean sheets).
+function milestone(G,p,key,val,ths,label,emoji){
+  if(p[key]==null){ p[key]=ths.filter(t=>t<=val).pop()||0; return; }   // seed silently to avoid backlog spam
+  const next=ths.find(t=>t>p[key]);
+  if(next!=null && val>=next){ p[key]=next; logNews(G,"milestone",`${emoji} ${p.name} reaches ${next} career ${label}!`, p.teamId); }
+}
+function checkMilestones(G){
+  const u=G.userTeamId;
+  Object.values(G.players).forEach(p=>{
+    if(p.teamId!==u || p.youth) return;
+    const tot=k=>((p.career&&p.career[k])||0)+((p.stats&&p.stats[k])||0);
+    milestone(G,p,"_msG",tot("G"),[25,50,100,150,200,250,300],"goals","⚽");
+    milestone(G,p,"_msA",tot("A"),[50,100,150,200],"assists","🅰️");
+    milestone(G,p,"_msApp",tot("App"),[100,200,300,400,500,600],"appearances","👟");
+    if(p.pos==="GK") milestone(G,p,"_msCS",tot("CS"),[50,100,150,200],"clean sheets","🧤");
+  });
 }
 // Ban a player for N upcoming matches; news only for the user's club.
 function banPlayer(G, p, matches, reason){
@@ -1259,6 +1312,8 @@ function simRound(G){
     }
     maybeInjure(home, G.players, G.settings); maybeInjure(away, G.players, G.settings);
   });
+  checkMilestones(G);   // career-landmark news for the user's players
+  updateFormFamiliarity(G);   // clubs settle into their current formation
   processTransferRequests(G);   // unhappy players may agitate to leave
   if([13,27].includes(G.day+1)) inSeasonDev(G);   // gradual in-season growth checkpoints
   // youth 5v5 game time (drives prospect development)
@@ -1405,7 +1460,7 @@ function livePlayHalf(G, M){
   const hDef=(0.55*n01(uH.DEF)+0.30*n01(uH.MID)+0.15*n01(uH.ATT));
   const aAtt=(0.55*n01(uA.ATT)+0.30*n01(uA.MID)+0.15*n01(uA.DEF));
   const aDef=(0.55*n01(uA.DEF)+0.30*n01(uA.MID)+0.15*n01(uA.ATT));
-  const tH=TACTIC_MOD[home.tactic||"balanced"], tA=TACTIC_MOD[away.tactic||"balanced"];
+  const tH=tacticMods(home), tA=tacticMods(away);
   let xgH=clamp(1.32*Math.exp(1.7*(hAtt-aDef))*tH.xgFor*tA.xgAgainst*1.12,0.15,5.5)/2;
   let xgA=clamp(1.32*Math.exp(1.7*(aAtt-hDef))*tA.xgFor*tH.xgAgainst*0.92,0.15,5.5)/2;
   // Clinical finishers/creators genuinely create a few extra goals for the team, on
@@ -1443,7 +1498,8 @@ function livePlayHalf(G, M){
 function liveFinish(G, M){
   const players=G.players, home=G.clubs[M.homeId], away=G.clubs[M.awayId];
   const ids=Object.keys(M.appeared);
-  ids.forEach(id=>{ const p=players[id]; if(!p)return; p.stats.App++; addCompL(p,"App"); if(M.started[id]){ p.stats.Start=(p.stats.Start||0)+1; addCompL(p,"Start"); } const mins=M.minutes[id]||90; p.stats.Min+=mins; addCompL(p,"Min",mins); const loss=Math.round(mins/90*rint(18,26)*(hasTrait(p,"engine")?0.6:1)); p.fitness=clamp((p.fitness!=null?p.fitness:100)-loss,0,100); });
+  const drainOf={[home.id]:tacticMods(home).drain, [away.id]:tacticMods(away).drain};
+  ids.forEach(id=>{ const p=players[id]; if(!p)return; p.stats.App++; addCompL(p,"App"); if(M.started[id]){ p.stats.Start=(p.stats.Start||0)+1; addCompL(p,"Start"); } const mins=M.minutes[id]||90; p.stats.Min+=mins; addCompL(p,"Min",mins); const dr=drainOf[p.teamId]||1; const loss=Math.round(mins/90*rint(18,26)*dr*(hasTrait(p,"engine")?0.6:1)); p.fitness=clamp((p.fitness!=null?p.fitness:100)-loss,0,100); });
   const gkOf=side=>ids.find(id=>M.sideOf[id]===side && M.slotOf[id]==="GK");
   const gh=gkOf("H"), ga=gkOf("A");
   if(gh&&players[gh]){ const sv=Math.max(0,(M.sotA||0)-M.as); players[gh].stats.Sv+=sv; addCompL(players[gh],"Sv",sv); players[gh].stats.xGA+=(M.xgATot||0); players[gh].stats.GA+=M.as; addCompL(players[gh],"xGA",M.xgATot||0); addCompL(players[gh],"GA",M.as); }
@@ -1462,6 +1518,7 @@ function liveFinish(G, M){
   if(!G.settings||G.settings.morale!==false){ ids.forEach(id=>{ const p=players[id]; if(!p)return; const side=M.sideOf[id]; const result=(side==="H"?M.hs-M.as:M.as-M.hs); p.morale=clamp((p.morale==null?70:p.morale)+(result>0?2.5:result<0?-2.5:0.5),0,100); }); }
   home.pld++; away.pld++; home.gf+=M.hs; home.ga+=M.as; away.gf+=M.as; away.ga+=M.hs;
   if(M.hs>M.as){home.w++;home.pts+=3;away.l++;} else if(M.hs<M.as){away.w++;away.pts+=3;home.l++;} else {home.d++;away.d++;home.pts++;away.pts++;}
+  recordStreak(G, home, M.hs>M.as?1:M.hs<M.as?-1:0); recordStreak(G, away, M.as>M.hs?1:M.as<M.hs?-1:0);
   M.gref.played=true; M.gref.hs=M.hs; M.gref.as=M.as;
   recordHomeGate(G, home, { derby: home.rivalId===away.id, oppAbbr: away.abbr });
   const margin=Math.abs(M.hs-M.as), bw=G.records&&G.records.biggestWin;
@@ -2466,7 +2523,7 @@ function migrate(G){
       if(p.expiredSince==null && (p.expiredGrace || (p.years<=0 && p.teamId!=null && G.clubs[p.teamId] && G.clubs[p.teamId].userControlled))) p.expiredSince = G.season-1;
       fillP(p); });
     (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); fillCareerComp(p); fillP(p); });
-    G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureCommercials(G,c); if(!c.setPieces) c.setPieces={pen:null,fk:null,corner:null}; if(c.ticketTier==null) c.ticketTier=1; if(c.concessionTier==null) c.concessionTier=1; if(c.seasonGate==null) c.seasonGate=0; if(c.seasonConcession==null) c.seasonConcession=0; if(!Array.isArray(c.gateLog)) c.gateLog=[]; if(c.autoRotate==null) c.autoRotate=false; ensureXI(c, G.players); });
+    G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureCommercials(G,c); if(!c.setPieces) c.setPieces={pen:null,fk:null,corner:null}; if(c.ticketTier==null) c.ticketTier=1; if(c.concessionTier==null) c.concessionTier=1; if(c.seasonGate==null) c.seasonGate=0; if(c.seasonConcession==null) c.seasonConcession=0; if(!Array.isArray(c.gateLog)) c.gateLog=[]; if(c.autoRotate==null) c.autoRotate=false; if(!c.instr) c.instr={press:"mid",tempo:"normal",width:"normal"}; if(c.formFam==null) c.formFam=100; if(c.formFamOf==null) c.formFamOf=c.formation; ensureXI(c, G.players); });
     if(!G.clubs.some(c=>c.rivalId!=null)) assignRivals(G.clubs);
     if(!G.expectation) setOwnerExpectation(G);
     // history/records + feature-toggle backfill
@@ -3102,7 +3159,8 @@ function Tactics({G, commit, tShow}){
   const [pickSlot, setPickSlot] = useState(null);   // slot index being assigned
   ensureXI(user, G.players);
   const squad = Object.values(G.players).filter(p=>p.teamId===user.id && !isInjured(p));
-  const setFormation = f => { user.formation=f; autoPickXI(user, G.players); commit(G); };
+  const setFormation = f => { if(f!==user.formation){ user.formFam=52; user.formFamOf=f; } user.formation=f; autoPickXI(user, G.players); commit(G); };
+  const setInstr = (k,v) => { user.instr = { press:"mid", tempo:"normal", width:"normal", ...(user.instr||{}), [k]:v }; commit(G); };
   const setTactic = t => { user.tactic=t; commit(G); };
   const assign = (slotIdx, pid) => {
     const xi = (user.xi||[]).slice();
@@ -3133,6 +3191,23 @@ function Tactics({G, commit, tShow}){
           <span>MID <b className="text-slate-200">{round(u.MID)}</b></span>
           <span>ATT <b className="text-slate-200">{round(u.ATT)}</b></span>
           <span>Overall <b className="text-emerald-300">{clubStrength(user, G.players)}</b></span>
+        </div>
+        {/* tactical instructions */}
+        <div className="mt-3 border-t border-[#1d2940] pt-2 space-y-2">
+          {[["press","Press",[["high","High"],["mid","Mid"],["low","Low"]],"High press wins the ball higher & creates more, but leaves space and tires legs faster"],
+            ["tempo","Tempo",[["fast","Fast"],["normal","Normal"],["slow","Slow"]],"Fast tempo = more chances both ways and more fatigue; slow keeps the ball"],
+            ["width","Width",[["wide","Wide"],["normal","Normal"],["narrow","Narrow"]],"Wide stretches the play and creates more; narrow stays compact"]].map(([k,label,opts,tip])=>(
+            <div key={k} className="flex items-center gap-2" title={tip}>
+              <span className="text-xs text-slate-400 w-14">{label}</span>
+              {opts.map(([v,l])=>(<button key={v} onClick={()=>setInstr(k,v)} className={"px-2 py-1 rounded text-xs "+(((user.instr||{})[k]||(k==="press"?"mid":"normal"))===v?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>{l}</button>))}
+            </div>
+          ))}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-400 w-14">Familiar</span>
+            <div className="flex-1 h-2 rounded bg-[#0d1526] overflow-hidden"><div className="h-full bg-sky-400" style={{width:(user.formFam!=null?clamp(user.formFam,0,100):100)+"%"}}></div></div>
+            <span className="text-xs tnum text-slate-400 w-9 text-right">{Math.round(user.formFam!=null?clamp(user.formFam,0,100):100)}%</span>
+          </div>
+          {(user.formFam!=null&&user.formFam<80) && <div className="text-[11px] text-amber-300/80">Your side is still learning this formation — organisation improves with each game played in it.</div>}
         </div>
       </Card>
 
