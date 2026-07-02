@@ -372,7 +372,7 @@ function makeClub(def, idx, div, country){
     academy: { level: 1 }, history: [], honours: [], setPieces: { pen:null, fk:null, corner:null },
     facilityTier: 0, namingRights: null, namingOffers: [],
     ticketTier: 1, concessionTier: 1, seasonGate: 0, seasonConcession: 0, gateLog: [],
-    autoRotate: false, instr: { press:"mid", tempo:"normal", width:"normal" }, formFam: 100, formFamOf: "4-3-3",
+    autoRotate: false, instr: { press:"mid", tempo:"normal", width:"normal" }, formFam: 100, formFamOf: "4-3-3", storeTier: 0,
     userControlled: false,
   };
 }
@@ -1787,10 +1787,11 @@ function startNextSeason(G){
     let conc = round((c.seasonConcession||0)*10)/10;
     if(conc<=0 && homeGames===0){ conc = round((c.capacity/1000)*(c.div===0?0.009:0.006)*facilityGateMult(c)*0.85*19*10)/10; }
     const wages = wageBill(G, c.id);
-    c.budget = round((c.budget + base + prize + gate + conc - wages) * 10)/10;
+    const merch = merchIncome(G, c, gate);
+    c.budget = round((c.budget + base + prize + gate + conc + merch.total - wages) * 10)/10;
     c.gatePerGame = homeGames>0 ? round(gate/homeGames*10)/10 : gate;
     if(!c.lastPnl) c.lastPnl={};
-    c.lastPnl.tv=base; c.lastPnl.prize=prize; c.lastPnl.gate=gate; c.lastPnl.conc=conc; c.lastPnl.gateGames=homeGames; c.lastPnl.wages=wages;
+    c.lastPnl.tv=base; c.lastPnl.prize=prize; c.lastPnl.gate=gate; c.lastPnl.conc=conc; c.lastPnl.merch=merch.total; c.lastPnl.merchMatch=merch.matchday; c.lastPnl.merchOnline=merch.online; c.lastPnl.gateGames=homeGames; c.lastPnl.wages=wages;
     // commercial income (shirt + sponsors + cup prizes) — merges into c.lastPnl below
     processCommercials(G, c);
     // let the user see what their season's performance earned in prize money
@@ -2544,7 +2545,7 @@ function migrate(G){
       if(p.expiredSince==null && (p.expiredGrace || (p.years<=0 && p.teamId!=null && G.clubs[p.teamId] && G.clubs[p.teamId].userControlled))) p.expiredSince = G.season-1;
       fillP(p); });
     (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); fillCareerComp(p); fillP(p); });
-    G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureCommercials(G,c); if(!c.setPieces) c.setPieces={pen:null,fk:null,corner:null}; if(c.ticketTier==null) c.ticketTier=1; if(c.concessionTier==null) c.concessionTier=1; if(c.seasonGate==null) c.seasonGate=0; if(c.seasonConcession==null) c.seasonConcession=0; if(!Array.isArray(c.gateLog)) c.gateLog=[]; if(c.autoRotate==null) c.autoRotate=false; if(!c.instr) c.instr={press:"mid",tempo:"normal",width:"normal"}; if(c.formFam==null) c.formFam=100; if(c.formFamOf==null) c.formFamOf=c.formation; ensureXI(c, G.players); });
+    G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureCommercials(G,c); if(!c.setPieces) c.setPieces={pen:null,fk:null,corner:null}; if(c.ticketTier==null) c.ticketTier=1; if(c.concessionTier==null) c.concessionTier=1; if(c.seasonGate==null) c.seasonGate=0; if(c.seasonConcession==null) c.seasonConcession=0; if(!Array.isArray(c.gateLog)) c.gateLog=[]; if(c.autoRotate==null) c.autoRotate=false; if(!c.instr) c.instr={press:"mid",tempo:"normal",width:"normal"}; if(c.formFam==null) c.formFam=100; if(c.formFamOf==null) c.formFamOf=c.formation; if(c.storeTier==null) c.storeTier=0; ensureXI(c, G.players); });
     if(!G.clubs.some(c=>c.rivalId!=null)) assignRivals(G.clubs);
     if(!G.expectation) setOwnerExpectation(G);
     // history/records + feature-toggle backfill
@@ -4334,6 +4335,27 @@ function recordHomeGate(G, club, opts={}){
   return gate;
 }
 
+/* ----------------------------- merchandise ------------------------------ */
+// Jersey & merch sales: a matchday portion (sold at the ground — scales with
+// crowds & how many home games you play) plus an online store (year-round,
+// global — driven by the club's popularity, and boosted by store upgrades).
+const STORE_TIERS = [
+  { name:"Club Shop",    mult:1.00, cost:0   },
+  { name:"Megastore",    mult:1.30, cost:28  },
+  { name:"Online Store", mult:1.65, cost:65  },
+  { name:"Global Brand", mult:2.05, cost:140 },
+];
+function storeTierOf(c){ return STORE_TIERS[clamp(c.storeTier||0,0,STORE_TIERS.length-1)]; }
+function clubPopularity(G, c){
+  const str = clubStrength(c, G.players), hon = (c.honours||[]).length;
+  return (c.div===0?1:0.45) * (0.55 + str/110) * (1 + Math.min(hon,50)*0.014);
+}
+function merchIncome(G, c, gate){
+  const matchday = round((gate||0)*0.16*10)/10;                                  // shirts/scarves/food sold at games
+  const online = round(clubPopularity(G,c) * 5.5 * storeTierOf(c).mult * 10)/10;  // online shop, year-round
+  return { matchday, online, total: round((matchday+online)*10)/10 };
+}
+
 /* ----------------------------- stadium naming rights --------------------- */
 // Sell the stadium name to a sponsor for season income (the ground gets
 // renamed), or keep the traditional name for free — purely a flavor/honor
@@ -4423,7 +4445,7 @@ function cupPrizeMoney(G, clubId){
 // the AI to make affordability-aware contract and wage decisions.
 function aiIncomeEstimate(G, club){
   const p=club.lastPnl||{};
-  const inc=(p.tv||0)+(p.prize||0)+(p.gate||0)+(p.conc||0)+(p.shirt||0)+(p.sponsor||0)+(p.cup||0)+(p.naming||0);
+  const inc=(p.tv||0)+(p.prize||0)+(p.gate||0)+(p.conc||0)+(p.merch||0)+(p.shirt||0)+(p.sponsor||0)+(p.cup||0)+(p.naming||0);
   return inc>5 ? inc : (club.div===0?70:30);
 }
 // AI clubs grow their commercial income so they can compete financially: they
@@ -4521,7 +4543,7 @@ function processCommercials(G, club){
 function capAIWageBill(G, club){
   if(club.userControlled) return;
   const pnl = club.lastPnl||{};
-  const income = (pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.conc||0)+(pnl.shirt||0)+(pnl.sponsor||0)+(pnl.cup||0);
+  const income = (pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.conc||0)+(pnl.merch||0)+(pnl.shirt||0)+(pnl.sponsor||0)+(pnl.cup||0);
   let guard=0;
   while(wageBill(G,club.id) > income*0.78 && guard++<6){
     const squad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth);
@@ -4635,6 +4657,10 @@ function Finances({G, commit, tShow}){
   const concSoFar = round((user.seasonConcession||0)*10)/10;
   const concYrly = round((cap*projFill/1000)*(user.div===0?0.009:0.006)*facilityGateMult(user)*ctier.priceMult*ctier.uptakeMult*21*10)/10;
   const setConc = i => { user.concessionTier=i; commit(G); tShow(`Food & drink set to ${CONCESSION_TIERS[i].name}`); };
+  const merchYrly = round((gateYrly*0.16 + clubPopularity(G,user)*5.5*storeTierOf(user).mult)*10)/10;
+  const storeLvl = clamp(user.storeTier||0,0,STORE_TIERS.length-1);
+  const storeNext = STORE_TIERS[storeLvl+1];
+  const upgradeStore = () => { if(!storeNext) return; if(user.budget<storeNext.cost){ tShow("Not enough budget to upgrade the store."); return; } user.budget=round((user.budget-storeNext.cost)*10)/10; user.storeTier=storeLvl+1; logNews(G,"finance",`🛍️ Club shop upgraded to ${storeNext.name}`, user.id); commit(G); tShow(`Store upgraded to ${storeNext.name}`); };
   const pnl = user.lastPnl||{};
   const acceptSponsor = o => {
     user.sponsors=[...(user.sponsors||[]),{name:o.name,tier:o.tier,val:o.val,yrs:o.yrs}];
@@ -4658,7 +4684,7 @@ function Finances({G, commit, tShow}){
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         <Card><div className="text-xs text-slate-400">Transfer Budget</div><div className={"text-2xl font-bold "+(user.budget<0?"text-red-400":"")}>{money(user.budget)}</div></Card>
         <Card><div className="text-xs text-slate-400">Wage Bill / yr</div><div className="text-2xl font-bold text-red-400">-{money(bill)}</div></Card>
-        <Card><div className="text-xs text-slate-400">Net Commercial / yr</div><div className="text-2xl font-bold text-emerald-400">+{money(round((gateYrly+concYrly+shirtYrly+sponsorYrly+namingYrly)*10)/10)}</div><div className="text-xs text-slate-500">gate + food + shirt + sponsors + naming</div></Card>
+        <Card><div className="text-xs text-slate-400">Net Commercial / yr</div><div className="text-2xl font-bold text-emerald-400">+{money(round((gateYrly+concYrly+merchYrly+shirtYrly+sponsorYrly+namingYrly)*10)/10)}</div><div className="text-xs text-slate-500">gate + food + merch + shirt + sponsors + naming</div></Card>
       </div>
 
       {/* last season P&L */}
@@ -4671,6 +4697,7 @@ function Finances({G, commit, tShow}){
               ["🏆 League prize money", pnl.prize, true],
               [`🏟️ Gate income (${pnl.gateGames||0} home games)`, pnl.gate, true],
               ["🍔 Food & drink", pnl.conc||0, true],
+              [`🛍️ Merchandise${pnl.merchOnline!=null?` (£${(pnl.merchMatch||0).toFixed(1)}m matchday + £${(pnl.merchOnline||0).toFixed(1)}m online)`:""}`, pnl.merch||0, true],
               ["👕 Shirt deal", pnl.shirt||0, true],
               ["🤝 Sponsor income", pnl.sponsor||0, true],
               ["🏷️ Naming rights", pnl.naming||0, true],
@@ -4684,7 +4711,7 @@ function Finances({G, commit, tShow}){
             ))}
             <div className="border-t border-[#1d2940] pt-1 flex justify-between font-semibold">
               <span>Net</span>
-              <span className="tnum">{(()=>{const net=round(((pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.conc||0)+(pnl.shirt||0)+(pnl.sponsor||0)+(pnl.naming||0)+(pnl.cup||0)-(pnl.wages||0))*10)/10; return <span className={net>=0?"text-emerald-300":"text-red-400"}>{net>=0?"+":""}{money(net)}</span>; })()}</span>
+              <span className="tnum">{(()=>{const net=round(((pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.conc||0)+(pnl.merch||0)+(pnl.shirt||0)+(pnl.sponsor||0)+(pnl.naming||0)+(pnl.cup||0)-(pnl.wages||0))*10)/10; return <span className={net>=0?"text-emerald-300":"text-red-400"}>{net>=0?"+":""}{money(net)}</span>; })()}</span>
             </div>
           </div>
         </Card>
@@ -4747,6 +4774,22 @@ function Finances({G, commit, tShow}){
           <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-500">Projected / yr</div><div className="font-semibold tnum text-amber-300">{money(concYrly)}</div></div>
           <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-500">Last matchday</div><div className="font-semibold tnum">{lastAtt&&lastAtt.conc!=null?money(lastAtt.conc):"—"}</div></div>
         </div>
+      </Card>
+
+      {/* merchandise / club shop */}
+      <Card>
+        <div className="flex items-center justify-between mb-2">
+          <div className="font-semibold">🛍️ Club Shop — {storeTierOf(user).name}</div>
+          <div className="text-xs text-slate-500">Projected / yr: <span className="text-emerald-300 font-semibold">{money(merchYrly)}</span></div>
+        </div>
+        <div className="text-xs text-slate-400 mb-2">Jersey & merch sales: a matchday cut sold at the ground (grows with your crowds & number of home games) plus an online store selling worldwide year-round. Winning, big stars and a bigger fanbase all lift sales. Upgrade the shop to boost online revenue.</div>
+        <div className="grid grid-cols-2 gap-2 text-center mb-2">
+          <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-500">Matchday (last yr)</div><div className="font-semibold tnum">{pnl.merchMatch!=null?money(pnl.merchMatch):"—"}</div></div>
+          <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-500">Online (last yr)</div><div className="font-semibold tnum text-emerald-300">{pnl.merchOnline!=null?money(pnl.merchOnline):"—"}</div></div>
+        </div>
+        {storeNext
+          ? <button onClick={upgradeStore} disabled={user.budget<storeNext.cost} className={"w-full px-3 py-2 rounded text-sm font-semibold "+(user.budget>=storeNext.cost?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-500")}>Upgrade to {storeNext.name} — {money(storeNext.cost)} (×{storeNext.mult.toFixed(2)} online sales)</button>
+          : <div className="text-xs text-center text-amber-300">🌍 Global Brand — your shop is maxed out.</div>}
       </Card>
 
       {/* shirt deal */}
@@ -4835,7 +4878,7 @@ function Finances({G, commit, tShow}){
 
       <Card>
         <div className="font-semibold mb-1">🏟️ {user.stadium}</div>
-        <div className="text-xs text-slate-400 mb-3">Expand each stand independently. Each +3,000 seats earns ~{money(round(3*(user.div===0?0.028:0.017)*19*10)/10)} more gate income per season.</div>
+        <div className="text-xs text-slate-400 mb-3">Expand each stand independently. At a full house each +3,000 seats is worth ~{money(round(3*(user.div===0?0.028:0.017)*facilityGateMult(user)*ticketTier(user).priceMult*10)/10)} in gate <b>per home game</b> — so it pays off more the more home games you play (cup & continental runs included).</div>
         <div className="mx-auto" style={{maxWidth:"360px"}}>
           {/* top-down view: 4 stands around the pitch, thickness scales with seats */}
           <div className="grid gap-1" style={{gridTemplateColumns:"auto 1fr auto", gridTemplateRows:"auto 1fr auto"}}>
