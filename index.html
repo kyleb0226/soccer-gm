@@ -1102,11 +1102,32 @@ function playKnockoutRound(G, cup, order){
   const ids = cup.alive.slice();
   const winners = [], ties = [];
   const isFinal = cup.round === order[order.length-1];
+  const isCont = cup.country==null;   // continental cup has no country field
+  // Continental knockouts (except the one-off neutral final) are two-legged, home
+  // & away, decided on aggregate — with extra time then penalties on the 2nd leg if
+  // level. Domestic cups and the final stay single-leg.
+  const twoLeg = isCont && !isFinal;
   for(let i=0;i<ids.length;i+=2){
     const a = G.clubs[ids[i]], b = G.clubs[ids[i+1]];
     if(!b){ winners.push(ids[i]); continue; }
     ensureXI(a, G.players); ensureXI(b, G.players);
-    const isCont = cup.country==null;   // continental cup has no country field
+    if(twoLeg){
+      const leg1 = simMatch(a, b, G.players, { cup:true, cont:true, G });          // 1st leg at a
+      const leg2 = simMatch(b, a, G.players, { cup:true, cont:true, G });          // 2nd leg at b
+      recordHomeGate(G, a, { cup:true, cont:true, derby:a.rivalId===b.id, oppAbbr:b.abbr });
+      recordHomeGate(G, b, { cup:true, cont:true, derby:a.rivalId===b.id, oppAbbr:a.abbr });
+      recordUserBox(G, leg1, "Champions Cup"); recordUserBox(G, leg2, "Champions Cup");
+      let aTot = leg1.hs + leg2.as, bTot = leg1.as + leg2.hs, aet=false, pens=null;
+      if(aTot===bTot){   // level on aggregate → extra time, then penalties
+        aet=true;
+        if(chance(0.55)){ if(chance(clamp(0.5+(clubStrength(a,G.players)-clubStrength(b,G.players))/40,0.15,0.85))) aTot++; else bTot++; }
+        if(aTot===bTot) pens = penaltyShootout(a, b, G.players);
+      }
+      const w = pens ? (pens.winner==="H"?a.id:b.id) : (aTot>=bTot ? a.id : b.id);
+      winners.push(w);
+      ties.push({ home:a.id, away:b.id, twoLeg:true, l1h:leg1.hs, l1a:leg1.as, l2h:leg2.hs, l2a:leg2.as, aggH:aTot, aggA:bTot, win:w, aet, pens:pens?`${pens.h}-${pens.a}`:null });
+      continue;
+    }
     const box = simMatch(a, b, G.players, { cup:true, cont:isCont, neutral: isFinal, mustDecide:true, G });
     recordHomeGate(G, a, { cup:true, cont:isCont, neutral:isFinal, derby:a.rivalId===b.id, oppAbbr:b.abbr });
     recordUserBox(G, box, isCont ? "Champions Cup" : "National Cup");
@@ -3620,7 +3641,9 @@ function CupView({G}){
               {ties.map((t,i)=>(
                 <div key={i} className={"flex items-center gap-2 "+((t.home===G.userTeamId||t.away===G.userTeamId)?"text-emerald-300":"")}>
                   <span className={"flex-1 text-right "+(t.win===t.home?"font-bold":"")}>{G.clubs[t.home].abbr}</span>
-                  <span className="px-2">{t.hs}-{t.as}</span>
+                  <span className="px-2 text-center">{t.twoLeg
+                    ? <>{t.aggH}-{t.aggA}<div className="text-[10px] text-slate-500 font-normal">{t.l1h}-{t.l1a}, {t.l2h}-{t.l2a}{t.pens?` · pens ${t.pens}`:t.aet?" · aet":""}</div></>
+                    : <>{t.hs}-{t.as}{t.pens?<span className="text-[10px] text-amber-400"> (p{t.pens})</span>:t.aet?<span className="text-[10px] text-amber-400"> aet</span>:""}</>}</span>
                   <span className={"flex-1 "+(t.win===t.away?"font-bold":"")}>{G.clubs[t.away].abbr}</span>
                 </div>
               ))}
@@ -3694,7 +3717,9 @@ function ContCupView({G}){
                   <span className="flex-1 text-right">
                     {(()=>{ const c=G.clubs[t.home]; const s=seedOf(t.home); return <span className={t.win===t.home?"font-bold":""}>{c.abbr}{s!=null && <span className="text-slate-500 ml-1">{s}</span>}</span>; })()}
                   </span>
-                  <span className="px-2">{t.hs}-{t.as}</span>
+                  <span className="px-2 text-center">{t.twoLeg
+                    ? <>{t.aggH}-{t.aggA}<div className="text-[10px] text-slate-500 font-normal">{t.l1h}-{t.l1a}, {t.l2h}-{t.l2a}{t.pens?` · pens ${t.pens}`:t.aet?" · aet":""}</div></>
+                    : <>{t.hs}-{t.as}{t.pens?<span className="text-[10px] text-amber-400"> (p{t.pens})</span>:t.aet?<span className="text-[10px] text-amber-400"> aet</span>:""}</>}</span>
                   {clubLine(t.away, t.win===t.away)}
                 </div>
               ))}
@@ -3807,8 +3832,9 @@ function userFixtureFeed(G){
       const ties=(cc.results||{})[r]; if(!ties) return;
       const t=ties.find(x=>x.home===uid||x.away===uid); if(!t) return;
       const home=t.home===uid;
+      const tgf=t.twoLeg?t.aggH:t.hs, tga=t.twoLeg?t.aggA:t.as;
       out.push({ md:CONT_MD_REV[r], comp:"cont", home, oppName:(G.clubs[home?t.away:t.home]||{}).name||"?",
-        played:true, gf:home?t.hs:t.as, ga:home?t.as:t.hs, round:r });
+        played:true, gf:home?tgf:tga, ga:home?tga:tgf, round:r, twoLeg:!!t.twoLeg });
     });
     // upcoming KO rounds
     if(alive && cc.phase==="ko"){
