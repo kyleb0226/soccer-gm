@@ -1644,19 +1644,21 @@ function startNextSeason(G){
   G.freeAgents = G.freeAgents || [];
   Object.values(G.players).forEach(p=>{
     if(p.teamId==null) return;
-    p.years = (p.years||1) - 1;
+    p.years = (Number.isFinite(p.years)?p.years:1) - 1;
     const club = G.clubs[p.teamId];
     if(p.years<=0){
       // AI clubs re-sign most of their useful players (at the player's demand); the rest hit the market
       if(club && club.userControlled){
-        // First expiry = one season of grace with a clear warning. If still not
-        // re-signed by the NEXT rollover, he leaves on a free (Bosman).
-        if(p.expiredGrace){
+        // One grace season after a contract expires: warn the first time, then he
+        // ACTUALLY LEAVES on a free if still not re-signed by the next rollover.
+        // expiredSince is a season stamp (robust — can't silently desync), and the
+        // >= check guarantees a stuck/lingering expired player is always cleared out.
+        if(p.expiredSince!=null && G.season > p.expiredSince){
           logNews(G,"transfer",`🚪 ${p.name} (${p.pos} ${p.ovr}) left ${club.abbr} on a free transfer — his expired contract was never renewed`, club.id);
-          releaseToFA(G, p);
+          releaseToFA(G, p); p.expiredSince=null;
         } else {
-          p.years=0; p.unhappy=true; p.expiredGrace=true;
-          logNews(G,"contract",`⏳ ${p.name}'s contract has expired — re-sign him now or he walks away on a free next season`, club.id);
+          p.years=0; p.unhappy=true; if(p.expiredSince==null) p.expiredSince=G.season;
+          logNews(G,"contract",`⏳ ${p.name}'s contract has expired — re-sign him now or he leaves on a free next season`, club.id);
         }
       }
       else {
@@ -2458,7 +2460,11 @@ function migrate(G){
       if(!p.careerComp){ p.careerComp = { L: Object.assign(emptyStats(), p.career||{}) }; }
       for(const k in p.careerComp) fill(p.careerComp[k]);
     };
-    Object.values(G.players||{}).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); fillCareerComp(p); if(p.susp==null) p.susp=0; if(p.ycCount==null) p.ycCount=0; fillP(p); });
+    Object.values(G.players||{}).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); fillCareerComp(p); if(p.susp==null) p.susp=0; if(p.ycCount==null) p.ycCount=0;
+      // migrate the old expired-contract flag to the season-stamp so lingering
+      // expired players (who used to park forever) clear out on the next rollover
+      if(p.expiredSince==null && (p.expiredGrace || (p.years<=0 && p.teamId!=null && G.clubs[p.teamId] && G.clubs[p.teamId].userControlled))) p.expiredSince = G.season-1;
+      fillP(p); });
     (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); fillCareerComp(p); fillP(p); });
     G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureCommercials(G,c); if(!c.setPieces) c.setPieces={pen:null,fk:null,corner:null}; if(c.ticketTier==null) c.ticketTier=1; if(c.concessionTier==null) c.concessionTier=1; if(c.seasonGate==null) c.seasonGate=0; if(c.seasonConcession==null) c.seasonConcession=0; if(!Array.isArray(c.gateLog)) c.gateLog=[]; if(c.autoRotate==null) c.autoRotate=false; ensureXI(c, G.players); });
     if(!G.clubs.some(c=>c.rivalId!=null)) assignRivals(G.clubs);
@@ -3012,7 +3018,7 @@ function Squad({G, commit, tShow}){
                   {isSuspended(p) && <span className="ml-1 text-orange-400 text-xs" title="Suspended">⛔{p.susp}</span>}
                   {p.youth && <span className="ml-1 text-amber-300 text-xs">YTH</span>}
                   {p.unhappy && p.years>0 && <span className="ml-1 text-orange-400 text-xs" title="Wants a new contract before it runs down">⚠</span>}
-                  {p.expiredGrace && p.years<=0 && <span className="ml-1 text-red-400 text-xs font-bold" title="Contract EXPIRED — re-sign him now or he leaves on a free next season">⏳ EXPIRED</span>}
+                  {(p.expiredSince!=null||p.expiredGrace) && p.years<=0 && <span className="ml-1 text-red-400 text-xs font-bold" title="Contract EXPIRED — re-sign him now or he leaves on a free next season">⏳ EXPIRED</span>}
                   {p.wantsOut && <span className="ml-1 text-xs" title="Has handed in a transfer request">✈️</span>}
                   {p.listed && !p.wantsOut && <span className="ml-1 text-xs" title="Transfer-listed">🏷️</span>}
                   {p.form!=null && p.form>=7.3 && <span className="ml-1 text-xs" title="In hot form">🔥</span>}
@@ -3049,7 +3055,7 @@ function RenewModal({G, p, commit, tShow, onClose}){
   const [rel, setRel] = useState(p.release!=null ? String(p.release) : "");
   const sign = yrs => {
     p.salary = clamp(round(demand*termPremium[yrs]*10)/10, 0.2, 40);
-    p.years = yrs; p.unhappy = false; p.expiredGrace = false;
+    p.years = yrs; p.unhappy = false; p.expiredGrace = false; p.expiredSince = null;
     const rv = parseFloat(rel);
     p.release = (rel==="" || isNaN(rv)) ? null : round(Math.max(0,rv)*10)/10;
     commit(G); tShow(`${p.name} signed for ${yrs}y at ${money(p.salary)}/yr`); onClose();
