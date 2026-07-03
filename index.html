@@ -1027,11 +1027,22 @@ function isCongestedMatchday(G){
 // Rotate every club's XI for the upcoming games: AI clubs always manage their
 // fitness; the user's club only if they've switched Auto-Rotate on (otherwise
 // their hand-picked XI is respected).
-function rotateForMatchday(G, aggressive){
+// `forCup` = this rotation is for a midweek cup/continental game (vs a league game).
+function rotateForMatchday(G, forCup){
   const user=G.clubs[G.userTeamId];
   G.clubs.forEach(c=>{
-    if(c.id===G.userTeamId){ if(user && user.autoRotate) rotateXI(c, G.players, aggressive); }
-    else rotateXI(c, G.players, aggressive);
+    if(c.id===G.userTeamId){
+      if(!user || !user.autoRotate) return;
+      // Rotation priority: which competition to field your strongest side in.
+      //  league  → best XI in the league, rest hard in cups
+      //  cup     → best XI in cups/continental, rest hard in the league
+      //  balanced→ mild rotation in league, harder in midweek (the default)
+      const pri = user.rotatePriority || "balanced";
+      if(pri==="league"){ forCup ? rotateXI(c, G.players, true) : autoPickXI(c, G.players); }
+      else if(pri==="cup"){ forCup ? autoPickXI(c, G.players) : rotateXI(c, G.players, true); }
+      else rotateXI(c, G.players, forCup);
+    }
+    else rotateXI(c, G.players, forCup);
   });
 }
 
@@ -3207,7 +3218,14 @@ function Tactics({G, commit, tShow}){
           <button onClick={()=>{ autoPickXI(user, G.players); commit(G); tShow("Auto-picked best XI"); }} className="ml-auto px-3 py-1 rounded bg-[#16213a] text-slate-200 text-xs">Auto-pick XI</button>
           <button onClick={()=>{ user.autoRotate=!user.autoRotate; if(user.autoRotate) rotateXI(user, G.players, false); commit(G); tShow(user.autoRotate?"Auto-Rotate ON — the assistant will rest tired players":"Auto-Rotate OFF — you pick the XI"); }} className={"px-3 py-1 rounded text-xs font-semibold "+(user.autoRotate?"bg-sky-500 text-slate-900":"bg-[#16213a] text-slate-300")} title="Let the assistant manager rotate fresh legs in to protect fitness, especially in midweek double-game weeks">🔄 Auto-Rotate {user.autoRotate?"ON":"OFF"}</button>
         </div>
-        {user.autoRotate && <div className="text-xs text-sky-300/80 mt-2">🔄 Assistant manager is handling selection — it rests tired starters and rotates harder in midweek cup/continental weeks. Turn off to pick the XI yourself.</div>}
+        {user.autoRotate && <div className="mt-2">
+          <div className="text-xs text-sky-300/80 mb-1">🔄 Assistant manager is handling selection — rests tired starters and rotates harder in midweek weeks. Priority:</div>
+          <div className="flex gap-1">
+            {[["balanced","⚖️ Balanced","Mild rotation in the league, harder in midweek cups"],["league","🏆 League first","Strongest XI in the league, rotate hard in cups"],["cup","🌍 Cups first","Strongest XI in cups/continental, rotate hard in the league"]].map(([v,l,tip])=>(
+              <button key={v} title={tip} onClick={()=>{ user.rotatePriority=v; commit(G); tShow(`Rotation priority: ${l}`); }} className={"px-2 py-1 rounded text-xs "+(((user.rotatePriority)||"balanced")===v?"bg-sky-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>{l}</button>
+            ))}
+          </div>
+        </div>}
         <div className="flex gap-4 mt-2 text-xs text-slate-400">
           <span>DEF <b className="text-slate-200">{round(u.DEF)}</b></span>
           <span>MID <b className="text-slate-200">{round(u.MID)}</b></span>
