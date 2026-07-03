@@ -2523,31 +2523,79 @@ decompressFromUTF16:function(compressed){if(compressed==null)return"";if(compres
 const LZ_PREFIX = "~LZ~";
 function encodeSave(G){ return LZ_PREFIX + LZString.compressToUTF16(JSON.stringify(G)); }
 function decodeSave(raw){ if(raw==null) return null; return raw.indexOf(LZ_PREFIX)===0 ? JSON.parse(LZString.decompressFromUTF16(raw.slice(LZ_PREFIX.length))) : JSON.parse(raw); }
+// Big save blobs live in IndexedDB (quota is hundreds of MB to GBs, vs the ~5MB
+// localStorage cap that broke long saves). Only the tiny slot INDEX (names,
+// seasons) stays in localStorage so the menu can list saves synchronously.
+const IDB_NAME="pgsoccer_db", IDB_STORE="saves";
+let _idbPromise=null;
+function idb(){
+  if(_idbPromise) return _idbPromise;
+  _idbPromise = new Promise((res,rej)=>{
+    try{
+      if(!window.indexedDB){ rej(new Error("no idb")); return; }
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = ()=>{ const db=req.result; if(!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE); };
+      req.onsuccess = ()=>res(req.result);
+      req.onerror = ()=>rej(req.error);
+    }catch(e){ rej(e); }
+  });
+  return _idbPromise;
+}
+function idbSet(key,val){ return idb().then(db=>new Promise((res,rej)=>{ const tx=db.transaction(IDB_STORE,"readwrite"); tx.objectStore(IDB_STORE).put(val,key); tx.oncomplete=()=>res(true); tx.onerror=()=>rej(tx.error); tx.onabort=()=>rej(tx.error||new Error("abort")); })); }
+function idbGet(key){ return idb().then(db=>new Promise((res,rej)=>{ const tx=db.transaction(IDB_STORE,"readonly"); const rq=tx.objectStore(IDB_STORE).get(key); rq.onsuccess=()=>res(rq.result); rq.onerror=()=>rej(rq.error); })); }
+function idbDel(key){ return idb().then(db=>new Promise((res)=>{ const tx=db.transaction(IDB_STORE,"readwrite"); tx.objectStore(IDB_STORE).delete(key); tx.oncomplete=()=>res(true); tx.onerror=()=>res(false); })).catch(()=>false); }
 function listSlots(){
   try{ const a = JSON.parse(localStorage.getItem(SLOT_INDEX)||"[]"); return Array.isArray(a)?a.sort((x,y)=>y.updated-x.updated):[]; }
   catch(e){ return []; }
 }
-function saveGame(G){
+function updateSlotIndex(G){
   try{
-    if(!G.slotId) G.slotId = "s" + Date.now() + Math.floor(Math.random()*999);
-    const blob = encodeSave(G);
-    try{ localStorage.setItem(slotKey(G.slotId), blob); }
-    catch(quota){ // storage near full (e.g. a legacy uncompressed save) — free the old value first, then retry
-      try{ localStorage.removeItem(slotKey(G.slotId)); localStorage.setItem(slotKey(G.slotId), blob); }
-      catch(e2){ return false; }
-    }
     const u = G.clubs[G.userTeamId];
     const idx = listSlots().filter(s=>s.id!==G.slotId);
     idx.push({ id:G.slotId, club:u?u.name:"—", abbr:u?u.abbr:"", season:G.season, day:(G.day||0)+1, phase:G.phase, updated:Date.now() });
     localStorage.setItem(SLOT_INDEX, JSON.stringify(idx));
-    return true;
+  }catch(e){}
+}
+async function saveGame(G){
+  try{
+    if(!G.slotId) G.slotId = "s" + Date.now() + Math.floor(Math.random()*999);
+    const blob = encodeSave(G);
+    let ok=false;
+    try{ await idbSet(slotKey(G.slotId), blob); ok=true;
+      try{ localStorage.removeItem(slotKey(G.slotId)); }catch(e){}   // reclaim any legacy localStorage copy
+    }catch(idbErr){
+      // IndexedDB unavailable — fall back to localStorage (small saves only)
+      try{ localStorage.setItem(slotKey(G.slotId), blob); ok=true; }catch(e2){ ok=false; }
+    }
+    updateSlotIndex(G);
+    return ok;
   }catch(e){ return false; }
 }
-function loadSlot(id){
-  try{ const g = decodeSave(localStorage.getItem(slotKey(id))); return g?migrate(g):null; }catch(e){ return null; }
+async function loadSlot(id){
+  try{
+    let raw=null;
+    try{ raw = await idbGet(slotKey(id)); }catch(e){}
+    if(raw==null){ try{ raw = localStorage.getItem(slotKey(id)); }catch(e){} }   // legacy fallback
+    if(raw==null) return null;
+    const g = decodeSave(raw);
+    return g?migrate(g):null;
+  }catch(e){ return null; }
 }
-function deleteSlot(id){
-  try{ localStorage.removeItem(slotKey(id)); localStorage.setItem(SLOT_INDEX, JSON.stringify(listSlots().filter(s=>s.id!==id))); }catch(e){}
+async function deleteSlot(id){
+  try{ await idbDel(slotKey(id)); }catch(e){}
+  try{ localStorage.removeItem(slotKey(id)); }catch(e){}
+  try{ localStorage.setItem(SLOT_INDEX, JSON.stringify(listSlots().filter(s=>s.id!==id))); }catch(e){}
+}
+// One-time: move any legacy localStorage save blobs into IndexedDB and free the
+// localStorage space, so an almost-full localStorage never blocks a save again.
+async function migrateSavesToIDB(){
+  try{
+    const keys=[]; for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k && k.indexOf("pgsoccer_slot_")===0) keys.push(k); }
+    for(const k of keys){
+      const blob=localStorage.getItem(k); if(blob==null) continue;
+      try{ await idbSet(k, blob); localStorage.removeItem(k); }catch(e){ /* keep it in localStorage if IDB write fails */ }
+    }
+  }catch(e){}
 }
 function migrate(G){
   if(!G || !Array.isArray(G.clubs)) return G;
@@ -2673,12 +2721,12 @@ function App(){
   // burst of actions coalesces into one write). Pending saves are flushed when the
   // tab is hidden/closed so nothing is lost.
   const saveRef = React.useRef({ timer:null, g:null });
-  const flushSave = () => { const s=saveRef.current; if(s.timer){ clearTimeout(s.timer); s.timer=null; } if(s.g){ const g=s.g; s.g=null; const ok=saveGame(g); if(!ok) tShow("⚠️ Save failed — storage full. Use Save File to back up."); } };
-  const commit = g => { setG({...g}); saveRef.current.g=g; if(!saveRef.current.timer){ saveRef.current.timer=setTimeout(()=>{ saveRef.current.timer=null; flushSave(); }, 300); } };
-  React.useEffect(()=>{ const h=()=>{ if(document.visibilityState==="hidden") flushSave(); }; const b=()=>flushSave(); document.addEventListener("visibilitychange",h); window.addEventListener("pagehide",b); window.addEventListener("beforeunload",b); return ()=>{ document.removeEventListener("visibilitychange",h); window.removeEventListener("pagehide",b); window.removeEventListener("beforeunload",b); }; }, []);
+  const flushSave = () => { const s=saveRef.current; if(s.timer){ clearTimeout(s.timer); s.timer=null; } if(s.g){ const g=s.g; s.g=null; saveGame(g).then(ok=>{ if(!ok) tShow("⚠️ Save failed — try Save File to back up."); }); } };
+  const commit = g => { if(!g.slotId) g.slotId = "s" + Date.now() + Math.floor(Math.random()*999); setG({...g}); saveRef.current.g=g; if(!saveRef.current.timer){ saveRef.current.timer=setTimeout(()=>{ saveRef.current.timer=null; flushSave(); }, 300); } };
+  React.useEffect(()=>{ migrateSavesToIDB(); const h=()=>{ if(document.visibilityState==="hidden") flushSave(); }; const b=()=>flushSave(); document.addEventListener("visibilitychange",h); window.addEventListener("pagehide",b); window.addEventListener("beforeunload",b); return ()=>{ document.removeEventListener("visibilitychange",h); window.removeEventListener("pagehide",b); window.removeEventListener("beforeunload",b); }; }, []);
   const tShow = msg => { setToast(msg); setTimeout(()=>setToast(""),2400); };
-  const openSlot = id => { const g=loadSlot(id); if(g){ setG(g); setTab("hub"); setScreen("play"); } else tShow("Couldn't load that save."); };
-  const toMenu = () => { if(G) saveGame(G); setG(null); setScreen("menu"); };
+  const openSlot = id => { loadSlot(id).then(g=>{ if(g){ setG(g); setTab("hub"); setScreen("play"); } else tShow("Couldn't load that save."); }); };
+  const toMenu = () => { flushSave(); if(G) saveGame(G); setG(null); setScreen("menu"); };
 
   if(screen==="menu") return <MainMenu onLoad={openSlot} onNew={()=>setScreen("splash")} />;
   if(screen==="splash" || !G) return <Splash onStart={(id,opts)=>{ const g=newGame(id,opts); g.slotId=null; commit(g); setTab("hub"); setScreen("play"); }} onBack={listSlots().length?()=>setScreen("menu"):null} />;
@@ -2805,7 +2853,7 @@ function MainMenu({onLoad, onNew}){
               <div className="text-xs text-slate-400">{s.season} · {s.phase==="regular"?("MD "+s.day):s.phase}</div>
             </div>
             <button onClick={()=>onLoad(s.id)} className="px-3 py-1.5 rounded bg-emerald-500 text-slate-900 text-sm font-semibold">Load</button>
-            <button onClick={()=>{ if(confirm("Delete this save?")){ deleteSlot(s.id); setSlots(listSlots()); } }} className="px-2 py-1.5 rounded bg-[#16213a] text-slate-300 text-sm">🗑</button>
+            <button onClick={()=>{ if(confirm("Delete this save?")){ deleteSlot(s.id).then(()=>setSlots(listSlots())); setSlots(listSlots()); } }} className="px-2 py-1.5 rounded bg-[#16213a] text-slate-300 text-sm">🗑</button>
           </div>
         ))}
       </div>
