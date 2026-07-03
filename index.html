@@ -1617,15 +1617,27 @@ function finalizeSeason(G){
     G.champions.unshift({ season:G.season, id:champ.id, abbr:champ.abbr, country:ci });
     logNews(G, "title", `🏆 ${champ.name} are champions of the ${divName(ci,0)}!`, champ.id);
     addHonour(G.clubs[champ.id], G.season, "league", `${divName(ci,0)} champions`);
-    // THE TREBLE: same club wins its league, its national cup AND the continental cup
+    // THE TREBLE / DOUBLE: what else did the league champion (or cup winner) win?
     const cup = (G.cups||[]).find(x=>x.country===ci);
     const wonCup = cup && cup.winner===champ.id;
     const wonCont = G.contCup && G.contCup.winner===champ.id;
+    G.trebles = G.trebles || []; G.doubles = G.doubles || [];
     if(wonCup && wonCont){
       addHonour(G.clubs[champ.id], G.season, "treble", `🌟 The Treble — ${divName(ci,0)}, ${cupName(ci)} & ${CONT_CUP_NAME}`);
       logNews(G, "title", `🌟🏆 ${champ.name} complete an historic TREBLE — league, cup and ${CONT_CUP_NAME}!`, champ.id);
-      G.trebles = G.trebles || [];
       G.trebles.unshift({ season:G.season, id:champ.id, abbr:champ.abbr, country:ci });
+    } else if(wonCup || wonCont){
+      const which = wonCup ? `${divName(ci,0)} & ${cupName(ci)}` : `${divName(ci,0)} & ${CONT_CUP_NAME}`;
+      addHonour(G.clubs[champ.id], G.season, "double", `🥈 The Double — ${which}`);
+      logNews(G, "title", `🥈 ${champ.name} win the Double — ${which}!`, champ.id);
+      G.doubles.unshift({ season:G.season, id:champ.id, abbr:champ.abbr, country:ci, which });
+    }
+    // a cup + continental double won by a club that did NOT win its league
+    if(cup && cup.winner!=null && cup.winner!==champ.id && G.contCup && G.contCup.winner===cup.winner){
+      const c=G.clubs[cup.winner], which=`${cupName(ci)} & ${CONT_CUP_NAME}`;
+      addHonour(c, G.season, "double", `🥈 The Double — ${which}`);
+      logNews(G, "title", `🥈 ${c?c.name:cup.winner} win the Double — ${which}!`, cup.winner);
+      G.doubles.unshift({ season:G.season, id:cup.winner, abbr:c?c.abbr:"", country:ci, which });
     }
   });
   computeAwards(G);
@@ -2650,6 +2662,7 @@ function migrate(G){
     if(!G.intl || typeof G.intl!=="object") G.intl={ history:[], lastPlayed:null };
     if(!Array.isArray(G.intl.history)) G.intl.history=[];
     if(!Array.isArray(G.trebles)) G.trebles=[];
+    if(!Array.isArray(G.doubles)) G.doubles=[];
     if(G.intlCycle===undefined) G.intlCycle=null;
     if(!G.retired || typeof G.retired!=="object") G.retired={};
     // slim + cap the retired archive (older saves stored full player data here,
@@ -2689,7 +2702,7 @@ function newGame(userTeamId, opts={}){
     schedule: [],
     freeAgents: [], transferOffers: [], news: [], champions: [], contChampions: [], awardHistory: [], hof: [],
     cups: null, contCup: null, lastMatch: null, lastMatches: [],
-    finalsArchive: [], records: { players:{}, biggestWin:null }, trebles: [],
+    finalsArchive: [], records: { players:{}, biggestWin:null }, trebles: [], doubles: [],
     intl: { history:[], lastPlayed:null },
     boardConfidence: 60, pendingSack: false, jobOffers: null,
     career: { seasonsManaged:0, transferSpend:0, transferIncome:0, academyGraduates:0,
@@ -3603,7 +3616,7 @@ function ClubBrowser({G, commit, tShow}){
           <Card>
             <div className="font-semibold mb-2">🏆 {club.name} trophy cabinet</div>
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-2 text-center">
-              {[["league","Leagues"],["cup","Cups"],["continental","Continental"],["treble","🌟 Trebles"],["promo","Promotions"]].map(([t,l])=>(
+              {[["league","Leagues"],["cup","Cups"],["continental","Continental"],["double","🥈 Doubles"],["treble","🌟 Trebles"],["promo","Promotions"]].map(([t,l])=>(
                 <div key={t} className={"rounded-lg p-2 "+(t==="treble"&&cnt(t)>0?"bg-amber-500/15 border border-amber-500/40":t==="continental"&&cnt(t)>0?"bg-sky-500/15 border border-sky-500/30":"bg-[#0d1526]")}><div className="text-2xl font-black tnum">{cnt(t)}</div><div className="text-[11px] text-slate-400">{l}</div></div>
               ))}
             </div>
@@ -5139,17 +5152,18 @@ function AwardRow({label, v, extra, G}){
 }
 function HallOfFame({G}){
   const hof = G.hof||[];
+  const ctxOpen = React.useContext(PlayerCtx);
   return (
     <div className="space-y-3">
-      <Card><div className="font-semibold">Hall of Fame</div><div className="text-sm text-slate-400">Club legends inducted on retirement.</div></Card>
+      <Card><div className="font-semibold">Hall of Fame</div><div className="text-sm text-slate-400">Club legends inducted on retirement. Tap any to see their full career stats.</div></Card>
       {!hof.length && <Card><div className="text-slate-400 text-sm">No inductees yet.</div></Card>}
       <div className="grid sm:grid-cols-2 gap-3">
         {hof.map(h=>(
-          <Card key={h.id}>
+          <Card key={h.id} className="cursor-pointer hover:bg-[#16213a]" onClick={()=>ctxOpen&&ctxOpen(resolveRecordPlayer(G, h))}>
             <div className="flex items-center gap-2">
               <OvrPill v={h.peak} />
               <div>
-                <div className="font-semibold">{h.name}</div>
+                <div className="font-semibold">{h.name} 🏅</div>
                 <div className="text-xs text-slate-400">{h.pos} · {h.G} goals · {h.A} assists · {h.App} apps · inducted {h.season}</div>
               </div>
             </div>
@@ -5274,7 +5288,7 @@ function ManagerLegacyCard({G}){
       </div>
       {trophies.length>0 && (
         <div className="flex gap-2 flex-wrap text-xs">
-          {[["league","🏆 Leagues"],["cup","🎖️ Cups"],["continental","🌍 Continental"],["treble","🌟 Trebles"]].map(([t,l])=>tCount(t)>0&&(
+          {[["league","🏆 Leagues"],["cup","🎖️ Cups"],["continental","🌍 Continental"],["double","🥈 Doubles"],["treble","🌟 Trebles"]].map(([t,l])=>tCount(t)>0&&(
             <span key={t} className="px-2 py-1 rounded bg-[#16213a] text-slate-300">{l}: {tCount(t)}</span>
           ))}
         </div>
@@ -5286,6 +5300,8 @@ function RecordsView({G}){
   const user = G.clubs[G.userTeamId];
   const [final, setFinal] = useState(null);
   const [country, setCountry] = useState(user.country||0);
+  const ctxOpen = React.useContext(PlayerCtx);
+  const openRec = rec => ctxOpen && ctxOpen(resolveRecordPlayer(G, rec));
   const recPlayers = Object.values((G.records&&G.records.players)||{});
   const flag = nat => nat!=null && COUNTRIES[nat] ? COUNTRIES[nat].flag+" " : "";
   const lead = (key, n=12) => recPlayers.filter(p=>(p[key]||0)>0).sort((a,b)=>(b[key]||0)-(a[key]||0)).slice(0,n);
@@ -5302,7 +5318,7 @@ function RecordsView({G}){
         <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="p-2 text-left">#</th><th className="p-2 text-left">Player</th><th className="p-2">Pos</th><th className="p-2">Club</th><th className="p-2">{valLabel}</th></tr></thead>
         <tbody>
           {rows.map((p,i)=>(
-            <tr key={p.id} className="border-b border-[#15203a]">
+            <tr key={p.id} className="border-b border-[#15203a] cursor-pointer hover:bg-[#16213a]" onClick={()=>openRec(p)}>
               <td className="p-2 text-left tnum text-slate-500">{i+1}</td>
               <td className="p-2 text-left">{flag(p.nat)}{p.name}{p.hof&&<span className="ml-1" title="Hall of Fame">🏅</span>}{p.retired&&<span className="ml-1 text-[10px] text-slate-500">ret.</span>}</td>
               <td className="p-2 text-center text-slate-400">{p.pos}</td>
@@ -5327,7 +5343,7 @@ function RecordsView({G}){
       <Card>
         <div className="font-semibold mb-2">🏆 {user.name} trophy cabinet</div>
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-2 text-center">
-          {[["league","Leagues"],["cup","Cups"],["continental","Continental"],["treble","🌟 Trebles"],["promo","Promotions"]].map(([t,l])=>(
+          {[["league","Leagues"],["cup","Cups"],["continental","Continental"],["double","🥈 Doubles"],["treble","🌟 Trebles"],["promo","Promotions"]].map(([t,l])=>(
             <div key={t} className={"rounded-lg p-2 "+(t==="treble"&&hCount(t)>0?"bg-amber-500/15 border border-amber-500/40":"bg-[#0d1526]")}><div className="text-2xl font-black tnum">{hCount(t)}</div><div className="text-[11px] text-slate-400">{l}</div></div>
           ))}
         </div>
@@ -5343,6 +5359,16 @@ function RecordsView({G}){
           <div className="text-xs text-slate-500 mb-2">League + National Cup + {CONT_CUP_NAME} in a single season.</div>
           <div className="space-y-1 text-sm max-h-48 overflow-y-auto">
             {(G.trebles||[]).map((t,i)=>(<div key={i} className="flex gap-2"><span className="text-slate-500 tnum w-12">{t.season}</span><span className={t.id===user.id?"text-amber-300 font-semibold":"text-slate-200"}>{COUNTRIES[t.country].flag} {G.clubs[t.id]?G.clubs[t.id].name:t.abbr}</span></div>))}
+          </div>
+        </Card>
+      )}
+
+      {(G.doubles||[]).length>0 && (
+        <Card>
+          <div className="font-semibold mb-2">🥈 Doubles won</div>
+          <div className="text-xs text-slate-500 mb-2">Any two of League / National Cup / {CONT_CUP_NAME} in a single season.</div>
+          <div className="space-y-1 text-sm max-h-48 overflow-y-auto">
+            {(G.doubles||[]).map((t,i)=>(<div key={i} className="flex items-baseline gap-2"><span className="text-slate-500 tnum w-12">{t.season}</span><span className={t.id===user.id?"text-amber-300 font-semibold":"text-slate-200"}>{COUNTRIES[t.country].flag} {G.clubs[t.id]?G.clubs[t.id].name:t.abbr}</span><span className="text-xs text-slate-500">— {t.which}</span></div>))}
           </div>
         </Card>
       )}
@@ -5581,6 +5607,25 @@ function MatchStats({s}){
 }
 
 /* ----------------------------- player modal ---------------------------- */
+// Resolve a records/HOF summary entry to the best available player object for the
+// profile modal: the live player if still active, else the (slimmed) retired
+// archive entry, else a synthesized object from the recorded career totals. Always
+// returns something with stats/career/history present so PlayerModal is safe.
+function resolveRecordPlayer(G, rec){
+  const live = (G.players||{})[rec.id];
+  if(live) return live;
+  const ret = (G.retired||{})[rec.id];
+  const base = ret ? { ...ret } : {
+    id:rec.id, name:rec.name, pos:rec.pos, nat:rec.nat, retired:true, hof:!!rec.hof,
+    ovr:rec.peak||0, pot:rec.peak||0, peakOvr:rec.peak,
+    career: Object.assign(emptyStats(), { G:rec.G||0, A:rec.A||0, App:rec.App||0, CS:rec.CS||0, MOTM:rec.MOTM||0, Tkl:rec.Tkl||0, Int:rec.Int||0, Clr:rec.Clr||0, PrgP:rec.PrgP||0 }),
+  };
+  base.retired = true;
+  if(!base.stats) base.stats = emptyStats();
+  if(!base.career) base.career = emptyStats();
+  if(!Array.isArray(base.history)) base.history = [];
+  return base;
+}
 function PlayerModal({p, G, onClose}){
   const club = p.teamId!=null && G.clubs[p.teamId] ? G.clubs[p.teamId] : null;
   const attrs = p.pos==="GK"
@@ -5605,7 +5650,7 @@ function PlayerModal({p, G, onClose}){
           <ScoutOvrPill p={p} />
           <div className="flex-1">
             <div className="font-bold text-lg">{nat&&<span className="mr-1" title={nat.name}>{nat.flag}</span>}{p.name}{scoutConf(p)<0.85&&<span className="text-[10px] text-slate-500 font-normal ml-2">scouted ~{Math.round(scoutConf(p)*100)}%</span>}{p.seasonDev?<span className={"text-[11px] font-semibold ml-2 "+(p.seasonDev>0?"text-emerald-400":"text-red-400")} title="OVR change this season">{p.seasonDev>0?"↗ +":"↘ "}{p.seasonDev}</span>:null}</div>
-            <div className="text-sm text-slate-400">{posLabel(p)} · {p.age}y · {p.foot==="B"?"Both":p.foot==="L"?"Left":"Right"} footed{club?` · ${club.name}`:" · Free agent"}</div>
+            <div className="text-sm text-slate-400">{posLabel(p)}{p.age?` · ${p.age}y`:""}{p.foot?` · ${p.foot==="B"?"Both":p.foot==="L"?"Left":"Right"} footed`:""}{club?` · ${club.name}`:p.retired?" · Retired":" · Free agent"}</div>
             <div className="text-xs text-slate-500 mt-0.5">Potential {scoutConf(p)>=0.85?p.pot:scoutedPot(p)+"~"} · Value {money(p.value)} · Wage {money(p.salary)}/yr{p.years>0?` · ${p.years}y left`:""}{p.fitness!=null&&p.fitness<100?` · ${p.fitness}% fit`:""}</div>
             <div className="text-xs text-slate-500 mt-0.5">{p.peakOvr?`Peak OVR ${p.peakOvr}`:""}{p.debutSeason!=null?` · Debut ${p.debutSeason}`:""}{p.hof?" · 🏅 Hall of Fame":""}{(p.awards||0)>0?` · ${p.awards}× POTS`:""}{(p.golden||0)>0?` · ${p.golden}× Golden Boot`:""}{(p.ballonDor||0)>0?` · 🏆 ${p.ballonDor}× Ballon d'Or`:""}{(p.caps||0)>0?` · ${p.caps} caps`:""}{(p.intlG||0)>0?` · ${p.intlG} intl goals`:""}</div>
             {(formTag(p.form)||moraleTag(p.morale))&&<div className="text-xs mt-0.5">{formTag(p.form)&&<span className={formTag(p.form).c}>{formTag(p.form).t}</span>}{formTag(p.form)&&moraleTag(p.morale)&&<span className="text-slate-600"> · </span>}{moraleTag(p.morale)&&<span className={moraleTag(p.morale).c}>{moraleTag(p.morale).t}</span>}</div>}
