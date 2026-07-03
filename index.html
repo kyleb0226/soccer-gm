@@ -1134,6 +1134,31 @@ function backfillHonours(G){
   (G.cups||[]).forEach(cup=>{ if(cup && cup.winner!=null){ const club=G.clubs[cup.winner]; if(club) add(club, cup.season!=null?cup.season:G.season, "cup", `${cupName(cup.country||0)} winners`); } });
   G.clubs.forEach(c=>{ if(Array.isArray(c.honours)) c.honours.sort((a,b)=>a.season-b.season); });
 }
+// One-time: reconstruct past doubles (and any missed trebles) from clubs' honours
+// — any season where a club won two/three of league / national cup / continental.
+function backfillDoubles(G){
+  if(G._doublesBackfilled) return;
+  G._doublesBackfilled = true;
+  G.doubles = G.doubles || []; G.trebles = G.trebles || [];
+  const haveD = new Set(G.doubles.map(d=>d.season+"/"+d.id));
+  const haveT = new Set(G.trebles.map(d=>d.season+"/"+d.id));
+  G.clubs.forEach(c=>{
+    const bySeason={};
+    (c.honours||[]).forEach(h=>{ if(h.type==="league"||h.type==="cup"||h.type==="continental"){ (bySeason[h.season]=bySeason[h.season]||new Set()).add(h.type); } });
+    Object.keys(bySeason).forEach(sk=>{
+      const set=bySeason[sk], s=+sk, key=s+"/"+c.id;
+      if(set.size>=3){ if(!haveT.has(key)){ G.trebles.unshift({season:s,id:c.id,abbr:c.abbr,country:c.country}); haveT.add(key); if(!(c.honours||[]).some(h=>h.season===s&&h.type==="treble")) addHonour(c,s,"treble",`🌟 The Treble`); } }
+      else if(set.size===2 && !haveD.has(key)){
+        const which = (set.has("league")&&set.has("cup")) ? `${divName(c.country||0,0)} & ${cupName(c.country||0)}`
+          : (set.has("league")&&set.has("continental")) ? `${divName(c.country||0,0)} & ${CONT_CUP_NAME}`
+          : `${cupName(c.country||0)} & ${CONT_CUP_NAME}`;
+        G.doubles.unshift({season:s,id:c.id,abbr:c.abbr,country:c.country,which}); haveD.add(key);
+        if(!(c.honours||[]).some(h=>h.season===s&&h.type==="double")) addHonour(c,s,"double",`🥈 The Double — ${which}`);
+      }
+    });
+  });
+  G.doubles.sort((a,b)=>b.season-a.season); G.trebles.sort((a,b)=>b.season-a.season);
+}
 
 /* ----------------------------- knockout core --------------------------- */
 // Resolve one round of any single-leg knockout cup, in place. `order` lists the
@@ -1842,12 +1867,18 @@ function startNextSeason(G){
     if(conc<=0 && homeGames===0){ conc = round((c.capacity/1000)*(c.div===0?0.009:0.006)*facilityGateMult(c)*0.85*19*10)/10; }
     const wages = wageBill(G, c.id);
     const merch = merchIncome(G, c, gate);
-    c.budget = round((c.budget + base + prize + gate + conc + merch.total - wages) * 10)/10;
+    const overhead = runningCosts(G, c, wages);
+    c.budget = round((c.budget + base + prize + gate + conc + merch.total - wages - overhead) * 10)/10;
     c.gatePerGame = homeGames>0 ? round(gate/homeGames*10)/10 : gate;
     if(!c.lastPnl) c.lastPnl={};
-    c.lastPnl.tv=base; c.lastPnl.prize=prize; c.lastPnl.gate=gate; c.lastPnl.conc=conc; c.lastPnl.merch=merch.total; c.lastPnl.merchMatch=merch.matchday; c.lastPnl.merchOnline=merch.online; c.lastPnl.gateGames=homeGames; c.lastPnl.wages=wages;
+    c.lastPnl.tv=base; c.lastPnl.prize=prize; c.lastPnl.gate=gate; c.lastPnl.conc=conc; c.lastPnl.merch=merch.total; c.lastPnl.merchMatch=merch.matchday; c.lastPnl.merchOnline=merch.online; c.lastPnl.gateGames=homeGames; c.lastPnl.wages=wages; c.lastPnl.overhead=overhead;
     // commercial income (shirt + sponsors + cup prizes) — merges into c.lastPnl below
     processCommercials(G, c);
+    // The board reinvests runaway surpluses (infrastructure, debt clearance, youth)
+    // so cash can't balloon into meaningless billions over a long save — budgets
+    // plateau instead of inflating without limit.
+    const reserveCap = c.div===0 ? 350 : 120;
+    if(c.budget > reserveCap) c.budget = round((reserveCap + (c.budget-reserveCap)*0.5)*10)/10;
     // let the user see what their season's performance earned in prize money
     if(c.userControlled){
       const cupP=(c.lastPnl&&c.lastPnl.cup)||0;
@@ -2671,6 +2702,7 @@ function migrate(G){
     capRetired(G);
     ensureCareer(G);
     backfillHonours(G);
+    backfillDoubles(G);
     G.version = SAVE_VERSION;
   }catch(e){}
   return G;
@@ -4474,6 +4506,18 @@ function merchIncome(G, c, gate){
   const online = round(clubPopularity(G,c) * 5.5 * storeTierOf(c).mult * 10)/10;  // online shop, year-round
   return { matchday, online, total: round((matchday+online)*10)/10 };
 }
+// Annual RUNNING COSTS every club has to cover on top of wages — backroom/medical/
+// academy staff (scale with the wage bill), stadium operations, facility upkeep and
+// admin. Well-run, well-supported clubs cover it comfortably; a club that slips down
+// the table (smaller gate, no prize money) can fall short and start losing money,
+// which is what forces sales / wage cuts. Also stops budgets ballooning forever.
+function runningCosts(G, c, wages){
+  const staff   = (wages||0) * 0.30;                                             // staff wages scale with the playing budget
+  const stadium = (stadiumCapacity(c)/1000) * (c.div===0?0.15:0.09) * facilityGateMult(c);
+  const facils  = (((c.facilityTier||0)) + ((c.academy&&c.academy.level)||1)) * 2;
+  const admin   = c.div===0 ? 10 : 4;
+  return round((staff + stadium + facils + admin)*10)/10;
+}
 
 /* ----------------------------- stadium naming rights --------------------- */
 // Sell the stadium name to a sponsor for season income (the ground gets
@@ -4678,7 +4722,7 @@ function capAIWageBill(G, club){
   const pnl = club.lastPnl||{};
   const income = (pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.conc||0)+(pnl.merch||0)+(pnl.shirt||0)+(pnl.sleeve||0)+(pnl.sponsor||0)+(pnl.cup||0);
   let guard=0;
-  while(wageBill(G,club.id) > income*0.78 && guard++<6){
+  while(wageBill(G,club.id) > income*0.62 && guard++<6){   // leave room for running costs on top of wages
     const squad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth);
     if(squad.length<=14) break;
     const worst = squad.slice().sort((a,b)=>(b.salary/(b.ovr||1))-(a.salary/(a.ovr||1)))[0];
@@ -4837,6 +4881,7 @@ function Finances({G, commit, tShow}){
               ["🏷️ Naming rights", pnl.naming||0, true],
               ["🏅 Cup prize money", pnl.cup||0, true],
               ["💸 Wages", pnl.wages, false],
+              ["🧾 Running costs", pnl.overhead||0, false],
             ].map(([label,val,pos])=>(
               <div key={label} className="flex justify-between">
                 <span className="text-slate-400">{label}</span>
@@ -4845,7 +4890,7 @@ function Finances({G, commit, tShow}){
             ))}
             <div className="border-t border-[#1d2940] pt-1 flex justify-between font-semibold">
               <span>Net</span>
-              <span className="tnum">{(()=>{const net=round(((pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.conc||0)+(pnl.merch||0)+(pnl.shirt||0)+(pnl.sleeve||0)+(pnl.sponsor||0)+(pnl.naming||0)+(pnl.cup||0)-(pnl.wages||0))*10)/10; return <span className={net>=0?"text-emerald-300":"text-red-400"}>{net>=0?"+":""}{money(net)}</span>; })()}</span>
+              <span className="tnum">{(()=>{const net=round(((pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.conc||0)+(pnl.merch||0)+(pnl.shirt||0)+(pnl.sleeve||0)+(pnl.sponsor||0)+(pnl.naming||0)+(pnl.cup||0)-(pnl.wages||0)-(pnl.overhead||0))*10)/10; return <span className={net>=0?"text-emerald-300":"text-red-400"}>{net>=0?"+":""}{money(net)}</span>; })()}</span>
             </div>
           </div>
         </Card>
