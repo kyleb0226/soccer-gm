@@ -437,6 +437,37 @@ function divRounds(clubIds){
   const secondLeg = firstLeg.map(games => games.map(g => ({home:g.away, away:g.home})));
   return firstLeg.concat(secondLeg);
 }
+// Season calendar: the 38 league rounds spread out with DEDICATED cup, continental
+// and international matchdays interleaved between them — so league, cup and cont
+// games fall on their own weeks instead of piling onto the same matchday. Each
+// special matchday has an empty league round (no league games that week). Sets
+// per-season matchday maps on G (with the old fixed constants kept as a fallback
+// for saves that predate this).
+//   [after N league rounds, type, roundName]   type: I=intl break, C=cup, K=continental
+const SEASON_SPECIALS = [
+  [2,"I"], [4,"K","G1"], [6,"C","R32"], [8,"K","G2"],
+  [10,"K","G3"], [12,"C","R16"], [14,"K","G4"], [16,"I"],
+  [18,"K","G5"], [21,"K","G6"], [24,"C","QF"], [26,"K","QF"],
+  [30,"C","SF"], [31,"K","SF"], [34,"C","Final"], [36,"K","Final"],
+];
+function buildCalendar(G){
+  const league = buildSchedule(G.clubs);
+  const schedule=[], cupMD={}, contMD={}, cupRev={}, contRev={}, intl=[];
+  let li=0, si=0;
+  for(let count=0; count<=league.length; count++){
+    while(si<SEASON_SPECIALS.length && SEASON_SPECIALS[si][0]===count){
+      const s=SEASON_SPECIALS[si]; const md=schedule.length+1;   // 1-based matchday number
+      schedule.push([]);   // empty league round on a cup/cont/intl week
+      if(s[1]==="C"){ cupMD[md]=s[2]; cupRev[s[2]]=md; }
+      else if(s[1]==="K"){ contMD[md]=s[2]; contRev[s[2]]=md; }
+      else if(s[1]==="I"){ intl.push(md); }
+      si++;
+    }
+    if(count<league.length) schedule.push(league[li++]);
+  }
+  G.schedule=schedule; G.cupMD=cupMD; G.contMD=contMD; G.cupMD_rev=cupRev; G.contMD_rev=contRev; G.intlMD=intl;
+  return schedule;
+}
 function buildSchedule(clubs){
   // Each of the (countries x divisions) leagues plays its own double round-robin;
   // all leagues share the same 38 matchdays, merged into one round per matchday.
@@ -1022,7 +1053,7 @@ function rotateXI(club, players, aggressive){
 // also falls on it — those are played on legs already tired from the league game.
 function isCongestedMatchday(G){
   const md=G.day+1;
-  return !!((CUP_MD[md] && G.cups) || (CONT_MD[md] && G.contCup && G.contCup.winner==null));
+  return !!(((G.cupMD||CUP_MD)[md] && G.cups) || ((G.contMD||CONT_MD)[md] && G.contCup && G.contCup.winner==null));
 }
 // Rotate every club's XI for the upcoming games: AI clubs always manage their
 // fitness; the user's club only if they've switched Auto-Rotate on (otherwise
@@ -1347,20 +1378,20 @@ function simRound(G){
   checkMilestones(G);   // career-landmark news for the user's players
   updateFormFamiliarity(G);   // clubs settle into their current formation
   processTransferRequests(G);   // unhappy players may agitate to leave
-  if([13,27].includes(G.day+1)) inSeasonDev(G);   // gradual in-season growth checkpoints
+  if([Math.round(G.schedule.length/3), Math.round(G.schedule.length*2/3)].includes(G.day+1)) inSeasonDev(G);   // gradual in-season growth checkpoints
   // youth 5v5 game time (drives prospect development)
   accrueYouth(G);
   // international break: nations play a qualifier/friendly
-  if(INTL_BREAK_MDS.includes(G.day+1) && intlOn(G)){ playIntlBreak(G); }
+  if((G.intlMD||INTL_BREAK_MDS).includes(G.day+1) && intlOn(G)){ playIntlBreak(G); }
   // MIDWEEK games — cup / continental rounds are played on legs still tired from
   // the league game (fitness only recovers AFTER, below), so double-game weeks
   // genuinely punish thin squads. Managers rotate harder here.
   const midweek = isCongestedMatchday(G);
   if(midweek) rotateForMatchday(G, true);
   // domestic cup round (all national cups) on its matchday
-  if(CUP_MD[G.day+1] && G.cups){ playCupRound(G); }
+  if((G.cupMD||CUP_MD)[G.day+1] && G.cups){ playCupRound(G); }
   // continental champions cup round on its matchday
-  if(CONT_MD[G.day+1] && G.contCup && G.contCup.winner==null){
+  if((G.contMD||CONT_MD)[G.day+1] && G.contCup && G.contCup.winner==null){
     playContCupRound(G);
     if(G.contCup.winner!=null){
       const wc=G.clubs[G.contCup.winner];
@@ -1849,7 +1880,7 @@ function startNextSeason(G){
   G.freeAgents = keepFA.slice(0,300);
   // fresh fixtures + cups + reset XIs
   G.season++; G.day=0; G.phase="regular";
-  G.schedule = buildSchedule(G.clubs);
+  buildCalendar(G);   // spread league / cup / continental onto their own matchdays
   initContCup(G);   // seed continental cup from LAST season's standings + national cups (still on G.cups)
   initCups(G);      // then reset the national cups for the new season
   G.clubs.forEach(c=>autoPickXI(c, G.players));
@@ -2607,7 +2638,7 @@ function newGame(userTeamId, opts={}){
     season: 2026, day: 0, phase: "regular", version: SAVE_VERSION,
     seed: (opts && opts.seed!=null && !Number.isNaN(opts.seed)) ? (opts.seed>>>0) : null,
     userTeamId, clubs, players,
-    schedule: buildSchedule(clubs),
+    schedule: [],
     freeAgents: [], transferOffers: [], news: [], champions: [], contChampions: [], awardHistory: [], hof: [],
     cups: null, contCup: null, lastMatch: null, lastMatches: [],
     finalsArchive: [], records: { players:{}, biggestWin:null }, trebles: [],
@@ -2617,6 +2648,7 @@ function newGame(userTeamId, opts={}){
       clubsManaged: [{ id:userTeamId, name:clubs[userTeamId].name, abbr:clubs[userTeamId].abbr, from:2026, to:null }] },
     settings: { injuries:true, jobSecurity:true, morale:true, internationals:true, watchMatches:false },
   };
+  buildCalendar(G);   // spread league / cup / continental onto their own matchdays
   // seed a free-agent pool sized for a bigger world
   for(let i=0;i<90;i++){ const p=makePlayer(pick(ALL_POS),[20,33],-4); p.teamId=null; G.freeAgents.push(p); }
   initCups(G);
@@ -3797,6 +3829,7 @@ const COMP_META = {
 };
 function userFixtureFeed(G){
   const uid = G.userTeamId, out = [];
+  const cupRev = G.cupMD_rev || CUP_MD_REV, contRev = G.contMD_rev || CONT_MD_REV;
   // league
   G.schedule.forEach((round, md)=>{
     const g = round.find(x=>x.home===uid||x.away===uid);
@@ -3813,14 +3846,14 @@ function userFixtureFeed(G){
       const ties = (cup.results||{})[r]; if(!ties) return;
       const t = ties.find(x=>x.home===uid||x.away===uid); if(!t) return;
       const home = t.home===uid;
-      out.push({ md:CUP_MD_REV[r], comp:"cup", home, oppName:(G.clubs[home?t.away:t.home]||{}).name||"?",
+      out.push({ md:cupRev[r], comp:"cup", home, oppName:(G.clubs[home?t.away:t.home]||{}).name||"?",
         played:true, gf:home?t.hs:t.as, ga:home?t.as:t.hs, round:r });
     });
     // all future rounds the user is still in (show as upcoming)
     if(cup.winner==null && (cup.alive||[]).includes(uid)){
       const doneRounds=new Set(Object.keys(cup.results||{}));
       CUP_ORDER.filter(r=>!doneRounds.has(r)).forEach(r=>{
-        out.push({ md:CUP_MD_REV[r], comp:"cup", home:null, oppName:"TBD", played:false, round:r });
+        out.push({ md:cupRev[r], comp:"cup", home:null, oppName:"TBD", played:false, round:r });
       });
     }
   }
@@ -3833,7 +3866,7 @@ function userFixtureFeed(G){
       (grp.results||[]).forEach(res=>{
         if(res.home!==uid && res.away!==uid) return;
         const home = res.home===uid; const mdName = ["G1","G2","G3","G4","G5","G6"][res.md];
-        out.push({ md:CONT_MD_REV[mdName], comp:"cont", home, oppName:(G.clubs[home?res.away:res.home]||{}).name||"?",
+        out.push({ md:contRev[mdName], comp:"cont", home, oppName:(G.clubs[home?res.away:res.home]||{}).name||"?",
           played:true, gf:home?res.hs:res.as, ga:home?res.as:res.hs, round:"Group" });
       });
     });
@@ -3842,7 +3875,7 @@ function userFixtureFeed(G){
       const doneMds=new Set((cc.groups||[]).flatMap(g=>(g.results||[]).map(r=>r.md)));
       [0,1,2,3,4,5].filter(m=>!doneMds.has(m)).forEach(m=>{
         const mdName=["G1","G2","G3","G4","G5","G6"][m];
-        out.push({ md:CONT_MD_REV[mdName], comp:"cont", home:null, oppName:"TBD", played:false, round:"Group MD"+(m+1) });
+        out.push({ md:contRev[mdName], comp:"cont", home:null, oppName:"TBD", played:false, round:"Group MD"+(m+1) });
       });
     }
     // played KO ties
@@ -3852,14 +3885,14 @@ function userFixtureFeed(G){
       const t=ties.find(x=>x.home===uid||x.away===uid); if(!t) return;
       const home=t.home===uid;
       const tgf=t.twoLeg?t.aggH:t.hs, tga=t.twoLeg?t.aggA:t.as;
-      out.push({ md:CONT_MD_REV[r], comp:"cont", home, oppName:(G.clubs[home?t.away:t.home]||{}).name||"?",
+      out.push({ md:contRev[r], comp:"cont", home, oppName:(G.clubs[home?t.away:t.home]||{}).name||"?",
         played:true, gf:home?tgf:tga, ga:home?tga:tgf, round:r, twoLeg:!!t.twoLeg });
     });
     // upcoming KO rounds
     if(alive && cc.phase==="ko"){
       const doneKO=new Set(Object.keys(cc.results||{}));
       CONT_ORDER.filter(r=>!doneKO.has(r)).forEach(r=>{
-        out.push({ md:CONT_MD_REV[r], comp:"cont", home:null, oppName:"TBD", played:false, round:r });
+        out.push({ md:contRev[r], comp:"cont", home:null, oppName:"TBD", played:false, round:r });
       });
     }
   }
