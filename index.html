@@ -1904,7 +1904,11 @@ function startNextSeason(G){
     // The board reinvests runaway surpluses (infrastructure, debt clearance, youth)
     // so cash can't balloon into meaningless billions over a long save — budgets
     // plateau instead of inflating without limit.
-    const reserveCap = c.div===0 ? 350 : 120;
+    // prestige raises the ceiling: serial winners can hold a real war chest and
+    // sustain a payroll smaller clubs can't — success is allowed to compound
+    // (bounded: honours accumulate slowly, and the cap still exists)
+    const prest = Math.min(((c.honours||[]).filter(h=>h.type==="league"||h.type==="continental").length), 30);
+    const reserveCap = (c.div===0 ? 350 : 120) + prest*10;
     if(c.budget > reserveCap) c.budget = round((reserveCap + (c.budget-reserveCap)*0.5)*10)/10;
     // let the user see what their season's performance earned in prize money
     if(c.userControlled){
@@ -1955,6 +1959,9 @@ function startNextSeason(G){
     const yth = Object.values(G.players).filter(p=>p.teamId===c.id && p.youth).sort((a,b)=>(b.pot||b.ovr)-(a.pot||a.ovr));
     yth.slice(7).forEach(p=>retireOrDrop(G, p));
   });
+  // the offseason transfer market: wealthy AI clubs convert prize money into
+  // squad strength (success compounds — less artificial parity across the leagues)
+  aiTransferWindow(G);
   // thin the free-agent pool (already aged above + the just-released surplus).
   // Anyone purged here who had a real career is preserved in G.retired so old
   // legends never silently disappear from the world.
@@ -2394,6 +2401,57 @@ function sellPlayer(G, p, fee, toClubId){
   autoPickXI(seller, G.players);
   logNews(G,"transfer",`⬅️ Sold ${p.pos} ${p.name} (${p.ovr}) for ${money(fee)}`, seller.id);
   ensureCareer(G); G.career.transferIncome = round((G.career.transferIncome+proceeds)*10)/10;
+}
+// The OFFSEASON TRANSFER MARKET between AI clubs. Without this, money never
+// converted into squad strength (AI squads only changed via youth + fire sales),
+// so every league regressed to near-total parity. Now wealthy, successful clubs
+// spend their prize money on real upgrades — success compounds and strong sides
+// can sustain a run — while selling clubs bank the fee and rebuild. Bounded so
+// it's dynasty-FRIENDLY, not dynasty-guaranteed: rich sellers usually keep their
+// star, fees scale with the seller's leverage, and squad caps still apply.
+function aiTransferWindow(G){
+  const deals = [];
+  const seniors = id => Object.values(G.players).filter(p=>p.teamId===id && !p.youth);
+  const buyers = G.clubs.filter(c=>!c.userControlled).sort((a,b)=>b.budget-a.budget);
+  buyers.forEach(c=>{
+    const nBuys = c.budget>250 ? rint(1,3) : c.budget>120 ? rint(0,2) : (chance(0.3)?1:0);
+    for(let i=0;i<nBuys;i++){
+      if(seniors(c.id).length>=28) break;
+      ensureXI(c, G.players);
+      const xi=(c.xi||[]).map(id=>G.players[id]).filter(Boolean);
+      const weak=xi.filter(p=>p.pos!=="GK").sort((a,b)=>a.ovr-b.ovr)[0];
+      if(!weak) break;
+      const cands = Object.values(G.players).filter(p=>
+        p.teamId!=null && p.teamId!==c.id && p.teamId!==G.userTeamId && !p.youth && !isLoaned(p)
+        && (p.positions||[p.pos]).includes(weak.pos) && p.ovr>=weak.ovr+3 && p.age<=31
+        && (p.value*1.1)<=c.budget*0.45);
+      if(!cands.length) continue;
+      cands.sort((a,b)=>b.ovr-a.ovr);
+      const target = cands[rint(0, Math.min(4, cands.length-1))];
+      const seller = G.clubs[target.teamId];
+      if(seniors(seller.id).length<=17) continue;                    // seller too thin to sell
+      const sellerBest = seniors(seller.id).sort((a,b)=>b.ovr-a.ovr)[0];
+      const isStar = sellerBest && sellerBest.id===target.id;
+      if(isStar && seller.budget>150 && chance(0.6)) continue;       // rich clubs usually keep their star
+      const fee = round(target.value*(isStar?1.45:1.1)*10)/10;
+      if(fee>c.budget*0.45) continue;
+      c.budget = round((c.budget-fee)*10)/10;
+      seller.budget = round((seller.budget+fee)*10)/10;
+      target.teamId = c.id; target.years = rint(2,4); target.salary = wageFor(target);
+      target.wantsOut = false; target.listed = false; target.expiredSince = null;
+      autoPickXI(c, G.players); autoPickXI(seller, G.players);
+      deals.push({ fee, name:target.name, pos:target.pos, ovr:target.ovr, from:seller.abbr, to:c.abbr, country:c.country });
+    }
+  });
+  // transfer-window headlines: the biggest moves worldwide + the biggest in the user's country
+  deals.sort((a,b)=>b.fee-a.fee);
+  const uc = (G.clubs[G.userTeamId]||{}).country||0;
+  const shown = new Set();
+  deals.slice(0,3).forEach(d=>{ shown.add(d); });
+  const localBig = deals.find(d=>d.country===uc && !shown.has(d));
+  if(localBig) shown.add(localBig);
+  [...shown].forEach(d=>logNews(G,"transfer",`💰 Transfer window: ${d.pos} ${d.name} (${d.ovr}) joins ${d.to} from ${d.from} for ${money(d.fee)}`, G.userTeamId));
+  return deals.length;
 }
 // AI clubs occasionally bid for your best/surplus players.
 function generateTransferOffers(G){
@@ -4767,7 +4825,10 @@ function capAIWageBill(G, club){
   const pnl = club.lastPnl||{};
   const income = (pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.conc||0)+(pnl.merch||0)+(pnl.shirt||0)+(pnl.sleeve||0)+(pnl.sponsor||0)+(pnl.cup||0);
   let guard=0;
-  while(wageBill(G,club.id) > income*0.62 && guard++<6){   // leave room for running costs on top of wages
+  // prestigious clubs sustain a payroll smaller clubs can't (their commercial
+  // income is bigger too, so this compounds) — up to +15% wage headroom
+  const prest = Math.min(((club.honours||[]).filter(h=>h.type==="league"||h.type==="continental").length), 30);
+  while(wageBill(G,club.id) > income*(0.62 + prest*0.005) && guard++<6){   // leave room for running costs on top of wages
     const squad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth);
     if(squad.length<=14) break;
     const worst = squad.slice().sort((a,b)=>(b.salary/(b.ovr||1))-(a.salary/(a.ovr||1)))[0];
