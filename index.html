@@ -207,17 +207,32 @@ const CLUBS_PER_COUNTRY = TEAMS_PER_DIV * NUM_DIVS;   // 40
 // The world: four footballing nations, each with a two-tier pyramid (top flight +
 // second tier, 20 clubs each). Club names are generated deterministically from each
 // country's city + suffix lists, so the splash can list them before a game exists.
+// Each nation has an IDENTITY, not just a name:
+//   wealth — TV/prize money multiplier (Albion is the richest league, Padania the poorest;
+//            richer leagues pay bigger wages and hoover up talent, like real football)
+//   styleG — the league's goals environment (Rhineland is end-to-end, Padania tactical/low-scoring)
+//   tilt   — attribute flavor for players raised in that nation (sums ~0 so no nation is
+//            simply "better" — Iberians are technical, Albion players fast & physical, etc.)
+//   blurb  — one-liner shown in the UI
 const COUNTRIES = [
   { name:"Albion", flag:"🦁", divNames:["Premier League","Championship"],
+    wealth:1.20, styleG:1.02, tilt:{pac:3,sho:0,pas:-2,dri:-2,def:-1,phy:2},
+    blurb:"The richest league in the world — fast, physical, direct.",
     nicks:["United","City","Rovers","Athletic","FC","Wanderers","Albion","Town"],
     cities:["Kingsbridge","Harrowgate","Ashford","Blackmoor","Crownhill","Easton","Fenwick","Granville","Hollowell","Ironbridge","Jarrow","Kelvindale","Langmere","Marsden","Northwood","Oakvale","Pemberton","Ravenscar","Stonegate","Thornbury","Underwood","Valeford","Westcliff","Yarmouth","Aldermoor","Brackenhill","Carrowmore","Dunfield","Ellerby","Foxholme","Gosforth","Hartcliffe","Inglewood","Kestonbury","Lynmouth","Millbrook","Norbeck","Otterburn","Pinevale","Quarrydale"] },
   { name:"Iberia", flag:"🐂", divNames:["Primera Liga","Segunda"],
+    wealth:0.95, styleG:1.00, tilt:{pac:0,sho:0,pas:3,dri:3,def:-3,phy:-3},
+    blurb:"Technique first — the home of touch, passing and flair.",
     nicks:["CF","Atlético","Real","Deportivo","Unión","Sporting","CD","Racing"],
     cities:["Alcazar","Bellamar","Castroreal","Duranta","Espinar","Fuendel","Granela","Huescar","Ibarreta","Jaravia","Lorquin","Maralba","Navedo","Olivar","Portela","Quesada","Robledo","Salbera","Toralba","Ventosa","Almazan","Briones","Cardena","Donalva","Estrela","Figuera","Gandul","Herrera","Illescas","Jumilla","Lebrija","Montoro","Niebla","Ondara","Pedroche","Requena","Sarine","Tordera","Utrera","Velez"] },
   { name:"Rhineland", flag:"🦅", divNames:["Bundesliga","2. Liga"],
+    wealth:1.05, styleG:1.06, tilt:{pac:1,sho:2,pas:0,dri:-2,def:-3,phy:2},
+    blurb:"End-to-end football — the highest-scoring league on the continent.",
     nicks:["SV","FC","Borussia","Eintracht","SC","VfB","Union","1.FC"],
     cities:["Adlersberg","Brandhof","Konigstadt","Drachenfels","Eisenburg","Falkenau","Grunwald","Hochberg","Immenstadt","Jagersee","Kaltenbach","Lindenau","Morgental","Nordheim","Oberfeld","Pforzen","Quellburg","Rheinau","Steinbach","Tannberg","Ulmenhof","Vogtland","Wartburg","Adlerhorst","Birkenau","Donaueck","Erlenbach","Fichtenau","Goldbach","Hugelheim","Isarstein","Karlsfeld","Lichtenau","Moosburg","Neustein","Ostertal","Reutberg","Sonnberg","Talheim","Waldkirch"] },
   { name:"Padania", flag:"🐺", divNames:["Serie A","Serie B"],
+    wealth:0.90, styleG:0.93, tilt:{pac:-2,sho:-2,pas:1,dri:0,def:3,phy:1},
+    blurb:"Tactical, defensive, unforgiving — goals are earned here.",
     nicks:["Calcio","AC","FC","US","Inter","Sporting","Pro","Nuova"],
     cities:["Monterosso","Valsanta","Castelmare","Borgovecchio","Rivalta","Sangiorgio","Belmonte","Corteluna","Daltavilla","Fiorenzo","Grottamare","Luccara","Marenzio","Norcello","Oltrera","Portovico","Quintano","Roccabruna","Saleruno","Terralba","Valverde","Albareto","Brentano","Caldera","Donnara","Empolino","Fontevia","Genzano","Imperola","Lavagno","Montalto","Novaria","Ortano","Pietrasanta","Riomaggio","Sestola","Trevisana","Urbiano","Vercella","Zenello"] },
 ];
@@ -323,13 +338,16 @@ function playerValue(p){
   if(p.age >= 30) v *= clamp(1 - (p.age - 29) * 0.07, 0.35, 1);
   return Math.max(0.2, round(v*10)/10);
 }
-function makePlayer(pos, ageRange, meanAdj=0){
+function makePlayer(pos, ageRange, meanAdj=0, natHint=null){
   const age = rint(ageRange[0], ageRange[1]);
   const tilt = POS_TILT[pos] || POS_TILT.CM;
   const base = 52 + meanAdj;
+  // players raised at a club are mostly from that club's nation (natHint); the rest
+  // of the world produces a mix — so leagues develop a national playing identity
+  const nat = (natHint!=null && chance(0.75)) ? natHint : rint(0, NUM_COUNTRIES-1);
   const p = {
     id: uid(), name: genName(), age, pos, positions: rollPositions(pos), isGK: pos==="GK",
-    nat: rint(0, NUM_COUNTRIES-1), debutSeason: null,
+    nat, debutSeason: null,
     foot: chance(0.75) ? "R" : (chance(0.85) ? "L" : "B"), num: rint(1,40),
     pac: rateGauss(base+tilt.pac,11), sho: rateGauss(base+tilt.sho,12),
     pas: rateGauss(base+tilt.pas,11), dri: rateGauss(base+tilt.dri,11),
@@ -341,6 +359,10 @@ function makePlayer(pos, ageRange, meanAdj=0){
                                        // dominating both the very top and very bottom of rankings.
     stats: emptyStats(), career: emptyStats(), careerComp: {}, history: [],
   };
+  // national playing style: a small attribute flavor by nationality (tilts sum ~0,
+  // so no nation is outright better — Iberians technical, Albion fast & physical…)
+  const natTilt = (COUNTRIES[nat]||{}).tilt;
+  if(natTilt){ for(const k in natTilt){ p[k] = clamp(p[k] + natTilt[k], 20, 99); } }
   // ~7% of players are standouts — a fat top end so elite talent stands apart
   if(chance(0.07)){
     const b = rint(7,16);
@@ -382,7 +404,7 @@ function buildSquad(clubId, div){
   // a balanced senior squad: 3 GK, 7 DEF, 8 MID, 5 ATT = 23
   const plan = ["GK","GK","GK","RB","LB","CB","CB","CB","RWB","LWB",
     "CDM","CM","CM","CAM","RM","LM","CM","RW","LW","ST","ST","CAM","RW"];
-  plan.forEach(pos => { const ageR = chance(0.25)?[18,22]:[22,33]; players.push(makePlayer(pos, ageR, meanAdj)); });
+  plan.forEach(pos => { const ageR = chance(0.25)?[18,22]:[22,33]; players.push(makePlayer(pos, ageR, meanAdj, countryOfIdx(clubId))); });
   players.forEach(p => p.teamId = clubId);
   return players;
 }
@@ -627,8 +649,10 @@ function simMatch(home, away, players, opts={}){
   const aDef = (0.55*n01(uA.DEF) + 0.30*n01(uA.MID) + 0.15*n01(uA.ATT));
   const tH = tacticMods(home), tA = tacticMods(away);
   const homeAdv = neutral ? 1 : 1.12, awayAdv = neutral ? 1 : 0.92;
-  let xgH = clamp(1.32 * Math.exp(1.7*(hAtt - aDef)) * tH.xgFor * tA.xgAgainst * homeAdv, 0.15, 5.5);
-  let xgA = clamp(1.32 * Math.exp(1.7*(aAtt - hDef)) * tA.xgFor * tH.xgAgainst * awayAdv, 0.15, 5.5);
+  // each league has its own goals environment (Rhineland end-to-end, Padania tactical)
+  const styleG = !opts.cup ? (((COUNTRIES[home.country||0]||{}).styleG) || 1) : 1;
+  let xgH = clamp(1.32 * Math.exp(1.7*(hAtt - aDef)) * tH.xgFor * tA.xgAgainst * homeAdv * styleG, 0.15, 5.5);
+  let xgA = clamp(1.32 * Math.exp(1.7*(aAtt - hDef)) * tA.xgFor * tH.xgAgainst * awayAdv * styleG, 0.15, 5.5);
   // derby: the form book goes out the window — compress the gap toward the mean
   if(home.rivalId===away.id){ const m=(xgH+xgA)/2; xgH=xgH*0.82+m*0.18; xgA=xgA*0.82+m*0.18; }
   // Clinical finishing traits genuinely create a few extra goals for the TEAM (not
@@ -1549,8 +1573,9 @@ function livePlayHalf(G, M){
   const aAtt=(0.55*n01(uA.ATT)+0.30*n01(uA.MID)+0.15*n01(uA.DEF));
   const aDef=(0.55*n01(uA.DEF)+0.30*n01(uA.MID)+0.15*n01(uA.ATT));
   const tH=tacticMods(home), tA=tacticMods(away);
-  let xgH=clamp(1.32*Math.exp(1.7*(hAtt-aDef))*tH.xgFor*tA.xgAgainst*1.12,0.15,5.5)/2;
-  let xgA=clamp(1.32*Math.exp(1.7*(aAtt-hDef))*tA.xgFor*tH.xgAgainst*0.92,0.15,5.5)/2;
+  const styleG=((COUNTRIES[home.country||0]||{}).styleG)||1;   // watched games are always league fixtures
+  let xgH=clamp(1.32*Math.exp(1.7*(hAtt-aDef))*tH.xgFor*tA.xgAgainst*1.12*styleG,0.15,5.5)/2;
+  let xgA=clamp(1.32*Math.exp(1.7*(aAtt-hDef))*tA.xgFor*tH.xgAgainst*0.92*styleG,0.15,5.5)/2;
   // Clinical finishers/creators genuinely create a few extra goals for the team, on
   // top of getting disproportionate credit when a goal happens (SCORE_W/CREATE_W below).
   if(MORALE_ON){
@@ -1855,8 +1880,10 @@ function startNextSeason(G){
   // finances: settle the season P&L for every club.
   G.clubs.forEach(c=>{
     const pos = leaguePos(G,c);
-    const base = c.div===0 ? 30 : 13;
-    const prize = leaguePrize(c.div, pos);
+    // richer leagues have richer TV deals & prize pots (Albion > Rhineland > Iberia > Padania)
+    const wealth = (COUNTRIES[c.country||0]||{}).wealth || 1;
+    const base = round((c.div===0 ? 30 : 13) * wealth * 10)/10;
+    const prize = round(leaguePrize(c.div, pos) * wealth * 10)/10;
     // Gate is now accrued per home match across the season (league + cup + UCL),
     // flexing with attendance/price. AI clubs are simmed the same way, so any club
     // with no recorded gate (shouldn't happen) falls back to a full-season estimate.
@@ -1885,6 +1912,23 @@ function startNextSeason(G){
       const ord = n => n+(n===1?"st":n===2?"nd":n===3?"rd":"th");
       const place = pos===1 ? "as CHAMPIONS 🏆" : `${ord(pos)} in the ${divName(c.country||0,c.div)}`;
       logNews(G,"finance",`💰 Prize money: ${money(prize)} for finishing ${place}${cupP>0?` + ${money(cupP)} from cup/continental runs`:""}`, c.id);
+      // Soft FFP: the league expects spending to stay in line with income. One bad
+      // year is a warning; back-to-back years operating at a loss cost you board
+      // confidence (the board answers for the club's sustainability, i.e. you).
+      const pn=c.lastPnl||{};
+      const income=(pn.tv||0)+(pn.prize||0)+(pn.gate||0)+(pn.conc||0)+(pn.merch||0)+(pn.shirt||0)+(pn.sleeve||0)+(pn.sponsor||0)+(pn.cup||0)+(pn.naming||0);
+      const spend=(pn.wages||0)+(pn.overhead||0);
+      if(income>0 && spend>income){
+        G._ffpStrikes=(G._ffpStrikes||0)+1;
+        if(G._ffpStrikes>=2 && jobSecurityOn(G)){
+          G.boardConfidence=clamp((G.boardConfidence==null?60:G.boardConfidence)-10,0,100);
+          logNews(G,"finance",`🚨 FFP: a second straight season in the red (${money(round((spend-income)*10)/10)} loss) — the board is losing patience with the club's finances.`, c.id);
+        } else {
+          logNews(G,"finance",`⚠️ FFP warning: the club spent ${money(round(spend*10)/10)} against ${money(round(income*10)/10)} income this season. Cut wages or grow revenue.`, c.id);
+        }
+      } else {
+        G._ffpStrikes=0;
+      }
     }
     // reset the season matchday accruals for the new campaign
     c.seasonGate=0; c.seasonConcession=0; c.gateLog=[];
@@ -2062,7 +2106,7 @@ function youthIntake(G, club){
   const intake = [];
   for(let i=0;i<n;i++){
     const pos = pick(ALL_POS);
-    const p = makePlayer(pos, [16,18], -10 + lvl*1.5);
+    const p = makePlayer(pos, [16,18], -10 + lvl*1.5, club.country||0);
     // give academy prospects real headroom (better academies -> higher ceilings)
     p.pot = clamp(Math.max(p.pot, p.ovr + rint(8, 14+lvl*3)), p.ovr, 99);
     p.teamId = club.id; p.salary = Math.min(p.salary, 0.4); p.years = rint(2,4); p.youth = true;
@@ -2078,7 +2122,7 @@ function youthIntake(G, club){
 function refillSquad(G, club){
   let squad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth);
   const adj = club.div===0 ? -2 : -8;
-  const add = pos => { const p=makePlayer(pos,[18,29],adj); p.teamId=club.id; p.years=rint(1,3); G.players[p.id]=p; squad.push(p); };
+  const add = pos => { const p=makePlayer(pos,[18,29],adj,club.country||0); p.teamId=club.id; p.years=rint(1,3); G.players[p.id]=p; squad.push(p); };
   const has = arr => squad.filter(p=>arr.includes(p.pos)).length;
   const DEF=["RB","LB","CB","RWB","LWB"], MID=["CDM","CM","CAM","RM","LM"], ATT=["RW","LW","ST"];
   let guard=0;
@@ -3506,6 +3550,7 @@ function LeagueTable({G}){
           <button key={i} onClick={()=>setDiv(i)} className={"px-3 py-1.5 rounded text-sm "+(div===i?"bg-emerald-500 text-slate-900 font-semibold":"bg-[#16213a] text-slate-300")}>{d}</button>
         ))}
       </div>
+      <div className="text-xs text-slate-400 px-1">{COUNTRIES[country].blurb} <span className="text-slate-600">· TV money ×{(COUNTRIES[country].wealth||1).toFixed(2)}</span></div>
       <Card className="p-0 overflow-x-auto">
         <table className="w-full text-sm tnum">
           <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]">
