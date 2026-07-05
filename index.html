@@ -320,10 +320,16 @@ function wageDemand(p){
   let s = wageFor(p);
   const room = (p.pot||p.ovr) - p.ovr;
   if(p.age<=24 && room>4) s *= 1.15;                  // wonderkid ambition
-  const st = p.stats, app = (st && st.App) || 0;
+  // form premium from the most recent campaign. At the season rollover stats are
+  // already archived + reset, so fall back to the last history row — without this
+  // the premium NEVER applied to renewals (they all happen post-reset).
+  let st = p.stats;
+  if(!(st && st.App>=8) && Array.isArray(p.history) && p.history.length) st = p.history[p.history.length-1];
+  const app = (st && st.App) || 0;
   if(app>=8){                                         // reward a strong campaign
-    const perG = (st.G + 0.5*st.A) / app;
-    s *= clamp(1 + perG*0.30 + (avgRating(st)-6.6)*0.10, 0.85, 1.7);
+    const perG = ((st.G||0) + 0.5*(st.A||0)) / app;
+    const r = st.ratingN ? st.ratingSum/st.ratingN : (st.r || 6.6);
+    s *= clamp(1 + perG*0.30 + (r-6.6)*0.10, 0.85, 1.7);
   }
   return clamp(round(s*10)/10, 0.2, 40);
 }
@@ -467,7 +473,7 @@ function divRounds(clubIds){
 // for saves that predate this).
 //   [after N league rounds, type, roundName]   type: I=intl break, C=cup, K=continental
 const SEASON_SPECIALS = [
-  [2,"I"], [4,"K","G1"], [6,"C","R32"], [8,"K","G2"],
+  [2,"I"], [3,"C","PR"], [4,"K","G1"], [6,"C","R32"], [8,"K","G2"],
   [10,"K","G3"], [12,"C","R16"], [14,"K","G4"], [16,"I"],
   [18,"K","G5"], [21,"K","G6"], [24,"C","QF"], [26,"K","QF"],
   [30,"C","SF"], [31,"K","SF"], [34,"C","Final"], [36,"K","Final"],
@@ -887,7 +893,7 @@ function applyMatch(home, away, hs, as, players, box, opts){
       p.stats.YC++; addComp(p,"YC"); p.ycCount = (p.ycCount||0) + 1;
       if(p.ycCount >= YC_BAN_THRESHOLD){ p.ycCount = 0; banPlayer(G, p, 1, "yellow-card accumulation"); }
     }
-    if(chance(0.01)){ p.stats.RC++; addComp(p,"RC"); const m = rint(2,3); injure(p, rint(2,4)); banPlayer(G, p, m, "a red card"); }
+    if(chance(0.01)){ p.stats.RC++; addComp(p,"RC"); banPlayer(G, p, rint(2,3), "a red card"); }
     if(MORALE_ON && hasTrait(p,"injuryProne") && G && (!G.settings || G.settings.injuries!==false) && chance(0.03) && !isInjured(p)) injure(p, rint(1,5));
   }
   [H,A].forEach(side => side.forEach(({p,slot})=>card(p,slot)));
@@ -1150,9 +1156,13 @@ function backfillHonours(G){
   (G.champions||[]).forEach(c=>{ const club=G.clubs[c.id]; if(club) add(club, c.season, "league", `${divName(c.country!=null?c.country:(club.country||0),0)} champions`); });
   // continental titles
   (G.contChampions||[]).forEach(c=>{ const club=G.clubs[c.id]; if(club) add(club, c.season, "continental", `${CONT_CUP_NAME} winners`); });
-  // domestic cup winners from archived finals (winner = higher score; match by abbr)
+  // domestic cup winners from archived finals (winner = higher score). Match by
+  // full club NAME first — abbreviations can collide across countries (e.g. two
+  // "CAS" clubs) and would credit the wrong club; abbr is only the fallback.
   (G.finalsArchive||[]).forEach(m=>{ if(!m||!m.comp || m.comp===CONT_CUP_NAME || !/cup/i.test(m.comp)) return;
-    const winAbbr = (m.hs>=m.as) ? m.home : m.away; const club=G.clubs.find(c=>c.abbr===winAbbr);
+    const winName = (m.hs>=m.as) ? m.homeName : m.awayName;
+    const winAbbr = (m.hs>=m.as) ? m.home : m.away;
+    const club = (winName && G.clubs.find(c=>c.name===winName)) || G.clubs.find(c=>c.abbr===winAbbr);
     if(club) add(club, m.season, "cup", `${m.comp} winners`); });
   // current-season cup winners already decided but not yet rolled over
   (G.cups||[]).forEach(cup=>{ if(cup && cup.winner!=null){ const club=G.clubs[cup.winner]; if(club) add(club, cup.season!=null?cup.season:G.season, "cup", `${cupName(cup.country||0)} winners`); } });
@@ -1183,6 +1193,54 @@ function backfillDoubles(G){
   });
   G.doubles.sort((a,b)=>b.season-a.season); G.trebles.sort((a,b)=>b.season-a.season);
 }
+
+/* ------------------------- club competition runs ----------------------- */
+// A club's run in a knockout cup (domestic or the continental KO phase):
+// furthest round reached + its match record there. round is "W" for the winner.
+// Returns null if the club played no cup match (shouldn't happen from now on —
+// every club enters its national cup — but old seasons/saves may lack data).
+function tallyTie(t, clubId, acc){
+  if(t.home!==clubId && t.away!==clubId) return false;
+  const isHome = t.home===clubId;
+  if(t.twoLeg){
+    // leg 1 at t.home, leg 2 at t.away
+    const legs = [[isHome?t.l1h:t.l1a, isHome?t.l1a:t.l1h],
+                  [isHome?t.l2a:t.l2h, isHome?t.l2h:t.l2a]];
+    legs.forEach(([f,a])=>{ acc.pld++; acc.gf+=f; acc.ga+=a; if(f>a)acc.w++; else if(f<a)acc.l++; else acc.d++; });
+  } else {
+    const f=isHome?t.hs:t.as, a=isHome?t.as:t.hs;
+    acc.pld++; acc.gf+=f; acc.ga+=a; if(f>a)acc.w++; else if(f<a)acc.l++; else acc.d++;
+  }
+  return true;
+}
+function clubCupRun(G, cup, clubId){
+  if(!cup || !cup.results) return null;
+  const acc = { pld:0, w:0, d:0, l:0, gf:0, ga:0 };
+  let exit = null;
+  ["PR","R32","R16","QF","SF","Final"].forEach(r=>{
+    (cup.results[r]||[]).forEach(t=>{ if(tallyTie(t, clubId, acc)) exit = r; });
+  });
+  if(!acc.pld) return null;
+  return { round: cup.winner===clubId ? "W" : exit, ...acc };
+}
+// A club's continental campaign: group-stage record + knockout rounds.
+function clubContRun(G, cc, clubId){
+  if(!cc || !(cc.qualifiers||[]).includes(clubId)) return null;
+  const acc = { pld:0, w:0, d:0, l:0, gf:0, ga:0 };
+  let stage = "Group";
+  (cc.groups||[]).forEach(grp=>{ (grp.results||[]).forEach(res=>{
+    if(res.home!==clubId && res.away!==clubId) return;
+    const isHome=res.home===clubId, f=isHome?res.hs:res.as, a=isHome?res.as:res.hs;
+    acc.pld++; acc.gf+=f; acc.ga+=a; if(f>a)acc.w++; else if(f<a)acc.l++; else acc.d++;
+  });});
+  ["QF","SF","Final"].forEach(r=>{
+    ((cc.results||{})[r]||[]).forEach(t=>{ if(tallyTie(t, clubId, acc)) stage = r; });
+  });
+  if(!acc.pld) return null;
+  return { round: cc.winner===clubId ? "W" : stage, ...acc };
+}
+// UI label for how far a run got.
+const CUP_RUN_LABEL = { PR:"Prelim", R32:"Rd of 32", R16:"Rd of 16", QF:"Quarters", SF:"Semis", Final:"Runner-up", W:"WINNERS", Group:"Groups" };
 
 /* ----------------------------- knockout core --------------------------- */
 // Resolve one round of any single-leg knockout cup, in place. `order` lists the
@@ -1240,30 +1298,45 @@ function playKnockoutRound(G, cup, order){
     cup.alive = winners;
   } else {
     cup.alive = winners;
+    if(cup.byes && cup.byes.length){
+      // preliminary-round winners join the bye clubs in a fresh R32 draw
+      const pool = winners.concat(cup.byes);
+      for(let i=pool.length-1;i>0;i--){ const j=Math.floor(_rng()*(i+1)); [pool[i],pool[j]]=[pool[j],pool[i]]; }
+      cup.alive = pool; cup.byes = null;
+    }
     cup.round = order[order.indexOf(cup.round)+1] || order[order.length-1];
   }
 }
 
 /* ----------------------------- domestic cups --------------------------- */
-// One 32-team knockout PER COUNTRY: that nation's 20 top-flight clubs + its 12
-// best second-tier clubs. Rounds resolve on set matchdays; a draw is decided by
-// a strength coin-flip. G.cups is an array indexed by country.
+// One knockout PER COUNTRY that EVERY club in the country enters (all 40): the
+// 16 lowest-ranked second-tier clubs play a Preliminary Round for 8 spots; the
+// 20 top-flight clubs + the 4 strongest second-tier clubs get byes straight to
+// the Round of 32. Rounds resolve on set matchdays. G.cups is indexed by country.
 const CUP_NAME = "National Cup";
-const CUP_ORDER = ["R32","R16","QF","SF","Final"];
+const CUP_ORDER = ["PR","R32","R16","QF","SF","Final"];
 const CUP_MD = { 6:"R32", 13:"R16", 21:"QF", 29:"SF", 36:"Final" };
 const CUP_MD_REV = { R32:6, R16:13, QF:21, SF:29, Final:36 };          // round → matchday (1-based)
 const CONT_MD_REV = { G1:4, G2:8, G3:12, G4:16, G5:20, G6:24, QF:27, SF:31, Final:35 };
 const INTL_BREAK_MDS = [10, 26];   // matchdays when international friendlies/qualifiers run
 function cupName(country){ return (COUNTRIES[country]||COUNTRIES[0]).name + " Cup"; }
-function initCountryCup(G, country){
+function initCountryCup(G, country, withPrelim=true){
+  const shuffle = arr => { for(let i=arr.length-1;i>0;i--){ const j=Math.floor(_rng()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]]; } return arr; };
   const top = G.clubs.filter(c=>c.country===country && c.div===0).map(c=>c.id);
-  const second = G.clubs.filter(c=>c.country===country && c.div===1)
-    .sort((a,b)=>clubStrength(b,G.players)-clubStrength(a,G.players)).slice(0,12).map(c=>c.id);
-  let pool = top.concat(second);
-  for(let i=pool.length-1;i>0;i--){ const j=Math.floor(_rng()*(i+1)); [pool[i],pool[j]]=[pool[j],pool[i]]; }
-  return { country, alive: pool, round: "R32", history: [], winner: null, runnerUp: null, results: {} };
+  const secondAll = G.clubs.filter(c=>c.country===country && c.div===1)
+    .sort((a,b)=>clubStrength(b,G.players)-clubStrength(a,G.players)).map(c=>c.id);
+  if(!withPrelim){
+    // legacy 32-team format — only used when the season's calendar has no PR matchday
+    const pool = shuffle(top.concat(secondAll.slice(0,12)));
+    return { country, alive: pool, round: "R32", history: [], winner: null, runnerUp: null, results: {} };
+  }
+  // ALL 40 clubs enter. 16 lowest-ranked second-tier clubs play the Preliminary
+  // Round (8 ties); the 20 top-flight + 4 best second-tier clubs get R32 byes.
+  const byes = top.concat(secondAll.slice(0,4));
+  const prelim = shuffle(secondAll.slice(4));
+  return { country, alive: prelim, byes, round: "PR", history: [], winner: null, runnerUp: null, results: {} };
 }
-function initCups(G){ G.cups = COUNTRIES.map((_,ci)=>initCountryCup(G, ci)); }
+function initCups(G, withPrelim=true){ G.cups = COUNTRIES.map((_,ci)=>initCountryCup(G, ci, withPrelim)); }
 function playCupRound(G){
   (G.cups||[]).forEach(cup=>{
     const wasOver = cup.winner!=null;
@@ -1624,7 +1697,7 @@ function liveFinish(G, M){
     const Al=ids.filter(id=>M.sideOf[id]==="A").map(id=>({p:players[id],slot:M.slotOf[id]})).filter(o=>o.p);
     accrueSecondaryStats(Hl, M.shH||M.hs, M.shA||M.as, M.as, bumpL);
     accrueSecondaryStats(Al, M.shA||M.as, M.shH||M.hs, M.hs, bumpL); }
-  ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id]; const yc=clamp(0.10+(BAND[slot]<=2?0.06:0)-n01(p.phy)*0.04,0.04,0.22); if(chance(yc)){ p.stats.YC++; addCompL(p,"YC"); p.ycCount=(p.ycCount||0)+1; if(p.ycCount>=YC_BAN_THRESHOLD){ p.ycCount=0; banPlayer(G,p,1,"yellow-card accumulation"); } } if(chance(0.01)){ p.stats.RC++; addCompL(p,"RC"); injure(p,rint(2,4)); banPlayer(G,p,rint(2,3),"a red card"); } });
+  ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id]; const yc=clamp(0.10+(BAND[slot]<=2?0.06:0)-n01(p.phy)*0.04,0.04,0.22); if(chance(yc)){ p.stats.YC++; addCompL(p,"YC"); p.ycCount=(p.ycCount||0)+1; if(p.ycCount>=YC_BAN_THRESHOLD){ p.ycCount=0; banPlayer(G,p,1,"yellow-card accumulation"); } } if(chance(0.01)){ p.stats.RC++; addCompL(p,"RC"); banPlayer(G,p,rint(2,3),"a red card"); } });
   let motm=null, motmR=0;
   ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id], side=M.sideOf[id]; const scored=side==="H"?M.hs:M.as, conceded=side==="H"?M.as:M.hs; const result=scored>conceded?1:scored<conceded?-1:0; let r=6.3+(result>0?0.4:result<0?-0.3:0)+0.95*(M.gBy[id]||0)+0.55*(M.aBy[id]||0); if(slot==="GK")r+=clamp(Math.min(p.stats.Sv||0,6)*0.03,0,0.4); if(conceded===0&&(BAND[slot]<=2||slot==="GK"))r+=0.6; if(conceded>=3&&(BAND[slot]<=2||slot==="GK"))r-=0.5; r=clamp(r+gauss(0,0.35),4,10); p.stats.ratingSum+=r; p.stats.ratingN++; addCompL(p,"ratingSum",r); addCompL(p,"ratingN"); p.form=p.form==null?r:+(p.form*0.7+r*0.3).toFixed(2); if(r>motmR){motmR=r;motm=p;} });
   if(motm){ motm.stats.MOTM++; addCompL(motm,"MOTM"); }
@@ -1795,10 +1868,13 @@ function startNextSeason(G){
     p.stats = emptyStats(); p.compStats = {}; p._loanArchiveTeam = null;
     p.susp = 0; p.ycCount = 0; p.fitness = 100; p.seasonDev = 0; p.injury = null;   // bans/yellows clear; preseason rest heals everyone; reset in-season growth tally
   });
-  // record club season history + reset table
+  // record club season history + reset table. Cup / continental runs are captured
+  // here too (G.cups / G.contCup still hold the finished season at this point).
   G.clubs.forEach(c=>{
     c.history = c.history || [];
-    c.history.push({ season:G.season, div:c.div, pos:leaguePos(G,c), w:c.w, d:c.d, l:c.l, gf:c.gf, ga:c.ga, pts:c.pts });
+    const cup = (G.cups||[]).find(x=>x.country===(c.country||0));
+    c.history.push({ season:G.season, div:c.div, pos:leaguePos(G,c), w:c.w, d:c.d, l:c.l, gf:c.gf, ga:c.ga, pts:c.pts,
+      cup: clubCupRun(G, cup, c.id), cont: clubContRun(G, G.contCup, c.id) });
     if(c.history.length>40) c.history = c.history.slice(-40);
   });
   // age + develop everyone (rostered players AND the existing free-agent pool, once each —
@@ -1972,6 +2048,7 @@ function startNextSeason(G){
   keepFA.sort((a,b)=>b.ovr-a.ovr);
   keepFA.slice(300).forEach(p=>retireOrDrop(G, p));
   G.freeAgents = keepFA.slice(0,300);
+  capRetired(G);   // re-cap AFTER the purge above floods the archive (the earlier cap ran before it)
   // fresh fixtures + cups + reset XIs
   G.season++; G.day=0; G.phase="regular";
   buildCalendar(G);   // spread league / cup / continental onto their own matchdays
@@ -2068,17 +2145,17 @@ function releaseToFA(G, p){
 // the user — is preserved in G.retired instead of being deleted, so old players
 // and legends never silently disappear. Only true filler is dropped, to keep
 // the save bounded over decades.
-// A retired player only needs enough to be browsed in the Retired list and to be
-// coaxed out of retirement — NOT full per-match/per-competition history. Strip the
-// heavy stuff (history, compStats, careerComp, live match state); keep identity,
-// attributes (for un-retirement + dev), career totals, and honours. This keeps the
-// retired archive from ballooning the save (it was ~half the file).
+// A retired player keeps enough to be browsed, clicked open (full profile with
+// season-by-season history + per-competition career splits), and coaxed out of
+// retirement. Live match state (stats/compStats/form/fitness/...) is stripped;
+// the archive is capped at ~400 players so the save stays bounded regardless.
 const RETIRED_KEEP = new Set(["id","name","pos","positions","nat","foot","num","age","ovr","pot","peakOvr",
-  "pac","sho","pas","dri","def","phy","gk","isGK","career","golden","awards","ballonDor","caps","intlG","hof",
+  "pac","sho","pas","dri","def","phy","gk","isGK","career","careerComp","history","golden","awards","ballonDor","caps","intlG","hof",
   "traits","retired","retiredAge","retiredSeason","debutSeason","value"]);
 function slimRetired(p){
   const s = {};
   for(const k in p){ if(RETIRED_KEEP.has(k)) s[k] = p[k]; }
+  if(Array.isArray(s.history) && s.history.length>22) s.history = s.history.slice(-22);
   return s;
 }
 // Keep the retired archive bounded: the most decorated ~400 by a simple legacy
@@ -2760,7 +2837,7 @@ function migrate(G){
     Object.values(G.players||{}).forEach(p=>{ if(p.fitness==null) p.fitness=100; });
     // multi-country migration: default legacy clubs to country 0, build per-country cups
     G.clubs.forEach(c=>{ if(c.country==null) c.country=0; });
-    if(!Array.isArray(G.cups)){ if(G.cup){ G.cup.country=0; G.cups=[G.cup]; } else initCups(G); delete G.cup; }
+    if(!Array.isArray(G.cups)){ if(G.cup){ G.cup.country=0; G.cups=[G.cup]; } else initCups(G, !!(G.cupMD_rev&&G.cupMD_rev.PR)); delete G.cup; }   // no PR round if this season's calendar has no PR matchday
     G.cups.forEach(cup=>{ if(cup.country==null) cup.country=0; if(cup.runnerUp===undefined) cup.runnerUp=null; });
     if(!G.contCup || !G.contCup.phase) initContCup(G);   // (re)build into the group-stage format
     // backfill newer per-player stat fields (shots, key passes, xG, saves, bans)
@@ -2798,9 +2875,9 @@ function migrate(G){
     if(!Array.isArray(G.doubles)) G.doubles=[];
     if(G.intlCycle===undefined) G.intlCycle=null;
     if(!G.retired || typeof G.retired!=="object") G.retired={};
-    // slim + cap the retired archive (older saves stored full player data here,
-    // which bloated the file and made every save/compress slow)
-    for(const id in G.retired){ const r=G.retired[id]; if(r && (r.history||r.compStats||r.careerComp)) G.retired[id]=slimRetired(r); }
+    // slim + cap the retired archive (older saves stored full live-player state
+    // here, which bloated the file; history/careerComp are kept for the profile)
+    for(const id in G.retired){ const r=G.retired[id]; if(r && (r.stats||r.compStats)) G.retired[id]=slimRetired(r); }
     capRetired(G);
     ensureCareer(G);
     backfillHonours(G);
@@ -3225,7 +3302,7 @@ function Hub({G, commit, tShow, setTab}){
         const cc=G.contCup;
         const qualified=(cc.qualifiers||[]).includes(user.id);
         const alive=(cc.alive||[]).includes(user.id);
-        const roundLabel={ R16:"Round of 16", QF:"Quarter-finals", SF:"Semi-finals", Final:"Final" };
+        const roundLabel={ G1:"Group MD1", G2:"Group MD2", G3:"Group MD3", G4:"Group MD4", G5:"Group MD5", G6:"Group MD6", R16:"Round of 16", QF:"Quarter-finals", SF:"Semi-finals", Final:"Final" };
         let status;
         if(cc.winner===user.id) status=<span className="text-amber-300 font-semibold">Champions of {CONT_CUP_NAME}! 🏆</span>;
         else if(!qualified) status=<span className="text-slate-400">Not qualified this season — finish top 3 or win the {cupName(user.country||0)}.</span>;
@@ -3691,6 +3768,7 @@ function ClubBrowser({G, commit, tShow}){
   const [country, setCountry] = useState(user.country||0);
   const [div, setDiv] = useState(user.div);
   const [clubId, setClubId] = useState(G.userTeamId);
+  const [recComp, setRecComp] = useState("all");   // overall-record filter: all | L | C | CC
   const clubs = G.clubs.filter(c=>(c.country||0)===country && c.div===div)
     .slice().sort((a,b)=>b.pts-a.pts||(b.gf-b.ga)-(a.gf-a.ga));
   const club = G.clubs[clubId] || user;
@@ -3760,6 +3838,88 @@ function ClubBrowser({G, commit, tShow}){
               {!hon.length && <div className="text-slate-500">No trophies in the cabinet yet.</div>}
             </div>
           </Card>
+        );
+      })()}
+
+      {/* season-by-season team history + overall record */}
+      {(()=>{
+        const liveCup = (G.cups||[]).find(x=>x.country===(club.country||0));
+        const curCup = clubCupRun(G, liveCup, club.id);
+        const curCont = clubContRun(G, G.contCup, club.id);
+        // still alive in a live cup → show progress, not a final result
+        const cupCell = (run, cup) => {
+          if(!run) return <span className="text-slate-600">—</span>;
+          const alive = cup && cup.winner==null && ((cup.alive||[]).includes(club.id)||(cup.byes||[]).includes(club.id));
+          const label = alive ? "in "+(cup.round==="PR"?"Prelim":cup.round) : (CUP_RUN_LABEL[run.round]||run.round);
+          const win = run.round==="W" && !alive;
+          return <span className={win?"text-amber-300 font-semibold":run.round==="Final"&&!alive?"text-slate-200":"text-slate-300"}>{win&&"🏆 "}{label}<span className="text-slate-500 text-[10px]"> ({run.w}-{run.d}-{run.l})</span></span>;
+        };
+        // current season (in progress or just finished, not yet archived)
+        const curRow = club.pld>0 || curCup || curCont ? {
+          season:G.season, div:club.div, pos:leaguePos(G,club), w:club.w, d:club.d, l:club.l, gf:club.gf, ga:club.ga, pts:club.pts,
+          cup:curCup, cont:curCont, live:true,
+        } : null;
+        const rows = (curRow?[curRow]:[]).concat((club.history||[]).slice().reverse());
+        // overall record per competition (archived seasons + the live one)
+        const sum = pickFn => rows.reduce((a,r)=>{ const x=pickFn(r); if(x){ a.pld+=(x.pld!=null?x.pld:(x.w+x.d+x.l)); a.w+=x.w; a.d+=x.d; a.l+=x.l; a.gf+=x.gf; a.ga+=x.ga; } return a; },{pld:0,w:0,d:0,l:0,gf:0,ga:0});
+        const recs = { L:sum(r=>r), C:sum(r=>r.cup), CC:sum(r=>r.cont) };
+        recs.all = ["L","C","CC"].reduce((a,k)=>{ const x=recs[k]; a.pld+=x.pld; a.w+=x.w; a.d+=x.d; a.l+=x.l; a.gf+=x.gf; a.ga+=x.ga; return a; },{pld:0,w:0,d:0,l:0,gf:0,ga:0});
+        const R = recs[recComp]||recs.all;
+        const winPct = R.pld ? Math.round(R.w/R.pld*100) : 0;
+        const ord = n => n+(n===1?"st":n===2?"nd":n===3?"rd":"th");
+        return (
+          <>
+          <Card>
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+              <div className="font-semibold">📊 Overall record <span className="text-slate-500 text-xs font-normal">({rows.length} season{rows.length!==1?"s":""} on record)</span></div>
+              <div className="flex gap-1 flex-wrap">
+                {[["all","All"],["L","⚽ League"],["C","🏆 Cup"],["CC","🌍 Champs Cup"]].map(([k,l])=>(
+                  <button key={k} onClick={()=>setRecComp(k)} className={"px-2 py-1 rounded text-xs font-semibold "+(recComp===k?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300")}>{l}</button>
+                ))}
+              </div>
+            </div>
+            <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 text-center text-sm">
+              <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-400">Played</div><div className="font-bold tnum">{R.pld}</div></div>
+              <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-400">W-D-L</div><div className="font-bold tnum">{R.w}-{R.d}-{R.l}</div></div>
+              <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-400">Win %</div><div className="font-bold tnum">{winPct}%</div></div>
+              <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-400">GF</div><div className="font-bold tnum">{R.gf}</div></div>
+              <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-400">GA</div><div className="font-bold tnum">{R.ga}</div></div>
+              <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-400">GD</div><div className="font-bold tnum">{R.gf-R.ga>=0?"+":""}{R.gf-R.ga}</div></div>
+            </div>
+            {recComp==="C" && !recs.C.pld && <div className="text-xs text-slate-500 mt-2">Cup match records started being tracked from this update — older seasons show only league data.</div>}
+          </Card>
+          {rows.length>0 && (
+            <Card className="p-0 overflow-x-auto">
+              <div className="p-3 font-semibold">📜 {club.name} — season by season</div>
+              <table className="w-full text-xs tnum">
+                <thead><tr className="text-slate-500 border-b border-[#1d2940]">
+                  <th className="text-left p-2">Yr</th><th className="text-left p-2">League</th><th className="p-2">Pos</th>
+                  <th className="p-2">W-D-L</th><th className="p-2">GF-GA</th><th className="p-2">Pts</th>
+                  <th className="text-left p-2">🏆 Cup</th><th className="text-left p-2">🌍 Champs Cup</th>
+                </tr></thead>
+                <tbody>
+                  {rows.map((h,i)=>{
+                    const champ = h.pos===1 && h.div===0 && !h.live;
+                    const promo = h.div===1 && h.pos<=3 && !h.live;
+                    return (
+                      <tr key={i} className={"border-b border-[#15203a] "+(h.live?"bg-emerald-500/5":"")}>
+                        <td className="p-2 text-left">{h.season}{h.live&&<span className="text-emerald-400 text-[9px] ml-1">now</span>}</td>
+                        <td className="p-2 text-left whitespace-nowrap text-slate-300">{divName(club.country||0,h.div)}{h.div===1&&<span className="text-slate-600 text-[9px]">²</span>}</td>
+                        <td className={"p-2 text-center font-semibold "+(champ?"text-amber-300":promo?"text-emerald-300":"")}>{champ&&"👑"}{ord(h.pos)}</td>
+                        <td className="p-2 text-center">{h.w}-{h.d}-{h.l}</td>
+                        <td className="p-2 text-center text-slate-400">{h.gf}-{h.ga}</td>
+                        <td className="p-2 text-center font-semibold">{h.pts}</td>
+                        <td className="p-2 text-left">{cupCell(h.cup, h.live?liveCup:null)}</td>
+                        <td className="p-2 text-left">{h.cont ? cupCell(h.cont, h.live?G.contCup:null) : <span className="text-slate-600">—</span>}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {(club.history||[]).some(h=>!h.cup) && <div className="px-3 py-2 text-[11px] text-slate-500">Seasons played before this update show “—” for cup runs — they weren't recorded back then.</div>}
+            </Card>
+          )}
+          </>
         );
       })()}
 
@@ -3865,7 +4025,8 @@ function Leaders({G}){
 function CupView({G}){
   const [country, setCountry] = useState(G.clubs[G.userTeamId].country||0);
   const cup = (G.cups||[]).find(c=>c.country===country);
-  const order = ["R32","R16","QF","SF","Final"];
+  const order = ["PR","R32","R16","QF","SF","Final"];
+  const roundLabel = r => r==="PR"?"Preliminary Round":r==="Final"?"Final":r;
   return (
     <div className="space-y-3">
       <div className="flex gap-2 flex-wrap">
@@ -3876,14 +4037,17 @@ function CupView({G}){
       {!cup ? <Card>No cup in progress.</Card> : <>
       <Card>
         <div className="font-semibold">{cupName(country)}</div>
-        <div className="text-sm text-slate-400">{cup.winner!=null? `Winner: ${G.clubs[cup.winner].name} 🏆` : `Current round: ${cup.round} · ${cup.alive.length} clubs left`}</div>
+        <div className="text-sm text-slate-400">{cup.winner!=null? `Winner: ${G.clubs[cup.winner].name} 🏆`
+          : cup.round==="PR" ? `Preliminary round · ${cup.alive.length} second-tier clubs play for ${Math.floor(cup.alive.length/2)} spots · ${(cup.byes||[]).length} clubs have byes into the Rd of 32`
+          : `Current round: ${cup.round} · ${cup.alive.length} clubs left`}</div>
+        {(((cup.results||{}).PR) || (cup.byes&&cup.byes.length>0)) && <div className="text-xs text-slate-500 mt-0.5">All {CLUBS_PER_COUNTRY} clubs in the country enter — the lowest-ranked 16 start in the preliminary round.</div>}
       </Card>
       {order.map(r=>{
         const ties = (cup.results||{})[r];
         if(!ties) return null;
         return (
           <Card key={r}>
-            <div className="font-semibold mb-2">{r==="Final"?"Final":r}</div>
+            <div className="font-semibold mb-2">{roundLabel(r)}</div>
             <div className="space-y-1 text-sm tnum">
               {ties.map((t,i)=>(
                 <div key={i} className={"flex items-center gap-2 "+((t.home===G.userTeamId||t.away===G.userTeamId)?"text-emerald-300":"")}>
@@ -4045,10 +4209,12 @@ function userFixtureFeed(G){
       out.push({ md:cupRev[r], comp:"cup", home, oppName:(G.clubs[home?t.away:t.home]||{}).name||"?",
         played:true, gf:home?t.hs:t.as, ga:home?t.as:t.hs, round:r });
     });
-    // all future rounds the user is still in (show as upcoming)
-    if(cup.winner==null && (cup.alive||[]).includes(uid)){
+    // all future rounds the user is still in (show as upcoming). A club with a
+    // bye into the R32 is still "in" the cup during the preliminary round.
+    if(cup.winner==null && ((cup.alive||[]).includes(uid) || (cup.byes||[]).includes(uid))){
       const doneRounds=new Set(Object.keys(cup.results||{}));
-      CUP_ORDER.filter(r=>!doneRounds.has(r)).forEach(r=>{
+      const hasBye=(cup.byes||[]).includes(uid);
+      CUP_ORDER.filter(r=>!doneRounds.has(r) && cupRev[r]!=null && !(r==="PR"&&hasBye)).forEach(r=>{
         out.push({ md:cupRev[r], comp:"cup", home:null, oppName:"TBD", played:false, round:r });
       });
     }
@@ -4333,7 +4499,11 @@ function FreeAgents({G, commit, tShow}){
     if(sq>=30) return tShow("Senior squad is full (30).");
     p.retired = false; p.ovr = Math.max(p.ovr-3, 40); p.fitness = 60; p.years = 1;
     p.salary = Math.max(wageFor(p)*0.7, 0.1); p.teamId = G.userTeamId; p.morale = 70;
-    p.stats = emptyStats(); p.compStats = {};
+    p.stats = emptyStats(); p.compStats = {}; p.form = 6.7;
+    if(!p.career) p.career = emptyStats();
+    if(!Array.isArray(p.history)) p.history = [];
+    if(p.susp==null) p.susp = 0; if(p.ycCount==null) p.ycCount = 0;
+    p.value = playerValue(p);
     G.players[p.id] = p;
     delete G.retired[p.id];
     logNews(G,"transfer",`🔙 ${p.name} comes out of retirement to join ${G.clubs[G.userTeamId].name}`, G.userTeamId);
@@ -4694,7 +4864,7 @@ function cupPrizeMoney(G, clubId){
     if(cup.winner===clubId){ total+=8; return; }               // winners
     if(cup.runnerUp===clubId){ total+=3.5; return; }            // beaten finalists
     const r=Object.keys(cup.results||{}).filter(k=>(cup.results[k]||[]).some(t=>t.home===clubId||t.away===clubId)).pop();
-    total += ({R32:0.2,R16:0.5,QF:1.2,SF:2.5}[r]||0);          // paid by furthest round reached
+    total += ({PR:0.1,R32:0.2,R16:0.5,QF:1.2,SF:2.5}[r]||0);   // paid by furthest round reached
   });
   if(G.contCup){
     const cc=G.contCup;
@@ -5782,8 +5952,11 @@ function PlayerModal({p, G, onClose}){
   const attrs = p.pos==="GK"
     ? [["GK",p.gk],["Phy",p.phy],["Pas",p.pas],["Pac",p.pac]]
     : [["Pac",p.pac],["Sho",p.sho],["Pas",p.pas],["Dri",p.dri],["Def",p.def],["Phy",p.phy]];
-  const st = p.stats, ca = p.career;
+  // retired/archived players carry no live season state — default everything
+  const st = p.stats || emptyStats(), ca = p.career || emptyStats();
   const [lg, setLg] = useState("all");
+  const [comp, setComp] = useState("all");     // this-season competition filter
+  const [ccomp, setCcomp] = useState("all");   // career competition filter
   const hist = p.history || [];
   // Distinct leagues this player has appeared in, newest-first by last season seen.
   const lkey = h => h.country!=null ? h.country+"-"+h.div : "_";
@@ -5802,7 +5975,9 @@ function PlayerModal({p, G, onClose}){
           <div className="flex-1">
             <div className="font-bold text-lg">{nat&&<span className="mr-1" title={nat.name}>{nat.flag}</span>}{p.name}{scoutConf(p)<0.85&&<span className="text-[10px] text-slate-500 font-normal ml-2">scouted ~{Math.round(scoutConf(p)*100)}%</span>}{p.seasonDev?<span className={"text-[11px] font-semibold ml-2 "+(p.seasonDev>0?"text-emerald-400":"text-red-400")} title="OVR change this season">{p.seasonDev>0?"↗ +":"↘ "}{p.seasonDev}</span>:null}</div>
             <div className="text-sm text-slate-400">{posLabel(p)}{p.age?` · ${p.age}y`:""}{p.foot?` · ${p.foot==="B"?"Both":p.foot==="L"?"Left":"Right"} footed`:""}{club?` · ${club.name}`:p.retired?" · Retired":" · Free agent"}</div>
-            <div className="text-xs text-slate-500 mt-0.5">Potential {scoutConf(p)>=0.85?p.pot:scoutedPot(p)+"~"} · Value {money(p.value)} · Wage {money(p.salary)}/yr{p.years>0?` · ${p.years}y left`:""}{p.fitness!=null&&p.fitness<100?` · ${p.fitness}% fit`:""}</div>
+            {p.retired
+              ? <div className="text-xs text-slate-500 mt-0.5">Retired{p.retiredSeason!=null?` in ${p.retiredSeason}`:""}{p.retiredAge!=null?` at ${p.retiredAge}`:""}{p.debutSeason!=null&&p.retiredSeason!=null?` · ${p.retiredSeason-p.debutSeason} season career`:""}</div>
+              : <div className="text-xs text-slate-500 mt-0.5">Potential {scoutConf(p)>=0.85?p.pot:scoutedPot(p)+"~"} · Value {money(p.value)} · Wage {money(p.salary)}/yr{p.years>0?` · ${p.years}y left`:""}{p.fitness!=null&&p.fitness<100?` · ${p.fitness}% fit`:""}</div>}
             <div className="text-xs text-slate-500 mt-0.5">{p.peakOvr?`Peak OVR ${p.peakOvr}`:""}{p.debutSeason!=null?` · Debut ${p.debutSeason}`:""}{p.hof?" · 🏅 Hall of Fame":""}{(p.awards||0)>0?` · ${p.awards}× POTS`:""}{(p.golden||0)>0?` · ${p.golden}× Golden Boot`:""}{(p.ballonDor||0)>0?` · 🏆 ${p.ballonDor}× Ballon d'Or`:""}{(p.caps||0)>0?` · ${p.caps} caps`:""}{(p.intlG||0)>0?` · ${p.intlG} intl goals`:""}</div>
             {(formTag(p.form)||moraleTag(p.morale))&&<div className="text-xs mt-0.5">{formTag(p.form)&&<span className={formTag(p.form).c}>{formTag(p.form).t}</span>}{formTag(p.form)&&moraleTag(p.morale)&&<span className="text-slate-600"> · </span>}{moraleTag(p.morale)&&<span className={moraleTag(p.morale).c}>{moraleTag(p.morale).t}</span>}</div>}
             {(p.release!=null||p.sellOn)&&<div className="text-xs mt-0.5 text-slate-500">{p.release!=null?`Release ${money(p.release)}`:""}{p.release!=null&&p.sellOn?" · ":""}{p.sellOn?`${p.sellOn.pct}% sell-on → ${(G.clubs[p.sellOn.toClubId]||{}).abbr||"?"}`:""}</div>}
@@ -5822,20 +5997,19 @@ function PlayerModal({p, G, onClose}){
               </div>
             ))}
           </div>
-          <div>
+          {!p.retired && <div>
             <div className="text-sm font-semibold mb-1">This season</div>
             {/* per-competition filter for this season's stats */}
             {(()=>{
               const cs = p.compStats||{};
               const comps = [["all","All",st],["L","⚽ League",cs.L],["C","🏆 Cup",cs.C],["CC","🌍 Champs Cup",cs.CC]].filter(([k,_,s])=>k==="all"||(s&&s.App>0));
-              const [comp, setComp] = useState("all");
               const dispSt = comp==="all"?st:(cs[comp]||emptyStats());
               return <>
                 {comps.length>1 && <div className="flex gap-1 flex-wrap mb-2">{comps.map(([k,l])=><button key={k} onClick={()=>setComp(k)} className={"px-2 py-1 rounded text-xs font-semibold "+(comp===k?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300")}>{l}</button>)}</div>}
                 <StatLine s={dispSt} gk={p.pos==="GK"} />
               </>;
             })()}
-          </div>
+          </div>}
           {leagues.length>1 && (
             <div className="flex gap-1 flex-wrap">
               <button onClick={()=>setLg("all")} className={"px-2 py-1 rounded text-xs font-semibold "+(lg==="all"?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300")}>All</button>
@@ -5849,7 +6023,6 @@ function PlayerModal({p, G, onClose}){
             {(()=>{
               const cc = p.careerComp||{};
               const comps = [["all","All",ca],["L","⚽ League",cc.L],["C","🏆 Cup",cc.C],["CC","🌍 Champs Cup",cc.CC]].filter(([k,_,s])=>k==="all"||(s&&s.App>0));
-              const [ccomp, setCcomp] = useState("all");
               const dispCa = ccomp==="all" ? careerShown : (cc[ccomp]||emptyStats());
               const cLbl = ccomp==="all" ? careerLabel : ("All-time — "+(comps.find(c=>c[0]===ccomp)||[])[1]);
               return <>
