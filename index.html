@@ -1345,6 +1345,8 @@ function playCupRound(G){
       const wc = G.clubs[cup.winner];
       logNews(G, "cup", `🏆 ${wc.name} win the ${cupName(cup.country)}!`, wc.id);
       addHonour(wc, G.season, "cup", `${cupName(cup.country)} winners`);
+      G.cupChampions = G.cupChampions || [];
+      G.cupChampions.unshift({ season:G.season, id:wc.id, abbr:wc.abbr, country:cup.country });
     }
   });
 }
@@ -1877,6 +1879,18 @@ function startNextSeason(G){
       cup: clubCupRun(G, cup, c.id), cont: clubContRun(G, G.contCup, c.id) });
     if(c.history.length>40) c.history = c.history.slice(-40);
   });
+  // the manager's own season log (mirrors the club history row he just produced)
+  {
+    const uc = G.clubs[G.userTeamId];
+    if(uc){
+      const uh = uc.history[uc.history.length-1];
+      G.career.seasons = G.career.seasons || [];
+      G.career.seasons.unshift({ season:G.season, club:uc.abbr, name:uc.name, country:uc.country||0, div:uh.div, pos:uh.pos, pts:uh.pts, w:uh.w, d:uh.d, l:uh.l,
+        cup:uh.cup?uh.cup.round:null, cont:uh.cont?uh.cont.round:null,
+        trophies:(uc.honours||[]).filter(x=>x.season===G.season && ["league","cup","continental"].includes(x.type)).length });
+      if(G.career.seasons.length>60) G.career.seasons.length = 60;
+    }
+  }
   // age + develop everyone (rostered players AND the existing free-agent pool, once each —
   // do FAs here BEFORE expiries add new names so the just-released don't age twice)
   Object.values(G.players).forEach(p=>developPlayer(p));
@@ -1941,6 +1955,7 @@ function startNextSeason(G){
     if(p.age>=34 && (p.ovr<62 || p.age>=39) && chance(p.age>=37?0.55:0.22)){
       if(p.teamId!=null){ logNews(G,"retire",`${p.name} (${p.pos}) retires at ${p.age}`, p.teamId); }
       p.retired = true; p.retiredAge = p.age; p.retiredSeason = G.season; p.teamId = null; p.years = 0; p.salary = 0;
+      refreshHofEntry(G, p);
       G.retired[p.id] = slimRetired(p);
       delete G.players[p.id];
     }
@@ -2180,6 +2195,7 @@ function retireOrDrop(G, p){
     if(p.retiredAge==null) p.retiredAge = p.age;
     if(p.retiredSeason==null) p.retiredSeason = G.season;
     p.teamId = null; p.years = 0; p.salary = 0;
+    refreshHofEntry(G, p);
     G.retired[p.id] = slimRetired(p);
   }
   // else: genuinely anonymous filler — let it go.
@@ -2264,10 +2280,23 @@ function hallOfFameCheck(G){
   G.hof = G.hof || [];
   Object.values(G.players).forEach(p=>{
     if(p.age>=34 && (p.career.G>=120 || (p.peakOvr>=88 && p.career.App>=250) || (p.awards||0)>=2)){
-      if(!p.hof){ p.hof=true; G.hof.unshift({ id:p.id, name:p.name, pos:p.pos, G:p.career.G, A:p.career.A, App:p.career.App, peak:p.peakOvr, season:G.season }); }
+      if(!p.hof){ p.hof=true; G.hof.unshift({ id:p.id, name:p.name, pos:p.pos, nat:p.nat, G:p.career.G, A:p.career.A, App:p.career.App, peak:p.peakOvr, season:G.season,
+        // self-contained snapshot so the HOF profile can show season-by-season +
+        // per-competition splits forever, even if the player is purged later
+        hist:(p.history||[]).slice(-22), cc:p.careerComp||null }); }
     }
   });
   if(G.hof.length>120) G.hof.length=120;
+}
+// Refresh a Hall of Famer's snapshot with his FINAL history (induction happens
+// while he's still playing, so seasons after induction would otherwise be missing).
+function refreshHofEntry(G, p){
+  if(!p || !p.hof || !Array.isArray(G.hof)) return;
+  const e = G.hof.find(h=>h.id===p.id);
+  if(!e) return;
+  if(Array.isArray(p.history) && p.history.length) e.hist = p.history.slice(-22);
+  if(p.careerComp && Object.keys(p.careerComp).length) e.cc = p.careerComp;
+  if(e.nat==null && p.nat!=null) e.nat = p.nat;
 }
 
 /* ----------------------------- internationals -------------------------- */
@@ -2882,6 +2911,37 @@ function migrate(G){
     ensureCareer(G);
     backfillHonours(G);
     backfillDoubles(G);
+    // HOF entries predating the snapshot feature: copy history/comp splits from
+    // the live player or retired archive while they still exist (idempotent)
+    (G.hof||[]).forEach(h=>{
+      if(Array.isArray(h.hist) && h.hist.length) return;
+      const src = (G.players||{})[h.id] || (G.retired||{})[h.id];
+      if(!src) return;
+      if(Array.isArray(src.history) && src.history.length) h.hist = src.history.slice(-22);
+      if(src.careerComp && !h.cc) h.cc = src.careerComp;
+      if(h.nat==null && src.nat!=null) h.nat = src.nat;
+    });
+    // one-time: reconstruct the national-cup roll of honour from club honours
+    if(!Array.isArray(G.cupChampions)){
+      G.cupChampions = [];
+      G.clubs.forEach(c=>(c.honours||[]).forEach(h=>{ if(h.type==="cup") G.cupChampions.push({ season:h.season, id:c.id, abbr:c.abbr, country:c.country||0 }); }));
+      G.cupChampions.sort((a,b)=>b.season-a.season);
+    }
+    // one-time: reconstruct the manager's season log from the clubs he managed
+    if(G.career && !Array.isArray(G.career.seasons)){
+      G.career.seasons = [];
+      (G.career.clubsManaged||[]).forEach(span=>{
+        const c = G.clubs[span.id]; if(!c) return;
+        (c.history||[]).forEach(hh=>{
+          if(hh.season>=span.from && (span.to==null || hh.season<span.to)){
+            G.career.seasons.push({ season:hh.season, club:c.abbr, name:c.name, country:c.country||0, div:hh.div, pos:hh.pos, pts:hh.pts, w:hh.w, d:hh.d, l:hh.l,
+              cup:hh.cup?hh.cup.round:null, cont:hh.cont?hh.cont.round:null,
+              trophies:(c.honours||[]).filter(x=>x.season===hh.season && ["league","cup","continental"].includes(x.type)).length });
+          }
+        });
+      });
+      G.career.seasons.sort((a,b)=>b.season-a.season);
+    }
     G.version = SAVE_VERSION;
   }catch(e){}
   return G;
@@ -3032,7 +3092,7 @@ function App(){
 
 /* ----------------------------- shared bits ----------------------------- */
 function Badge({children}){ return <span className="px-2 py-1 rounded bg-[#16213a] text-slate-200 tnum text-xs">{children}</span>; }
-function Card({children, className=""}){ return <div className={"bg-[#101a30] border border-[#1d2940] rounded-xl p-4 "+className}>{children}</div>; }
+function Card({children, className="", onClick}){ return <div onClick={onClick} className={"bg-[#101a30] border border-[#1d2940] rounded-xl p-4 "+className}>{children}</div>; }
 function OvrPill({v}){
   const c = v>=80?"bg-emerald-500 text-slate-900":v>=70?"bg-lime-500 text-slate-900":v>=60?"bg-yellow-500 text-slate-900":v>=50?"bg-orange-500 text-slate-900":"bg-slate-600 text-slate-100";
   return <span className={"inline-block w-8 text-center rounded font-bold text-xs py-0.5 "+c}>{v}</span>;
@@ -4062,6 +4122,14 @@ function CupView({G}){
           </Card>
         );
       })}
+      {(()=>{ const rc=(G.cupChampions||[]).filter(c=>c.country===country); return rc.length>0 && (
+        <Card>
+          <div className="font-semibold mb-2">🏆 {cupName(country)} — roll of honour</div>
+          <div className="space-y-1 text-sm max-h-56 overflow-y-auto">
+            {rc.map((c,i)=>(<div key={i} className="flex gap-2"><span className="text-slate-500 tnum w-12">{c.season}</span><span className={c.id===G.userTeamId?"text-amber-300 font-semibold":"text-slate-200"}>{G.clubs[c.id]?G.clubs[c.id].name:c.abbr}</span></div>))}
+          </div>
+        </Card>
+      ); })()}
       </>}
     </div>
   );
@@ -5607,6 +5675,31 @@ function ManagerLegacyCard({G}){
           <div key={i} className="flex gap-2"><span className="text-slate-500 tnum w-20">{span.from}–{span.to||"now"}</span><span className="text-slate-200">{span.name}</span></div>
         ))}
       </div>
+      {Array.isArray(c.seasons) && c.seasons.length>0 && (
+        <div className="mb-3">
+          <div className="text-xs text-slate-400 mb-1">Season-by-season:</div>
+          <div className="overflow-x-auto max-h-64 overflow-y-auto">
+          <table className="w-full text-xs tnum">
+            <thead><tr className="text-slate-500"><th className="text-left">Yr</th><th className="text-left">Club</th><th className="text-left">League</th><th>Pos</th><th>W-D-L</th><th>Pts</th><th className="text-left">🏆 Cup</th><th className="text-left">🌍 CC</th><th title="Major trophies won that season">🏆</th></tr></thead>
+            <tbody>
+              {c.seasons.map((s,i)=>(
+                <tr key={i} className="border-t border-[#15203a]">
+                  <td className="text-left">{s.season}</td>
+                  <td className="text-left whitespace-nowrap">{COUNTRIES[s.country]?COUNTRIES[s.country].flag:""} {s.club}</td>
+                  <td className="text-left text-slate-400 whitespace-nowrap">{divName(s.country,s.div)}{s.div===1&&<span className="text-slate-600 text-[9px]">²</span>}</td>
+                  <td className={"text-center font-semibold "+(s.pos===1&&s.div===0?"text-amber-300":s.pos===1?"text-emerald-300":"")}>{s.pos===1&&s.div===0&&"👑"}{s.pos}</td>
+                  <td className="text-center">{s.w}-{s.d}-{s.l}</td>
+                  <td className="text-center">{s.pts}</td>
+                  <td className="text-left">{s.cup?(s.cup==="W"?<span className="text-amber-300 font-semibold">🏆 Won</span>:(CUP_RUN_LABEL[s.cup]||s.cup)):"—"}</td>
+                  <td className="text-left">{s.cont?(s.cont==="W"?<span className="text-amber-300 font-semibold">🏆 Won</span>:(CUP_RUN_LABEL[s.cont]||s.cont)):"—"}</td>
+                  <td className="text-center font-semibold text-amber-300">{s.trophies||""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          </div>
+        </div>
+      )}
       {trophies.length>0 && (
         <div className="flex gap-2 flex-wrap text-xs">
           {[["league","🏆 Leagues"],["cup","🎖️ Cups"],["continental","🌍 Continental"],["double","🥈 Doubles"],["treble","🌟 Trebles"]].map(([t,l])=>tCount(t)>0&&(
@@ -5723,6 +5816,14 @@ function RecordsView({G}){
         <div className="space-y-1 text-sm max-h-64 overflow-y-auto">
           {champs.map((c,i)=>(<div key={i} className="flex gap-2"><span className="text-slate-500 tnum w-12">{c.season}</span><span className="text-slate-200">{G.clubs[c.id]?G.clubs[c.id].name:c.abbr}</span></div>))}
           {!champs.length && <div className="text-slate-500">No champions recorded yet for {COUNTRIES[country].name}.</div>}
+        </div>
+      </Card>
+
+      <Card>
+        <div className="font-semibold mb-2">🎖️ {cupName(country)} winners</div>
+        <div className="space-y-1 text-sm max-h-64 overflow-y-auto">
+          {(G.cupChampions||[]).filter(c=>c.country===country).map((c,i)=>(<div key={i} className="flex gap-2"><span className="text-slate-500 tnum w-12">{c.season}</span><span className={c.id===user.id?"text-amber-300 font-semibold":"text-slate-200"}>{G.clubs[c.id]?G.clubs[c.id].name:c.abbr}</span></div>))}
+          {!(G.cupChampions||[]).filter(c=>c.country===country).length && <div className="text-slate-500">No cup winners recorded yet for {COUNTRIES[country].name}.</div>}
         </div>
       </Card>
 
@@ -5942,6 +6043,11 @@ function resolveRecordPlayer(G, rec){
     career: Object.assign(emptyStats(), { G:rec.G||0, A:rec.A||0, App:rec.App||0, CS:rec.CS||0, MOTM:rec.MOTM||0, Tkl:rec.Tkl||0, Int:rec.Int||0, Clr:rec.Clr||0, PrgP:rec.PrgP||0 }),
   };
   base.retired = true;
+  // HOF entries carry their own history/comp snapshot (rec.hist / rec.cc) — use
+  // it whenever the live/retired object lacks one, so season-by-season always shows
+  if((!Array.isArray(base.history) || !base.history.length) && Array.isArray(rec.hist) && rec.hist.length) base.history = rec.hist;
+  if(!base.careerComp && rec.cc) base.careerComp = rec.cc;
+  if(base.nat==null && rec.nat!=null) base.nat = rec.nat;
   if(!base.stats) base.stats = emptyStats();
   if(!base.career) base.career = emptyStats();
   if(!Array.isArray(base.history)) base.history = [];
