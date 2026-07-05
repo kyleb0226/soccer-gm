@@ -936,6 +936,7 @@ function applyMatch(home, away, hs, as, players, box, opts){
   const motm = (res>=0 ? motmH : motmA) || motmH || motmA;
   if(motm){ motm.stats.MOTM++; addComp(motm,"MOTM"); }
   box.motm = motm ? motm.name : null;
+  recordH2H(G, home, away, hs, as, compKey);   // derby bookkeeping (all competitions)
   // standings (cup matches don't affect the league table)
   if(!isCup){
     home.pld++; away.pld++; home.gf+=hs; home.ga+=as; away.gf+=as; away.ga+=hs;
@@ -944,6 +945,19 @@ function applyMatch(home, away, hs, as, players, box, opts){
     else { home.d++; away.d++; home.pts++; away.pts++; }
     recordStreak(G, home, hs>as?1:hs<as?-1:0); recordStreak(G, away, as>hs?1:as<hs?-1:0);
   }
+}
+// Head-to-head derby record between rival pairs, in every competition. Keyed by
+// "lowId-highId"; aW/aG belong to the lower id. Last dozen meetings kept.
+function recordH2H(G, home, away, hs, as, comp){
+  if(!G || !home || !away || home.rivalId!==away.id) return;
+  G.h2h = G.h2h || {};
+  const a = Math.min(home.id, away.id), b = Math.max(home.id, away.id);
+  const r = G.h2h[a+"-"+b] = G.h2h[a+"-"+b] || { aW:0, bW:0, d:0, aG:0, bG:0, games:[] };
+  const ag = home.id===a ? hs : as, bg = home.id===a ? as : hs;
+  r.aG += ag; r.bG += bg;
+  if(ag>bg) r.aW++; else if(bg>ag) r.bW++; else r.d++;
+  r.games.unshift({ s:G.season, comp, h:home.abbr, a:away.abbr, hs, as });
+  if(r.games.length>12) r.games.length = 12;
 }
 // Win / unbeaten streaks — tracked on every club, announced for the user's.
 function recordStreak(G, club, res){
@@ -1706,6 +1720,7 @@ function liveFinish(G, M){
   if(!G.settings||G.settings.morale!==false){ ids.forEach(id=>{ const p=players[id]; if(!p)return; const side=M.sideOf[id]; const result=(side==="H"?M.hs-M.as:M.as-M.hs); p.morale=clamp((p.morale==null?70:p.morale)+(result>0?2.5:result<0?-2.5:0.5),0,100); }); }
   home.pld++; away.pld++; home.gf+=M.hs; home.ga+=M.as; away.gf+=M.as; away.ga+=M.hs;
   if(M.hs>M.as){home.w++;home.pts+=3;away.l++;} else if(M.hs<M.as){away.w++;away.pts+=3;home.l++;} else {home.d++;away.d++;home.pts++;away.pts++;}
+  recordH2H(G, home, away, M.hs, M.as, "L");
   recordStreak(G, home, M.hs>M.as?1:M.hs<M.as?-1:0); recordStreak(G, away, M.as>M.hs?1:M.as<M.hs?-1:0);
   M.gref.played=true; M.gref.hs=M.hs; M.gref.as=M.as;
   recordHomeGate(G, home, { derby: home.rivalId===away.id, oppAbbr: away.abbr });
@@ -1802,13 +1817,23 @@ function computeAwards(G){
     const glove = all.filter(p=>p.pos==="GK").sort((a,b)=>b.stats.CS-a.stats.CS)[0];
     const pots = all.slice().sort((a,b)=>(avgRating(b.stats)+b.stats.G*0.03+b.stats.A*0.02)-(avgRating(a.stats)+a.stats.G*0.03+a.stats.A*0.02))[0];
     const yng = all.filter(p=>p.age<=21).sort((a,b)=>avgRating(b.stats)-avgRating(a.stats))[0];
+    // Team of the Season: best-rated XI in a 1-4-3-3 (GK + 4 DF + 3 MF + 3 FW)
+    const byR = arr => arr.slice().sort((a,b)=>avgRating(b.stats)-avgRating(a.stats));
+    const tots = byR(all.filter(p=>p.pos==="GK")).slice(0,1)
+      .concat(byR(all.filter(p=>GROUP(p.pos)==="DEF")).slice(0,4))
+      .concat(byR(all.filter(p=>GROUP(p.pos)==="MID")).slice(0,3))
+      .concat(byR(all.filter(p=>GROUP(p.pos)==="ATT")).slice(0,3));
+    tots.forEach(p=>{ p.tots=(p.tots||0)+1; });
     entry.countries.push({ country:ci,
       pots: pots?{id:pots.id,name:pots.name,team:G.clubs[pots.teamId].abbr,r:+avgRating(pots.stats).toFixed(2)}:null,
       boot: boot?{id:boot.id,name:boot.name,team:G.clubs[boot.teamId].abbr,g:boot.stats.G}:null,
       glove: glove?{id:glove.id,name:glove.name,team:G.clubs[glove.teamId].abbr,cs:glove.stats.CS}:null,
-      young: yng?{id:yng.id,name:yng.name,team:G.clubs[yng.teamId].abbr,r:+avgRating(yng.stats).toFixed(2)}:null });
+      young: yng?{id:yng.id,name:yng.name,team:G.clubs[yng.teamId].abbr,r:+avgRating(yng.stats).toFixed(2)}:null,
+      tots: tots.map(p=>({id:p.id,name:p.name,pos:p.pos,team:G.clubs[p.teamId].abbr,r:+avgRating(p.stats).toFixed(2),g:p.stats.G,a:p.stats.A})) });
     if(pots){ pots.awards=(pots.awards||0)+1; }
     if(boot){ boot.golden=(boot.golden||0)+1; }
+    const userTots = tots.filter(p=>p.teamId===G.userTeamId);
+    if(userTots.length) logNews(G,"award",`🏅 ${userTots.map(p=>p.name).join(", ")} named in the ${divName(ci,0)} Team of the Season!`, G.userTeamId);
   });
   // Ballon d'Or: world's best player across all leagues, weighted by league prestige
   // (top-flight scores higher) + goals + assists + caps + intl goals + club honours
@@ -2149,6 +2174,7 @@ function developPlayer(p){
   p.salary = wageFor(p); p.value = playerValue(p);
 }
 function releaseToFA(G, p){
+  if(p.teamId!=null) logMove(G, p, "rel", p.teamId, null, null);
   p.teamId = null; p.years = 0; p.injury = null; p.wantsOut = false; p.listed = false;
   G.freeAgents = G.freeAgents || [];
   if(!G.freeAgents.some(x=>x.id===p.id)) G.freeAgents.push(p);
@@ -2166,7 +2192,7 @@ function releaseToFA(G, p){
 // the archive is capped at ~400 players so the save stays bounded regardless.
 const RETIRED_KEEP = new Set(["id","name","pos","positions","nat","foot","num","age","ovr","pot","peakOvr",
   "pac","sho","pas","dri","def","phy","gk","isGK","career","careerComp","history","golden","awards","ballonDor","caps","intlG","hof",
-  "traits","retired","retiredAge","retiredSeason","debutSeason","value"]);
+  "traits","retired","retiredAge","retiredSeason","debutSeason","value","transfers","tots"]);
 function slimRetired(p){
   const s = {};
   for(const k in p){ if(RETIRED_KEEP.has(k)) s[k] = p[k]; }
@@ -2461,6 +2487,17 @@ function playPreseason(G){
 // Buy a player from another club: pay the fee from your budget; he joins your squad.
 // Paid transfers (buy/sell) + AI bids only happen in the summer or January window.
 // Free agents (out-of-contract) can still be signed any time, as in real football.
+// Career transfer log: every move a player makes, kept on the player (and in the
+// retired archive) so his profile can show what he sold for at each step.
+// type: "buy" (fee move) | "free" (free agent signing) | "rel" (released/left on a
+// free) | "loan" | "loanret" | "unret" (out of retirement)
+function logMove(G, p, type, fromId, toId, fee){
+  if(!p) return;
+  if(!Array.isArray(p.transfers)) p.transfers = [];
+  const ab = id => (id!=null && G.clubs[id]) ? G.clubs[id].abbr : null;
+  p.transfers.push({ s:G.season, t:type, from:ab(fromId), to:ab(toId), fee:(fee!=null&&fee>0)?round(fee*10)/10:null });
+  if(p.transfers.length>30) p.transfers = p.transfers.slice(-30);
+}
 function transferWindowOpen(G){
   if(G.phase==="offseason") return true;
   if(G.phase!=="regular") return false;
@@ -2481,6 +2518,7 @@ function buyPlayer(G, p, fee, opts={}){
   if(seller){ seller.budget = round((seller.budget + fee)*10)/10; }
   // a sell-on agreed with the selling club is owed on our NEXT sale of this player
   p.sellOn = (opts.sellOnPct && seller) ? { pct:opts.sellOnPct, toClubId:seller.id } : null;
+  logMove(G, p, "buy", seller?seller.id:null, buyer.id, fee);
   p.teamId = buyer.id; p.years = Math.max(p.years||0, rint(2,4)); p.salary = wageFor(p);
   p.release = opts.release!=null ? opts.release : round(playerValue(p)*2*10)/10;   // new deal carries a fresh release clause
   autoPickXI(buyer, G.players);
@@ -2502,6 +2540,7 @@ function sellPlayer(G, p, fee, toClubId){
   }
   seller.budget = round((seller.budget + proceeds)*10)/10;
   p.sellOn = null;
+  logMove(G, p, "buy", seller.id, buyer?buyer.id:null, fee);
   if(buyer){ buyer.budget = round(Math.max(0, buyer.budget - fee)*10)/10; p.teamId = buyer.id; autoPickXI(buyer, G.players); }
   else { p.teamId = null; G.freeAgents=G.freeAgents||[]; G.freeAgents.push(p); }
   autoPickXI(seller, G.players);
@@ -2517,6 +2556,7 @@ function sellPlayer(G, p, fee, toClubId){
 // star, fees scale with the seller's leverage, and squad caps still apply.
 function aiTransferWindow(G){
   const deals = [];
+  const dealt = new Set();   // a player only moves once per window (no same-window flips)
   const seniors = id => Object.values(G.players).filter(p=>p.teamId===id && !p.youth);
   const buyers = G.clubs.filter(c=>!c.userControlled).sort((a,b)=>b.budget-a.budget);
   buyers.forEach(c=>{
@@ -2528,7 +2568,9 @@ function aiTransferWindow(G){
       const weak=xi.filter(p=>p.pos!=="GK").sort((a,b)=>a.ovr-b.ovr)[0];
       if(!weak) break;
       const cands = Object.values(G.players).filter(p=>
-        p.teamId!=null && p.teamId!==c.id && p.teamId!==G.userTeamId && !p.youth && !isLoaned(p)
+        p.teamId!=null && p.teamId!==c.id && p.teamId!==G.userTeamId && !p.youth && !isLoaned(p) && !dealt.has(p.id)
+        // settled window: a player bought in the last window doesn't move again already
+        && !(p.transfers||[]).some(t=>t.t==="buy" && t.s>=G.season-1)
         && (p.positions||[p.pos]).includes(weak.pos) && p.ovr>=weak.ovr+3 && p.age<=31
         && (p.value*1.1)<=c.budget*0.45);
       if(!cands.length) continue;
@@ -2543,6 +2585,8 @@ function aiTransferWindow(G){
       if(fee>c.budget*0.45) continue;
       c.budget = round((c.budget-fee)*10)/10;
       seller.budget = round((seller.budget+fee)*10)/10;
+      logMove(G, target, "buy", seller.id, c.id, fee);
+      dealt.add(target.id);
       target.teamId = c.id; target.years = rint(2,4); target.salary = wageFor(target);
       target.wantsOut = false; target.listed = false; target.expiredSince = null;
       autoPickXI(c, G.players); autoPickXI(seller, G.players);
@@ -2584,6 +2628,7 @@ function signFreeAgent(G, p){
   const squad = Object.values(G.players).filter(x=>x.teamId===G.userTeamId && !x.youth);
   if(squad.length>=30) return { ok:false, msg:"Senior squad is full (30)." };
   G.freeAgents = (G.freeAgents||[]).filter(x=>x.id!==p.id);
+  logMove(G, p, "free", null, club.id, null);
   p.teamId = club.id; p.years = rint(1,3); p.salary = wageFor(p);
   G.players[p.id] = p;
   autoPickXI(club, G.players);
@@ -2606,6 +2651,7 @@ function loanOut(G, p, toClubId){
   if(Object.values(G.players).filter(x=>x.teamId===G.userTeamId && !x.youth).length<=16) return { ok:false, msg:"Senior squad too thin to loan anyone out." };
   // loan runs through the current season (in-season) or the whole upcoming one
   // (if arranged in the offseason) — returnLoans only sends him back once it's up
+  logMove(G, p, "loan", G.userTeamId, to.id, null);
   p.loanOwner = G.userTeamId; p.loanUntil = (G.phase==="offseason") ? G.season+1 : G.season; p.teamId = to.id;
   autoPickXI(G.clubs[G.userTeamId], G.players); autoPickXI(to, G.players);
   logNews(G,"loan",`📤 Loaned ${p.pos} ${p.name} (${p.ovr}) to ${to.name} for the season`, G.userTeamId);
@@ -2624,6 +2670,7 @@ function loanIn(G, p){
   if(p.teamId==null || p.teamId===G.userTeamId || isLoaned(p)) return { ok:false, msg:"Can't loan that player in." };
   if(Object.values(G.players).filter(x=>x.teamId===G.userTeamId && !x.youth).length>=30) return { ok:false, msg:"Senior squad is full (30)." };
   const from = G.clubs[p.teamId];
+  logMove(G, p, "loan", p.teamId, G.userTeamId, null);
   p.loanOwner = p.teamId; p.loanUntil = (G.phase==="offseason") ? G.season+1 : G.season; p.teamId = G.userTeamId;
   autoPickXI(G.clubs[G.userTeamId], G.players); if(from) autoPickXI(from, G.players);
   logNews(G,"loan",`📥 Loaned in ${p.pos} ${p.name} (${p.ovr}) from ${from?from.name:"?"} for the season`, G.userTeamId);
@@ -2641,7 +2688,7 @@ function returnLoans(G){
     if(p.teamId!=null && p.teamId!==ownerId) p._loanArchiveTeam = p.teamId;
     // drop him from the loan club's lineup so they don't keep a ghost in the XI
     if(loanClub){ loanClub.xi=(loanClub.xi||[]).filter(id=>id!==p.id); loanClub.bench=(loanClub.bench||[]).filter(id=>id!==p.id); }
-    if(G.clubs[ownerId]){ p.teamId = ownerId; if(involvedUser) logNews(G,"loan",`🔙 ${p.pos} ${p.name} returns from loan to ${G.clubs[ownerId].name}`, ownerId); }
+    if(G.clubs[ownerId]){ if(p.teamId!==ownerId) logMove(G, p, "loanret", p.teamId, ownerId, null); p.teamId = ownerId; if(involvedUser) logNews(G,"loan",`🔙 ${p.pos} ${p.name} returns from loan to ${G.clubs[ownerId].name}`, ownerId); }
     else { p.teamId = null; G.freeAgents=G.freeAgents||[]; if(!G.freeAgents.some(x=>x.id===p.id)) G.freeAgents.push(p); }   // owning club gone → free agent
     p.loanOwner = null; p.loanUntil = null;
   });
@@ -2871,7 +2918,7 @@ function migrate(G){
     if(!G.contCup || !G.contCup.phase) initContCup(G);   // (re)build into the group-stage format
     // backfill newer per-player stat fields (shots, key passes, xG, saves, bans)
     const fill = s => { if(s){ NEW_STAT_KEYS.forEach(k=>{ if(s[k]==null) s[k]=0; }); } };
-    const fillP = p => { if(p.nat==null) p.nat=rint(0,NUM_COUNTRIES-1); if(!Array.isArray(p.history)) p.history=[]; if(p.youth && p.age>=20) p.youth=false; if(!Array.isArray(p.traits)) p.traits=rollTraits(p); if(p.form==null) p.form=6.7; if(p.morale==null) p.morale=rint(60,80); };
+    const fillP = p => { if(p.nat==null) p.nat=rint(0,NUM_COUNTRIES-1); if(!Array.isArray(p.history)) p.history=[]; if(!Array.isArray(p.transfers)) p.transfers=[]; if(p.youth && p.age>=20) p.youth=false; if(!Array.isArray(p.traits)) p.traits=rollTraits(p); if(p.form==null) p.form=6.7; if(p.morale==null) p.morale=rint(60,80); };
     const fillCS = p => { if(p.compStats) for(const k in p.compStats) fill(p.compStats[k]); };
     // Seed per-competition career totals. Pre-feature saves have no comp split, so
     // assume the accumulated career was league play (Cup/Champs Cup start fresh and
@@ -2926,6 +2973,16 @@ function migrate(G){
       G.cupChampions = [];
       G.clubs.forEach(c=>(c.honours||[]).forEach(h=>{ if(h.type==="cup") G.cupChampions.push({ season:h.season, id:c.id, abbr:c.abbr, country:c.country||0 }); }));
       G.cupChampions.sort((a,b)=>b.season-a.season);
+    }
+    // one-time: seed the derby head-to-head from this season's already-played
+    // league games (recorded live from here on; guard prevents double counting)
+    if(!G.h2h){
+      G.h2h = {};
+      (G.schedule||[]).forEach(rd=>rd.forEach(g=>{
+        if(!g.played) return;
+        const h=G.clubs[g.home], a=G.clubs[g.away];
+        if(h && a && h.rivalId===a.id) recordH2H(G, h, a, g.hs, g.as, "L");
+      }));
     }
     // one-time: reconstruct the manager's season log from the clubs he managed
     if(G.career && !Array.isArray(G.career.seasons)){
@@ -3901,6 +3958,44 @@ function ClubBrowser({G, commit, tShow}){
         );
       })()}
 
+      {/* derby head-to-head vs rivals */}
+      {(()=>{
+        const rival = club.rivalId!=null ? G.clubs[club.rivalId] : null;
+        if(!rival) return null;
+        const a = Math.min(club.id, rival.id), b = Math.max(club.id, rival.id);
+        const r = (G.h2h||{})[a+"-"+b];
+        const mine = r ? (club.id===a ? {w:r.aW, l:r.bW, d:r.d, gf:r.aG, ga:r.bG} : {w:r.bW, l:r.aW, d:r.d, gf:r.bG, ga:r.aG}) : null;
+        const compSym = c => c==="C"?"🏆":c==="CC"?"🌍":"⚽";
+        return (
+          <Card>
+            <div className="font-semibold mb-1">🔥 Derby — {club.abbr} vs {rival.abbr} <span className="text-slate-500 text-xs font-normal">({rival.name})</span></div>
+            {!mine ? <div className="text-sm text-slate-500">No meetings recorded yet (tracking started this season).</div> : <>
+              <div className="grid grid-cols-4 gap-2 text-center text-sm mb-2">
+                <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-400">Played</div><div className="font-bold tnum">{mine.w+mine.d+mine.l}</div></div>
+                <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-400">{club.abbr} wins</div><div className="font-bold tnum text-emerald-400">{mine.w}</div></div>
+                <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-400">Draws</div><div className="font-bold tnum">{mine.d}</div></div>
+                <div className="bg-[#0d1526] rounded p-2"><div className="text-xs text-slate-400">{rival.abbr} wins</div><div className="font-bold tnum text-red-400">{mine.l}</div></div>
+              </div>
+              <div className="text-xs text-slate-400 mb-1">Goals {mine.gf}-{mine.ga} · Recent meetings:</div>
+              <div className="space-y-0.5 text-sm tnum">
+                {(r.games||[]).slice(0,6).map((g,i)=>{
+                  const myHome = g.h===club.abbr;
+                  const gf = myHome?g.hs:g.as, ga = myHome?g.as:g.hs;
+                  return (
+                    <div key={i} className="flex items-center gap-2">
+                      <span className="text-slate-500 text-xs w-10">{g.s}</span>
+                      <span className="w-5 text-center" title={g.comp==="C"?"National Cup":g.comp==="CC"?"Champions Cup":"League"}>{compSym(g.comp)}</span>
+                      <span className="flex-1">{g.h} {g.hs}-{g.as} {g.a}</span>
+                      <span className={"inline-block w-2 h-2 rounded-full "+(gf>ga?"bg-emerald-500":gf<ga?"bg-red-500":"bg-slate-500")}></span>
+                    </div>
+                  );
+                })}
+              </div>
+            </>}
+          </Card>
+        );
+      })()}
+
       {/* season-by-season team history + overall record */}
       {(()=>{
         const liveCup = (G.cups||[]).find(x=>x.country===(club.country||0));
@@ -4568,6 +4663,7 @@ function FreeAgents({G, commit, tShow}){
     p.retired = false; p.ovr = Math.max(p.ovr-3, 40); p.fitness = 60; p.years = 1;
     p.salary = Math.max(wageFor(p)*0.7, 0.1); p.teamId = G.userTeamId; p.morale = 70;
     p.stats = emptyStats(); p.compStats = {}; p.form = 6.7;
+    logMove(G, p, "unret", null, G.userTeamId, null);
     if(!p.career) p.career = emptyStats();
     if(!Array.isArray(p.history)) p.history = [];
     if(p.susp==null) p.susp = 0; if(p.ycCount==null) p.ycCount = 0;
@@ -5101,6 +5197,7 @@ function relieveFinancialDistress(G, club){
     if(buyer){
       buyer.budget = round((buyer.budget-fee)*10)/10;
       club.budget = round((club.budget+fee)*10)/10;
+      logMove(G, target, "buy", club.id, buyer.id, fee);
       target.teamId = buyer.id; autoPickXI(buyer, G.players);
       logNews(G,"finance",`💰 Financial trouble forces ${club.name} to sell ${target.name} to ${buyer.name} for ${money(fee)}`, club.id);
     } else {
@@ -5525,6 +5622,21 @@ function AwardsView({G}){
             <AwardRow label="🧤 Golden Glove" v={s.glove} extra={s.glove?`${s.glove.cs} CS`:""} G={G} />
             <AwardRow label="🌟 Young Player" v={s.young} extra={s.young?`${s.young.r} avg`:""} G={G} />
           </div>
+          {Array.isArray(s.tots) && s.tots.length>0 && (
+            <div className="mt-3">
+              <div className="text-xs text-slate-400 mb-1">⭐ Team of the Season</div>
+              <div className="grid sm:grid-cols-2 gap-1 text-sm">
+                {s.tots.map(p=>(
+                  <div key={p.id} className="flex items-center gap-2 bg-[#0d1526] rounded px-2 py-1">
+                    <span className="text-slate-500 text-xs w-8">{p.pos}</span>
+                    <span className="flex-1 font-medium">{p.name}</span>
+                    <span className="text-xs text-slate-400">{p.team}</span>
+                    <span className="text-xs text-slate-400 tnum">{p.pos==="GK"||p.g+p.a===0?`${p.r}`:`${p.g}g ${p.a}a`}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </Card>
         );
       })}
@@ -6084,7 +6196,7 @@ function PlayerModal({p, G, onClose}){
             {p.retired
               ? <div className="text-xs text-slate-500 mt-0.5">Retired{p.retiredSeason!=null?` in ${p.retiredSeason}`:""}{p.retiredAge!=null?` at ${p.retiredAge}`:""}{p.debutSeason!=null&&p.retiredSeason!=null?` · ${p.retiredSeason-p.debutSeason} season career`:""}</div>
               : <div className="text-xs text-slate-500 mt-0.5">Potential {scoutConf(p)>=0.85?p.pot:scoutedPot(p)+"~"} · Value {money(p.value)} · Wage {money(p.salary)}/yr{p.years>0?` · ${p.years}y left`:""}{p.fitness!=null&&p.fitness<100?` · ${p.fitness}% fit`:""}</div>}
-            <div className="text-xs text-slate-500 mt-0.5">{p.peakOvr?`Peak OVR ${p.peakOvr}`:""}{p.debutSeason!=null?` · Debut ${p.debutSeason}`:""}{p.hof?" · 🏅 Hall of Fame":""}{(p.awards||0)>0?` · ${p.awards}× POTS`:""}{(p.golden||0)>0?` · ${p.golden}× Golden Boot`:""}{(p.ballonDor||0)>0?` · 🏆 ${p.ballonDor}× Ballon d'Or`:""}{(p.caps||0)>0?` · ${p.caps} caps`:""}{(p.intlG||0)>0?` · ${p.intlG} intl goals`:""}</div>
+            <div className="text-xs text-slate-500 mt-0.5">{p.peakOvr?`Peak OVR ${p.peakOvr}`:""}{p.debutSeason!=null?` · Debut ${p.debutSeason}`:""}{p.hof?" · 🏅 Hall of Fame":""}{(p.awards||0)>0?` · ${p.awards}× POTS`:""}{(p.tots||0)>0?` · ${p.tots}× Team of the Season`:""}{(p.golden||0)>0?` · ${p.golden}× Golden Boot`:""}{(p.ballonDor||0)>0?` · 🏆 ${p.ballonDor}× Ballon d'Or`:""}{(p.caps||0)>0?` · ${p.caps} caps`:""}{(p.intlG||0)>0?` · ${p.intlG} intl goals`:""}</div>
             {(formTag(p.form)||moraleTag(p.morale))&&<div className="text-xs mt-0.5">{formTag(p.form)&&<span className={formTag(p.form).c}>{formTag(p.form).t}</span>}{formTag(p.form)&&moraleTag(p.morale)&&<span className="text-slate-600"> · </span>}{moraleTag(p.morale)&&<span className={moraleTag(p.morale).c}>{moraleTag(p.morale).t}</span>}</div>}
             {(p.release!=null||p.sellOn)&&<div className="text-xs mt-0.5 text-slate-500">{p.release!=null?`Release ${money(p.release)}`:""}{p.release!=null&&p.sellOn?" · ":""}{p.sellOn?`${p.sellOn.pct}% sell-on → ${(G.clubs[p.sellOn.toClubId]||{}).abbr||"?"}`:""}</div>}
             {p.wantsOut&&<div className="text-xs mt-0.5 text-orange-400">✈️ Has requested a transfer</div>}
@@ -6160,6 +6272,27 @@ function PlayerModal({p, G, onClose}){
               </div>
             </div>
           )}
+          {Array.isArray(p.transfers) && p.transfers.length>0 && (()=>{
+            const fees = p.transfers.filter(t=>t.t==="buy" && t.fee!=null);
+            const total = round(fees.reduce((s,t)=>s+t.fee,0)*10)/10;
+            const label = t => t.t==="buy" ? null : t.t==="free" ? "Free transfer" : t.t==="rel" ? "Released" : t.t==="loan" ? "Loan" : t.t==="loanret" ? "End of loan" : t.t==="unret" ? "Out of retirement" : t.t;
+            return (
+              <div>
+                <div className="text-sm font-semibold mb-1">💸 Transfer history{fees.length>1?<span className="text-xs text-slate-400 font-normal"> · {money(total)} in career fees</span>:null}</div>
+                <div className="space-y-0.5 text-sm">
+                  {p.transfers.slice().reverse().map((t,i)=>(
+                    <div key={i} className="flex items-center gap-2">
+                      <span className="text-slate-500 tnum text-xs w-10">{t.s}</span>
+                      <span className="flex-1 text-slate-300">{t.from||"—"} <span className="text-slate-500">→</span> {t.to||"Free agency"}</span>
+                      {t.t==="buy"
+                        ? <span className="font-semibold tnum text-emerald-300">{t.fee!=null?money(t.fee):"Undisclosed"}</span>
+                        : <span className="text-xs text-slate-500">{label(t)}</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </div>
     </div>
