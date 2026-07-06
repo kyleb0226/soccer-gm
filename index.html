@@ -3651,6 +3651,59 @@ function LiveMatch({G, commit, tShow, onClose}){
     </div>
   );
 }
+// "Simulate N years" — fast-forwards the whole world so you can see how things
+// shake out. Runs one season per tick (yielding between so the progress bar
+// paints), and mutes sacking for the duration so the run always completes;
+// the job-security setting is restored afterward.
+function SimYears({G, commit, tShow, years=50}){
+  const [run, setRun] = useState(null);   // {done,total} while running, else null
+  const stopRef = React.useRef(false);
+  const go = () => {
+    if(run) return;
+    const total = years;
+    setRun({ done:0, total });
+    const savedJS = G.settings ? G.settings.jobSecurity : undefined;
+    if(G.settings) G.settings.jobSecurity = false;
+    G.pendingSack = false; G.jobOffers = null;
+    const ch = new MessageChannel();
+    let done = 0;
+    ch.port1.onmessage = () => {
+      try {
+        let guard = 0;
+        while(G.phase==="regular" && guard++<500) simRound(G);
+        if(G.phase==="offseason") startNextSeason(G);
+        done++;
+        if(done < total && !stopRef.current){ setRun({ done, total }); ch.port2.postMessage(1); }
+        else finish();
+      } catch(e){ finish(String(e&&e.message||e)); }
+    };
+    const finish = (err) => {
+      if(G.settings && savedJS!==undefined) G.settings.jobSecurity = savedJS;
+      commit(G);
+      setRun(null);
+      tShow(err ? ("Sim stopped: "+err) : `Simulated ${done} season${done!==1?"s":""} → ${G.season}`);
+    };
+    ch.port2.postMessage(1);
+  };
+  React.useEffect(()=>()=>{ stopRef.current = true; }, []);
+  return (
+    <>
+      <button onClick={go} disabled={!!run} className={"px-4 py-2 rounded-lg text-sm font-semibold "+(run?"bg-[#16213a] text-slate-500":"bg-indigo-500/90 text-white")} title={`Fast-forward ${years} seasons to see how the world develops`}>
+        {run ? `Simulating… ${run.done}/${run.total}` : `⏩ Simulate ${years} years`}
+      </button>
+      {run && (
+        <div className="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center p-4">
+          <div className="bg-[#101a30] border border-[#1d2940] rounded-xl p-6 w-full max-w-sm text-center">
+            <div className="text-lg font-bold mb-1">⏩ Simulating the world</div>
+            <div className="text-sm text-slate-400 mb-4">Season {run.done} of {run.total} · now {G.season}</div>
+            <div className="h-2 rounded bg-[#0d1526] overflow-hidden mb-2"><div className="h-full bg-indigo-500 transition-all" style={{width:Math.round(run.done/run.total*100)+"%"}}></div></div>
+            <div className="text-xs text-slate-500">Running matches, transfers, youth intake and finances for every club…</div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
 function Hub({G, commit, tShow, setTab}){
   const user = G.clubs[G.userTeamId];
   const round = G.schedule[G.day] || [];
@@ -3705,6 +3758,7 @@ function Hub({G, commit, tShow, setTab}){
             <button onClick={()=>doSim(simRound)} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200 text-sm">Play whole matchday</button>
             <button onClick={()=>{ for(let i=0;i<7 && G.phase==="regular" && !G.pendingSack;i++) simToNextUserMatch(G); commit(G); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200 text-sm">Skip 7 weeks</button>
             <button onClick={()=>{ generateTransferOffers(G); commit(G); tShow("Checked the market"); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200 text-sm">Check Market</button>
+            <SimYears G={G} commit={commit} tShow={tShow} years={50} />
           </div>
         </Card>
       )}
@@ -3712,7 +3766,10 @@ function Hub({G, commit, tShow, setTab}){
         <Card>
           <div className="font-semibold mb-1">Season complete</div>
           <div className="text-sm text-slate-400 mb-3">Review awards, the transfer market, your youth intake, then start the next season.</div>
-          <button onClick={()=>setTab("offseason")} className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold">Go to Offseason</button>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={()=>setTab("offseason")} className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold">Go to Offseason</button>
+            <SimYears G={G} commit={commit} tShow={tShow} years={50} />
+          </div>
         </Card>
       )}
 
