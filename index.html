@@ -422,6 +422,7 @@ function makeClub(def, idx, div, country){
     budget: div===0 ? rint(80,200) : div===1 ? rint(20,140) : div===2 ? rint(8,45) : rint(3,20), formation: "4-3-3", tactic: "balanced", xi: [], bench: [],
     academy: { level: 1 }, history: [], honours: [], setPieces: { pen:null, fk:null, corner:null },
     facilityTier: 0, namingRights: null, namingOffers: [],
+    trainTier: 0, scoutTier: 0, pitchTier: 0, boxes: 0, seasonBoxes: 0, coaches: { att:0, def:0, gk:0, fit:0 },
     ticketTier: 1, concessionTier: 1, seasonGate: 0, seasonConcession: 0, gateLog: [],
     autoRotate: false, instr: { press:"mid", tempo:"normal", width:"normal" }, formFam: 100, formFamOf: "4-3-3", storeTier: 0, seasonTicketPct: 0,
     userControlled: false,
@@ -629,7 +630,7 @@ function unitRatings(club, players){
   let dS=0,dN=0, mS=0,mN=0, aS=0,aN=0, gk=50;
   xi.forEach(({p,slot})=>{
     const er = effRating(p, slot), b = BAND[slot];
-    if(slot==="GK"){ gk = p.gk; return; }
+    if(slot==="GK"){ gk = clamp(p.gk + coachLvl(club,"gk"), 20, 99); return; }   // GK coach sharpens the keeper
     if(b<=2){ dS+=er; dN++; }
     else if(b===3){ mS+=er; mN++; }
     else { aS+=er; aN++; }
@@ -662,10 +663,12 @@ function tacticMods(club){
   const pr=PRESS_MOD[instr.press||"mid"], te=TEMPO_MOD[instr.tempo||"normal"], wi=WIDTH_MOD[instr.width||"normal"];
   const fam = club.formFam!=null?clamp(club.formFam,0,100):100;
   const famFor = 0.92 + 0.08*(fam/100);   // an unsettled shape creates fewer clear chances
+  // specialist coaches: small permanent edges for the club paying their wages
+  const attC = COACH_ATT_MULT[coachLvl(club,"att")], defC = COACH_DEF_MULT[coachLvl(club,"def")], fitC = COACH_FIT_MULT[coachLvl(club,"fit")];
   return {
-    xgFor: m.xgFor*pr.xgFor*te.xgFor*wi.xgFor*famFor,
-    xgAgainst: m.xgAgainst*pr.xgAgainst*te.xgAgainst*wi.xgAgainst,
-    drain: (pr.drain||1)*(te.drain||1),
+    xgFor: m.xgFor*pr.xgFor*te.xgFor*wi.xgFor*famFor*attC,
+    xgAgainst: m.xgAgainst*pr.xgAgainst*te.xgAgainst*wi.xgAgainst*defC,
+    drain: (pr.drain||1)*(te.drain||1)*fitC,
   };
 }
 // Rebuild formation familiarity a little each matchday (played clubs settle into
@@ -674,16 +677,22 @@ function updateFormFamiliarity(G){
   G.clubs.forEach(c=>{ if(c.formFamOf!==c.formation){ c.formFamOf=c.formation; if(c.formFam==null||c.formFam>60) c.formFam=52; } else { c.formFam=Math.min(100,(c.formFam!=null?c.formFam:100)+8); } });
 }
 // Penalty shootout: best-of-5, then sudden death. Conversion ~75% with a small
-// edge to the stronger side. Returns { h, a, winner:"H"|"A" }.
+// edge to the stronger side. Records every kick (taker + scored/missed) so the
+// box score can show the full shootout. Returns { h, a, winner, shots }.
 function penaltyShootout(home, away, players){
   const conv = c => clamp(0.75 + (clubStrength(c,players)-62)/500, 0.62, 0.85);
   const ph=conv(home), pa=conv(away);
-  let h=0, a=0;
-  for(let i=0;i<5;i++){ if(chance(ph)) h++; if(chance(pa)) a++; }
+  // takers: the XI's best finishers step up first, then cycle if it goes long
+  const takersOf = club => { const xi=fieldedXI(club, players).slice().sort((x,y)=>(y.p.sho||0)-(x.p.sho||0)); return xi.length?xi.map(o=>o.p.name):["Penalty taker"]; };
+  const tH = takersOf(home), tA = takersOf(away);
+  const shots = [];
+  const kick = (side, p, name) => { const ok = chance(p); shots.push({ side, name, ok }); return ok; };
+  let h=0, a=0, k=0;
+  for(let i=0;i<5;i++){ if(kick("H", ph, tH[k%tH.length])) h++; if(kick("A", pa, tA[k%tA.length])) a++; k++; }
   let guard=0;
-  while(h===a && guard++<24){ const hh=chance(ph), aa=chance(pa); if(hh) h++; if(aa) a++; }
-  if(h===a){ if(chance(0.5)) h++; else a++; }
-  return { h, a, winner: h>a?"H":"A" };
+  while(h===a && guard++<24){ if(kick("H", ph, tH[k%tH.length])) h++; if(kick("A", pa, tA[k%tA.length])) a++; k++; }
+  if(h===a){ if(chance(0.5)){ h++; shots.push({side:"H", name:tH[k%tH.length], ok:true}); } else { a++; shots.push({side:"A", name:tA[k%tA.length], ok:true}); } }
+  return { h, a, winner: h>a?"H":"A", shots };
 }
 // Simulate one match. Mutates player season stats + both clubs' table rows.
 // Returns a box-score object (used to show the user's match in detail).
@@ -696,7 +705,7 @@ function simMatch(home, away, players, opts={}){
   const aAtt = (0.55*n01(uA.ATT) + 0.30*n01(uA.MID) + 0.15*n01(uA.DEF));
   const aDef = (0.55*n01(uA.DEF) + 0.30*n01(uA.MID) + 0.15*n01(uA.ATT));
   const tH = tacticMods(home), tA = tacticMods(away);
-  const homeAdv = neutral ? 1 : 1.12, awayAdv = neutral ? 1 : 0.92;
+  const homeAdv = neutral ? 1 : 1.12 * pitchTierOf(home).xg, awayAdv = neutral ? 1 : 0.92;
   // each league has its own goals environment (Rhineland end-to-end, Padania tactical)
   const styleG = !opts.cup ? (((COUNTRIES[home.country||0]||{}).styleG) || 1) : 1;
   let xgH = clamp(1.32 * Math.exp(1.7*(hAtt - aDef)) * tH.xgFor * tA.xgAgainst * homeAdv * styleG, 0.15, 5.5);
@@ -721,11 +730,14 @@ function simMatch(home, away, players, opts={}){
   let hs = poisson(xgH), as = poisson(xgA);
   // Knockout ties level after 90' go to extra time (reduced-rate goals); if STILL
   // level after ET, a penalty shootout decides it. ET is also when the 4th/5th
-  // substitution unlocks (see the sub logic in applyMatch).
-  let extraTime = false, pens = null;
+  // substitution unlocks (see the sub logic in applyMatch). etH/etA count which
+  // goals came IN extra time so their minutes land in 91-120, never earlier —
+  // and normal-time goals stay ≤90 (the timeline used to contradict the ET story).
+  let extraTime = false, pens = null, etH = 0, etA = 0;
   if(opts.mustDecide && hs===as){
     extraTime = true;
-    hs += poisson(xgH*0.32); as += poisson(xgA*0.32);   // extra time
+    etH = poisson(xgH*0.32); etA = poisson(xgA*0.32);   // extra time
+    hs += etH; as += etA;
     if(hs===as) pens = penaltyShootout(home, away, players);   // shootout
   }
   // match stats: possession (midfield share), shots & shots-on-target (from xG)
@@ -735,6 +747,7 @@ function simMatch(home, away, players, opts={}){
   const sotH = clamp(round(shH*(0.30+0.12*n01(uH.ATT))), hs, shH);
   const sotA = clamp(round(shA*(0.30+0.12*n01(uA.ATT))), as, shA);
   const box = { home, away, hs, as, hScorers:[], aScorers:[], hRatings:[], aRatings:[], neutral, extraTime, pens,
+    etg: { h: etH, a: etA },
     hSubs:[], aSubs:[],
     stat:{ possH, possA:100-possH, shH, shA, sotH, sotA, xgH:+xgH.toFixed(2), xgA:+xgA.toFixed(2) }, timeline:[] };
   applyMatch(home, away, hs, as, players, box, opts);
@@ -867,24 +880,32 @@ function applyMatch(home, away, hs, as, players, box, opts){
   }
   credit(H, home, "H"); credit(A, away, "A");
   ensureSetPieces(home, players); ensureSetPieces(away, players);
-  // distribute goals to scorers + assisters
-  function awardGoals(side, n, club){
+  // distribute goals to scorers + assisters. The last `etGoals` of a side's goals
+  // were scored IN extra time: their minutes land in 91-120 and only players on
+  // the pitch then can score them; normal-time goals stay ≤90. This keeps the
+  // timeline consistent with "level after 90 → extra time".
+  function awardGoals(side, n, club, etGoals=0){
     const out = [];
+    // can this player be on the pitch inside the [lo, hi] window?
+    const inWindow = (o, lo, hi) => ((o.onMin||0) < hi) && ((o.offMin==null?90:o.offMin) >= lo);
     for(let i=0;i<n;i++){
-      let sc = wpick(side, o => (SCORE_W[o.slot]||0) * (0.5 + n01(o.p.sho)) * (hasTrait(o.p,"poacher")?1.6:1) * (isCup&&hasTrait(o.p,"bigGame")?1.3:1) * (o.mf==null?1:o.mf));
+      const isET = i >= n - etGoals;
+      const lo = isET ? 91 : 1, hi = isET ? 120 : 90;
+      let sc = wpick(side, o => (SCORE_W[o.slot]||0) * (0.5 + n01(o.p.sho)) * (hasTrait(o.p,"poacher")?1.6:1) * (isCup&&hasTrait(o.p,"bigGame")?1.3:1) * (o.mf==null?1:o.mf) * (inWindow(o,lo,hi)?1:0));
       if(!sc) continue;
-      // re-attribute some goals to the designated set-piece taker (real role, same scoreline)
+      // re-attribute some goals to the designated set-piece taker (real role, same
+      // scoreline) — but only if the taker is actually on the pitch in that window
       let tag = null;
-      const penT = club.setPieces && club.setPieces.pen ? side.find(o=>o.p.id===club.setPieces.pen) : null;
-      const fkT = club.setPieces && club.setPieces.fk ? side.find(o=>o.p.id===club.setPieces.fk) : null;
+      const penT = club.setPieces && club.setPieces.pen ? side.find(o=>o.p.id===club.setPieces.pen && inWindow(o,lo,hi)) : null;
+      const fkT = club.setPieces && club.setPieces.fk ? side.find(o=>o.p.id===club.setPieces.fk && inWindow(o,lo,hi)) : null;
       if(penT && chance(0.09)){ sc = penT; tag = "PK"; }
       else if(fkT && chance(0.05)){ sc = fkT; tag = "FK"; }
       sc.p.stats.G++; addComp(sc.p,"G");
       if(tag){ sc.p.stats[tag]++; addComp(sc.p,tag); }
-      const min = rint((sc.onMin||0)+1, sc.offMin||90);
+      const min = rint(Math.max((sc.onMin||0)+1, lo), Math.min(sc.offMin==null?90:sc.offMin, hi));
       let assistName = null, assistId = null;
       if(!tag && chance(0.72)){   // penalties/direct free kicks aren't assisted
-        const cands = side.filter(o => o !== sc);
+        const cands = side.filter(o => o !== sc && inWindow(o,lo,hi));
         const as2 = wpick(cands, o => (CREATE_W[o.slot]||0) * (0.5 + n01(o.p.pas*0.6 + o.p.dri*0.4)) * (hasTrait(o.p,"playmaker")?1.6:1) * (o.mf==null?1:o.mf));
         if(as2){ as2.p.stats.A++; as2.p.stats.KP++; addComp(as2.p,"A"); addComp(as2.p,"KP"); assistName = as2.p.name; assistId = as2.p.id; }
       }
@@ -893,8 +914,9 @@ function applyMatch(home, away, hs, as, players, box, opts){
     out.sort((a,b)=>a.min-b.min);
     return out;
   }
-  box.hScorers = awardGoals(H, hs, home);
-  box.aScorers = awardGoals(A, as, away);
+  const etg = box.etg || { h:0, a:0 };
+  box.hScorers = awardGoals(H, hs, home, etg.h);
+  box.aScorers = awardGoals(A, as, away, etg.a);
   // missed penalty: a flavor event that doesn't change the scoreline
   [[H,home],[A,away]].forEach(([side,club])=>{
     const taker = club.setPieces && club.setPieces.pen ? side.find(o=>o.p.id===club.setPieces.pen) : null;
@@ -1044,11 +1066,12 @@ function injure(p, weeks){ p.injury = { weeks, type: pick(["knock","hamstring","
 function isSuspended(p){ return !!(p && p.susp > 0); }
 function isAvailable(p){ return p && !isInjured(p) && !isSuspended(p); }
 const YC_BAN_THRESHOLD = 5;   // yellows accumulated -> a one-match ban
-function maybeInjure(club, players, settings){
+function maybeInjure(club, players, settings, injMult=1){
   if(settings && settings.injuries===false) return;
   const xi = (club.xi||[]).map(id=>players[id]).filter(Boolean);
-  // a knackered player is likelier to pick up a knock (0.012 fresh → ~0.030 exhausted)
-  xi.forEach(p=>{ const f=p.fitness!=null?p.fitness:100; if(!isInjured(p) && chance(0.012 + (100-f)/100*0.018)) injure(p, rint(1,6)); });
+  // a knackered player is likelier to pick up a knock (0.012 fresh → ~0.030 exhausted);
+  // injMult < 1 = a better playing surface (home club's pitch tier, both teams benefit)
+  xi.forEach(p=>{ const f=p.fitness!=null?p.fitness:100; if(!isInjured(p) && chance((0.012 + (100-f)/100*0.018)*injMult)) injure(p, rint(1,6)); });
 }
 
 /* ----------------------------- XI selection ---------------------------- */
@@ -1182,6 +1205,56 @@ function ensureSetPieces(club, players){
     if(!valid) club.setPieces[role] = bestSetPieceTaker(club, players, role);
   });
 }
+
+/* ------------------------- club development upgrades ------------------- */
+// User-buyable upgrades beyond the stadium (AI clubs don't buy these, same as
+// stands / shop / facilities): training, scouting, hospitality boxes, coaching
+// staff and the pitch. Each one hooks into a real engine mechanism below.
+const TRAIN_TIERS = [
+  { name:"Basic Training Ground",         cost:0,   mult:1.00 },
+  { name:"Modern Training Ground",        cost:25,  mult:1.12 },
+  { name:"Elite Performance Centre",      cost:60,  mult:1.25 },
+  { name:"National Centre of Excellence", cost:120, mult:1.38 },
+  { name:"World-Class Campus",            cost:220, mult:1.50 },
+];
+function trainTierOf(c){ return TRAIN_TIERS[clamp((c&&c.trainTier)||0,0,TRAIN_TIERS.length-1)]; }
+function trainMultOf(G, p){
+  const c = p && p.teamId!=null && G ? G.clubs[p.teamId] : null;
+  return c ? trainTierOf(c).mult : 1;
+}
+const SCOUT_TIERS = [
+  { name:"Local Scouts",           cost:0,   floor:0    },
+  { name:"Regional Network",       cost:18,  floor:0.35 },
+  { name:"Continental Network",    cost:45,  floor:0.60 },
+  { name:"Global Data Department", cost:100, floor:0.85 },
+];
+function scoutTierOf(c){ return SCOUT_TIERS[clamp((c&&c.scoutTier)||0,0,SCOUT_TIERS.length-1)]; }
+let SCOUT_FLOOR = 0;   // set from the user's club each render; raises scoutConf's floor
+const BOX_UNIT = 4, BOX_MAX = 24, BOX_COST = 6;   // build 4 boxes at a time for £6M
+function boxIncomePerGame(c){
+  const occ = [1,0.6,0.35,0.2][c.div]||0.2;       // corporate demand tracks the level you play at
+  return round((c.boxes||0) * 0.015 * occ * 1000)/1000;   // £M per home game
+}
+const COACH_ROLES = {
+  att: { name:"Attacking Coach",   emoji:"⚔️" },
+  def: { name:"Defensive Coach",   emoji:"🛡️" },
+  gk:  { name:"Goalkeeping Coach", emoji:"🧤" },
+  fit: { name:"Fitness Coach",     emoji:"🏃" },
+};
+const COACH_WAGE = [0, 0.8, 2, 4.5];              // £M per year per tier
+const COACH_TIER_NAME = ["None","Good","Great","Elite"];
+const COACH_ATT_MULT = [1, 1.015, 1.03, 1.045];   // xG for
+const COACH_DEF_MULT = [1, 0.985, 0.97, 0.955];   // xG against
+const COACH_FIT_MULT = [1, 0.93, 0.86, 0.80];     // fitness drain
+function coachLvl(c, role){ return clamp((c && c.coaches && c.coaches[role])||0, 0, 3); }
+function coachWageBill(c){ return round(["att","def","gk","fit"].reduce((s,r)=>s+COACH_WAGE[coachLvl(c,r)],0)*10)/10; }
+const PITCH_TIERS = [
+  { name:"Council Pitch",     cost:0,  xg:1.00, inj:1.00 },
+  { name:"Professional Turf", cost:4,  xg:1.01, inj:0.95 },
+  { name:"Hybrid Grass",      cost:10, xg:1.02, inj:0.90 },
+  { name:"Perfect Carpet",    cost:20, xg:1.03, inj:0.85 },
+];
+function pitchTierOf(c){ return PITCH_TIERS[clamp((c&&c.pitchTier)||0,0,PITCH_TIERS.length-1)]; }
 
 /* ----------------------------- standings ------------------------------- */
 // Standings for one league (a country's division). `country` defaults to country 0
@@ -1572,11 +1645,13 @@ function simRoundInner(G){
       bumpConfidenceForResult(G, userHome?box.hs>box.as:box.as>box.hs, box.hs===box.as, derby?1.8:1);
       if(derby) logNews(G,"match",`🔥 Derby day! ${home.abbr} ${box.hs}-${box.as} ${away.abbr}`, G.userTeamId);
     }
-    maybeInjure(home, G.players, G.settings); maybeInjure(away, G.players, G.settings);
+    const pinj = pitchTierOf(home).inj;
+    maybeInjure(home, G.players, G.settings, pinj); maybeInjure(away, G.players, G.settings, pinj);
   });
   checkMilestones(G);   // career-landmark news for the user's players
   updateFormFamiliarity(G);   // clubs settle into their current formation
   processTransferRequests(G);   // unhappy players may agitate to leave
+  if(G.day===18) aiSignFreeAgents(G);   // January window: AI clubs sweep the free-agent market once
   if([Math.round(G.schedule.length/3), Math.round(G.schedule.length*2/3)].includes(G.day+1)) inSeasonDev(G);   // gradual in-season growth checkpoints
   // youth 5v5 game time (drives prospect development)
   accrueYouth(G);
@@ -1724,7 +1799,7 @@ function livePlayHalf(G, M){
   const aDef=(0.55*n01(uA.DEF)+0.30*n01(uA.MID)+0.15*n01(uA.ATT));
   const tH=tacticMods(home), tA=tacticMods(away);
   const styleG=((COUNTRIES[home.country||0]||{}).styleG)||1;   // watched games are always league fixtures
-  let xgH=clamp(1.32*Math.exp(1.7*(hAtt-aDef))*tH.xgFor*tA.xgAgainst*1.12*styleG,0.15,5.5)/2;
+  let xgH=clamp(1.32*Math.exp(1.7*(hAtt-aDef))*tH.xgFor*tA.xgAgainst*1.12*pitchTierOf(home).xg*styleG,0.15,5.5)/2;
   let xgA=clamp(1.32*Math.exp(1.7*(aAtt-hDef))*tA.xgFor*tH.xgAgainst*0.92*styleG,0.15,5.5)/2;
   // Clinical finishers/creators genuinely create a few extra goals for the team, on
   // top of getting disproportionate credit when a goal happens (SCORE_W/CREATE_W below).
@@ -1796,7 +1871,7 @@ function liveFinish(G, M){
     motm:motm?motm.name:null, stat:{possH:poss,possA:100-poss,shH:M.shH,shA:M.shA,sotH:M.sotH,sotA:M.sotA,xgH:0,xgA:0}, timeline:tl };
   G.lastMatches=[G.lastMatch]; G._lmDay=G.day;   // seed this week's results with the watched game; cups append below
   logNews(G,"match",`${home.abbr} ${M.hs}-${M.as} ${away.abbr}`,G.userTeamId);
-  maybeInjure(home,players,G.settings); maybeInjure(away,players,G.settings);
+  { const pinj=pitchTierOf(home).inj; maybeInjure(home,players,G.settings,pinj); maybeInjure(away,players,G.settings,pinj); }
   simRound(G);   // plays the rest of the round (skips the already-played user game) + upkeep
 }
 // Swap a starter (xi index) for a bench player on the user's club, mid-match.
@@ -1981,10 +2056,12 @@ function startNextSeason(G){
       if(G.career.seasons.length>60) G.career.seasons.length = 60;
     }
   }
-  // age + develop everyone (rostered players AND the existing free-agent pool, once each —
-  // do FAs here BEFORE expiries add new names so the just-released don't age twice)
-  Object.values(G.players).forEach(p=>developPlayer(p));
-  (G.freeAgents||[]).forEach(p=>developPlayer(p));
+  // age + develop everyone exactly ONCE. Free agents live in BOTH G.players
+  // (teamId=null) and G.freeAgents — developing both lists aged every FA twice
+  // per season (the "free agents age twice as fast" bug), so only develop a
+  // freeAgents entry if it is NOT already in G.players.
+  Object.values(G.players).forEach(p=>developPlayer(p, trainMultOf(G, p)));
+  (G.freeAgents||[]).forEach(p=>{ if(!G.players[p.id]) developPlayer(p); });
   // Academy players auto-graduate to the senior squad once they're 20+ (they've
   // aged out of youth football) so prospects never get stuck in the academy.
   Object.values(G.players).forEach(p=>{
@@ -2088,10 +2165,11 @@ function startNextSeason(G){
     const wages = round((_wagesBy[c.id]||0)*10)/10;
     const merch = merchIncome(G, c, gate);
     const overhead = runningCosts(G, c, wages);
-    c.budget = round((c.budget + base + prize + gate + conc + merch.total - wages - overhead) * 10)/10;
+    const boxesInc = round((c.seasonBoxes||0)*10)/10;   // hospitality boxes accrued per home game
+    c.budget = round((c.budget + base + prize + gate + conc + boxesInc + merch.total - wages - overhead) * 10)/10;
     c.gatePerGame = homeGames>0 ? round(gate/homeGames*10)/10 : gate;
     if(!c.lastPnl) c.lastPnl={};
-    c.lastPnl.tv=base; c.lastPnl.prize=prize; c.lastPnl.gate=gate; c.lastPnl.conc=conc; c.lastPnl.merch=merch.total; c.lastPnl.merchMatch=merch.matchday; c.lastPnl.merchOnline=merch.online; c.lastPnl.gateGames=homeGames; c.lastPnl.wages=wages; c.lastPnl.overhead=overhead;
+    c.lastPnl.tv=base; c.lastPnl.prize=prize; c.lastPnl.gate=gate; c.lastPnl.conc=conc; c.lastPnl.boxes=boxesInc; c.lastPnl.merch=merch.total; c.lastPnl.merchMatch=merch.matchday; c.lastPnl.merchOnline=merch.online; c.lastPnl.gateGames=homeGames; c.lastPnl.wages=wages; c.lastPnl.overhead=overhead;
     // commercial income (shirt + sponsors + cup prizes) — merges into c.lastPnl below
     processCommercials(G, c);
     // The board reinvests runaway surpluses (infrastructure, debt clearance, youth)
@@ -2113,7 +2191,7 @@ function startNextSeason(G){
       // year is a warning; back-to-back years operating at a loss cost you board
       // confidence (the board answers for the club's sustainability, i.e. you).
       const pn=c.lastPnl||{};
-      const income=(pn.tv||0)+(pn.prize||0)+(pn.gate||0)+(pn.conc||0)+(pn.merch||0)+(pn.shirt||0)+(pn.sleeve||0)+(pn.sponsor||0)+(pn.cup||0)+(pn.naming||0);
+      const income=(pn.tv||0)+(pn.prize||0)+(pn.gate||0)+(pn.conc||0)+(pn.boxes||0)+(pn.merch||0)+(pn.shirt||0)+(pn.sleeve||0)+(pn.sponsor||0)+(pn.cup||0)+(pn.naming||0);
       const spend=(pn.wages||0)+(pn.overhead||0);
       if(income>0 && spend>income){
         G._ffpStrikes=(G._ffpStrikes||0)+1;
@@ -2128,7 +2206,7 @@ function startNextSeason(G){
       }
     }
     // reset the season matchday accruals for the new campaign
-    c.seasonGate=0; c.seasonConcession=0; c.gateLog=[];
+    c.seasonGate=0; c.seasonConcession=0; c.seasonBoxes=0; c.gateLog=[];
     c.pld=0;c.w=0;c.d=0;c.l=0;c.gf=0;c.ga=0;c.pts=0;
   });
   // Keep AI wage bills sane relative to their actual income BEFORE they go
@@ -2162,6 +2240,10 @@ function startNextSeason(G){
   // the offseason transfer market: wealthy AI clubs convert prize money into
   // squad strength (success compounds — less artificial parity across the leagues)
   aiTransferWindow(G);
+  // then AI clubs pick over the free-agent pool (before it gets thinned below).
+  // Two rounds of the market, so a good player rarely slips through both.
+  aiSignFreeAgents(G);
+  aiSignFreeAgents(G);
   // thin the free-agent pool (already aged above + the just-released surplus).
   // Anyone purged here who had a real career is preserved in G.retired so old
   // legends never silently disappear from the world.
@@ -2200,6 +2282,7 @@ function inSeasonDev(G){
     else               center = -0.16;
     const perf = clamp((r-6.7)*0.5, -0.6, 0.7);        // form modulates growth (6.7 ≈ neutral)
     if(p.age<=27 && center>0) center *= clamp(1+perf, 0.2, 1.9);
+    if(center>0) center *= trainMultOf(G, p);          // Training Centre speeds in-season growth too
     else center += perf*0.12;
     center = clamp(center, -0.45, 0.6);
     const keys=["pac","sho","pas","dri","def","phy","gk"], w=POS_W[p.pos]||{};
@@ -2210,7 +2293,7 @@ function inSeasonDev(G){
     if(p.ovr!==before){ p.seasonDev=(p.seasonDev||0)+(p.ovr-before); p.salary=wageFor(p); p.value=playerValue(p); }
   });
 }
-function developPlayer(p){
+function developPlayer(p, trainMult=1){
   p.age++;
   // `delta` is the intended OVR change this year. Young players with headroom to
   // their potential grow; older players decline. (Growth is capped by remaining room.)
@@ -2234,6 +2317,11 @@ function developPlayer(p){
     }
   }
   p.youthApps = 0; p.youthG = 0;
+  // Training Centre: better facilities grow players faster and soften decline
+  if(trainMult>1){
+    if(delta>0) delta = Math.round(delta * trainMult);
+    else if(delta<0) delta = Math.round(delta / (1 + (trainMult-1)*0.5));
+  }
   // Senior players have most growth happen in-season, so the rollover is damped (×0.45).
   // Academy youngsters get no in-season growth, so keep almost all of theirs here.
   if(delta>0) delta = (inAcademy && p.age<=21) ? Math.max(2, Math.round(delta*0.9)) : Math.max(1, Math.round(delta*0.45));
@@ -2733,6 +2821,58 @@ function generateTransferOffers(G){
   G.transferOffers.push({ id:"of"+Date.now()+Math.floor(_rng()*999), playerId:target.id, by:by.id, fee, release:clauseMet });
   logNews(G,"offer",`💬 ${by.name} ${clauseMet?"triggered the release clause for":"bid "+money(fee)+" for"} ${target.name}`, G.userTeamId);
 }
+// AI clubs shop the free-agent market every offseason, so good out-of-contract
+// players actually find clubs instead of rotting in the pool. A player signs
+// roughly at his level (a club whose squad he fits or improves), better players
+// almost always get picked up, and old/weak ones mostly stay available.
+function aiSignFreeAgents(G){
+  const fas = (G.freeAgents||[]).slice().sort((a,b)=>b.ovr-a.ovr);
+  if(!fas.length) return;
+  // one pass: senior squad size + BEST-XI average per club (a whole-squad average
+  // sits ~10 below the first team and would block every elite free agent)
+  const byTeam = {};
+  Object.values(G.players).forEach(p=>{ if(p.teamId!=null && !p.youth){ (byTeam[p.teamId]=byTeam[p.teamId]||[]).push(p.ovr); } });
+  const size={}, xiAvg={};
+  G.clubs.forEach(c=>{
+    const arr=(byTeam[c.id]||[]).sort((a,b)=>b-a);
+    size[c.id]=arr.length;
+    xiAvg[c.id]=arr.length ? arr.slice(0,11).reduce((s,v)=>s+v,0)/Math.min(11,arr.length) : 50;
+  });
+  const aiClubs = G.clubs.filter(c=>!c.userControlled);
+  const signed = new Set();
+  const headlines = [];
+  fas.forEach(p=>{
+    if(p.retired) return;
+    // desire: the better (and younger) the player, the more surely he's snapped up
+    let want = clamp(0.30 + (p.ovr-50)*0.025, 0.10, 0.96);
+    if(p.age>=34) want *= 0.45; else if(p.age>=31) want *= 0.75;
+    else if(p.age<=23 && p.ovr>=65) want = Math.max(want, 0.93);   // a young talent without a club never lasts long
+    if(!chance(want)) return;
+    const fits = aiClubs.filter(c=>{
+      if((size[c.id]||0)>=26 || c.budget<=-10) return false;
+      return p.ovr >= xiAvg[c.id]-9 && p.ovr <= xiAvg[c.id]+9;   // he'd get a game, and they'd want him
+    });
+    let club = fits.length ? pick(fits) : null;
+    if(!club && p.ovr>=70){   // a star above everyone's level: the biggest clubs make room
+      const top = aiClubs.filter(c=>(size[c.id]||0)<27 && c.budget>0).sort((a,b)=>xiAvg[b.id]-xiAvg[a.id]).slice(0,8);
+      if(top.length) club = pick(top);
+    }
+    if(!club) return;
+    logMove(G, p, "free", null, club.id, null);
+    p.teamId = club.id; p.years = rint(1,3);
+    p.salary = clamp(wageDemand(p)*0.9, 0.2, 30);
+    p.unhappy = false; p.expiredSince = null; p.wantsOut = false; p.listed = false;
+    if(p.youth && p.age>=17) p.youth = false;   // signed off the street = straight into the senior squad
+    G.players[p.id] = p;
+    size[club.id]=(size[club.id]||0)+1;
+    signed.add(p.id);
+    if(p.ovr>=72) headlines.push(`✍️ ${club.name} snap up free agent ${p.pos} ${p.name} (${p.ovr})`);
+  });
+  if(signed.size){
+    G.freeAgents = G.freeAgents.filter(p=>!signed.has(p.id));
+    headlines.slice(0,3).forEach(msg=>logNews(G,"transfer",msg, G.userTeamId));
+  }
+}
 // Sign an out-of-contract free agent (no fee; wage only). Squad cap keeps it sane.
 function signFreeAgent(G, p){
   const club = G.clubs[G.userTeamId];
@@ -3067,6 +3207,10 @@ function migrate(G){
     expandWorld(G);   // 160-club-era saves grow into the 8-nation, 4-tier world
     if(!Array.isArray(G.news)) G.news=[];
     if(!Array.isArray(G.freeAgents)) G.freeAgents=[];
+    // A free agent lives in BOTH G.players and G.freeAgents. After a save/load
+    // those became two separate copies that then developed independently (double
+    // aging + diverging stats). Rebind to a single shared object.
+    G.freeAgents = G.freeAgents.map(p => (p && G.players && G.players[p.id]) ? G.players[p.id] : p);
     if(!Array.isArray(G.transferOffers)) G.transferOffers=[];
     if(!Array.isArray(G.champions)) G.champions=[];
     if(!Array.isArray(G.contChampions)) G.contChampions=[];
@@ -3096,7 +3240,7 @@ function migrate(G){
       if(p.expiredSince==null && (p.expiredGrace || (p.years<=0 && p.teamId!=null && G.clubs[p.teamId] && G.clubs[p.teamId].userControlled))) p.expiredSince = G.season-1;
       fillP(p); });
     (G.freeAgents||[]).forEach(p=>{ fill(p.stats); fill(p.career); fillCS(p); fillCareerComp(p); fillP(p); });
-    G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureCommercials(G,c); if(!c.setPieces) c.setPieces={pen:null,fk:null,corner:null}; if(c.ticketTier==null) c.ticketTier=1; if(c.concessionTier==null) c.concessionTier=1; if(c.seasonGate==null) c.seasonGate=0; if(c.seasonConcession==null) c.seasonConcession=0; if(!Array.isArray(c.gateLog)) c.gateLog=[]; if(c.autoRotate==null) c.autoRotate=false; if(!c.instr) c.instr={press:"mid",tempo:"normal",width:"normal"}; if(c.formFam==null) c.formFam=100; if(c.formFamOf==null) c.formFamOf=c.formation; if(c.storeTier==null) c.storeTier=0; if(c.seasonTicketPct==null) c.seasonTicketPct=0; ensureXI(c, G.players); });
+    G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureCommercials(G,c); if(!c.setPieces) c.setPieces={pen:null,fk:null,corner:null}; if(c.ticketTier==null) c.ticketTier=1; if(c.concessionTier==null) c.concessionTier=1; if(c.seasonGate==null) c.seasonGate=0; if(c.seasonConcession==null) c.seasonConcession=0; if(!Array.isArray(c.gateLog)) c.gateLog=[]; if(c.autoRotate==null) c.autoRotate=false; if(!c.instr) c.instr={press:"mid",tempo:"normal",width:"normal"}; if(c.formFam==null) c.formFam=100; if(c.formFamOf==null) c.formFamOf=c.formation; if(c.storeTier==null) c.storeTier=0; if(c.seasonTicketPct==null) c.seasonTicketPct=0; if(c.trainTier==null) c.trainTier=0; if(c.scoutTier==null) c.scoutTier=0; if(c.pitchTier==null) c.pitchTier=0; if(c.boxes==null) c.boxes=0; if(c.seasonBoxes==null) c.seasonBoxes=0; if(!c.coaches) c.coaches={att:0,def:0,gk:0,fit:0}; ensureXI(c, G.players); });
     if(!G.clubs.some(c=>c.rivalId!=null)) assignRivals(G.clubs);
     if(!G.expectation) setOwnerExpectation(G);
     // history/records + feature-toggle backfill
@@ -3236,6 +3380,7 @@ function App(){
   if(screen==="splash" || !G) return <Splash onStart={(id,opts)=>{ const g=newGame(id,opts); g.slotId=null; commit(g); setTab("hub"); setScreen("play"); }} onBack={listSlots().length?()=>setScreen("menu"):null} />;
 
   const user = G.clubs[G.userTeamId];
+  SCOUT_FLOOR = scoutTierOf(user).floor;   // the user's scouting network lifts the fog everywhere in the UI
 
   const TABS = [
     ["hub","Hub"],["squad","Squad"],["tactics","Tactics"],["table","Table"],
@@ -3321,7 +3466,7 @@ function PotPill({v}){ return <span className="inline-block w-8 text-center roun
 // ---- Scouting fog: unproven players (youth, low pro experience) show a SCOUTED rating that can be
 // off and converges to the truth as they rack up appearances. Deterministic per id; AI/sim use TRUE.
 function scoutApps(p){ return ((p.career&&p.career.App)||0) + ((p.stats&&p.stats.App)||0); }
-function scoutConf(p){ if(!p) return 1; let c=clamp(scoutApps(p)/55, 0, 1); if(p.youth) c=Math.min(c,0.30); c=clamp(c+(p.age-17)*0.025, 0, 1); return c; }
+function scoutConf(p){ if(!p) return 1; let c=clamp(scoutApps(p)/55, 0, 1); if(p.youth) c=Math.min(c,0.30); c=clamp(c+(p.age-17)*0.025, 0, 1); return clamp(Math.max(c, SCOUT_FLOOR), 0, 1); }   // Scouting Network raises the floor
 function scoutBias(p){ return (mulberry32((p.id>>>0)||1)()*2-1)*8; }
 function scoutedOvr(p){ const c=scoutConf(p); return clamp(Math.round(p.ovr + scoutBias(p)*(1-c)), 20, 99); }
 function scoutedPot(p){ const c=scoutConf(p); return clamp(Math.round(p.pot + scoutBias(p)*(1-c)*1.1), 20, 99); }
@@ -5079,6 +5224,11 @@ function recordHomeGate(G, club, opts={}){
   const spendPerK = [0.009,0.006,0.004,0.0025][club.div] || 0.0025;   // £M per 1,000 fans at standard price
   const conc = round((att/1000) * spendPerK * facilityGateMult(club) * ct.priceMult * ct.uptakeMult * 10)/10;
   club.seasonConcession = round(((club.seasonConcession||0) + conc)*10)/10;
+  // hospitality boxes: premium corporate seats sold every home game (big nights pay extra)
+  if(club.boxes){
+    const boxInc = round(boxIncomePerGame(club) * ((opts.cup||opts.cont)?1.15:1) * (opts.derby?1.1:1) * 1000)/1000;
+    club.seasonBoxes = round(((club.seasonBoxes||0) + boxInc)*1000)/1000;
+  }
   // keep a short per-match ledger for the user's club so they can see weekly takings
   if(club.userControlled){
     club.gateLog = club.gateLog || [];
@@ -5117,9 +5267,11 @@ function merchIncome(G, c, gate){
 function runningCosts(G, c, wages){
   const staff   = (wages||0) * 0.30;                                             // staff wages scale with the playing budget
   const stadium = (stadiumCapacity(c)/1000) * ([0.15,0.09,0.06,0.04][c.div]||0.04) * facilityGateMult(c);
-  const facils  = (((c.facilityTier||0)) + ((c.academy&&c.academy.level)||1)) * 2;
+  const facils  = (((c.facilityTier||0)) + ((c.academy&&c.academy.level)||1) + (c.trainTier||0) + (c.scoutTier||0) + (c.pitchTier||0)) * 2
+                + (c.boxes||0)*0.05;                                             // upkeep on every built tier + box maintenance
   const admin   = [10,4,2,1][c.div] || 1;
-  return round((staff + stadium + facils + admin)*10)/10;
+  const coaches = coachWageBill(c);                                              // specialist coaching staff on yearly wages
+  return round((staff + stadium + facils + admin + coaches)*10)/10;
 }
 
 /* ----------------------------- stadium naming rights --------------------- */
@@ -5490,6 +5642,7 @@ function Finances({G, commit, tShow}){
               ["🏆 League prize money", pnl.prize, true],
               [`🏟️ Gate income (${pnl.gateGames||0} home games)`, pnl.gate, true],
               ["🍔 Food & drink", pnl.conc||0, true],
+              ...(pnl.boxes?[["🥂 Hospitality boxes", pnl.boxes, true]]:[]),
               [`🛍️ Merchandise${pnl.merchOnline!=null?` (£${(pnl.merchMatch||0).toFixed(1)}m matchday + £${(pnl.merchOnline||0).toFixed(1)}m online)`:""}`, pnl.merch||0, true],
               ["👕 Shirt deal", pnl.shirt||0, true],
               ["🩳 Sleeve/training kit", pnl.sleeve||0, true],
@@ -5506,7 +5659,7 @@ function Finances({G, commit, tShow}){
             ))}
             <div className="border-t border-[#1d2940] pt-1 flex justify-between font-semibold">
               <span>Net</span>
-              <span className="tnum">{(()=>{const net=round(((pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.conc||0)+(pnl.merch||0)+(pnl.shirt||0)+(pnl.sleeve||0)+(pnl.sponsor||0)+(pnl.naming||0)+(pnl.cup||0)-(pnl.wages||0)-(pnl.overhead||0))*10)/10; return <span className={net>=0?"text-emerald-300":"text-red-400"}>{net>=0?"+":""}{money(net)}</span>; })()}</span>
+              <span className="tnum">{(()=>{const net=round(((pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.conc||0)+(pnl.boxes||0)+(pnl.merch||0)+(pnl.shirt||0)+(pnl.sleeve||0)+(pnl.sponsor||0)+(pnl.naming||0)+(pnl.cup||0)-(pnl.wages||0)-(pnl.overhead||0))*10)/10; return <span className={net>=0?"text-emerald-300":"text-red-400"}>{net>=0?"+":""}{money(net)}</span>; })()}</span>
             </div>
           </div>
         </Card>
@@ -5658,6 +5811,78 @@ function Finances({G, commit, tShow}){
               </button>
             : <span className="text-amber-300 text-sm font-semibold">Max tier</span>}
         </div>
+      </Card>
+
+      {/* club development: training / scouting / pitch */}
+      <Card>
+        <div className="font-semibold mb-2">🏗️ Club Development</div>
+        {[["trainTier",TRAIN_TIERS,"🎯","Training Centre","Players develop faster and veterans decline slower — current growth ×"+trainTierOf(user).mult.toFixed(2)],
+          ["scoutTier",SCOUT_TIERS,"🔭","Scouting Network","Lifts the scouting fog: unproven players' true OVR/potential show sooner (youth intake too). Current: "+(scoutTierOf(user).floor>0?Math.round(scoutTierOf(user).floor*100)+"% minimum accuracy":"no boost")],
+          ["pitchTier",PITCH_TIERS,"🌱","Pitch & Grounds","A better surface: +"+Math.round((pitchTierOf(user).xg-1)*100)+"% home attack and "+Math.round((1-pitchTierOf(user).inj)*100)+"% fewer injuries in your home games"]].map(([key,tiers,em,label,desc])=>{
+          const lvl = clamp(user[key]||0, 0, tiers.length-1), cur = tiers[lvl], nxt = tiers[lvl+1];
+          const buy = () => {
+            if(user.budget < nxt.cost){ tShow("Not enough budget."); return; }
+            user.budget = round((user.budget - nxt.cost)*10)/10; user[key] = lvl+1;
+            logNews(G,"finance",`${em} ${label} upgraded to ${nxt.name}`, user.id);
+            commit(G); tShow(`${label} → ${nxt.name}`);
+          };
+          return (
+            <div key={key} className="py-2 border-b border-[#15203a] last:border-0">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div>
+                  <div className="font-medium text-sm">{em} {label} <span className="text-slate-500 text-xs font-normal">— {cur.name} (Tier {lvl+1}/{tiers.length})</span></div>
+                  <div className="text-xs text-slate-500">{desc}</div>
+                </div>
+                {nxt
+                  ? <button onClick={buy} disabled={user.budget<nxt.cost}
+                      className={"px-3 py-1.5 rounded text-sm font-semibold whitespace-nowrap "+(user.budget>=nxt.cost?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-500 cursor-not-allowed")}>
+                      {nxt.name} · {money(nxt.cost)}
+                    </button>
+                  : <span className="text-amber-300 text-xs font-semibold">Max tier</span>}
+              </div>
+            </div>
+          );
+        })}
+        <div className="text-[11px] text-slate-500 mt-2">Each built tier adds a small yearly upkeep to running costs.</div>
+      </Card>
+
+      {/* coaching staff */}
+      <Card>
+        <div className="font-semibold mb-1">👔 Coaching Staff <span className="text-slate-500 text-xs font-normal">— {money(coachWageBill(user))}/yr in wages</span></div>
+        <div className="text-xs text-slate-500 mb-2">Specialists on yearly wages (settled with running costs). ⚔️ creates more chances · 🛡️ concedes fewer · 🧤 sharper keeping · 🏃 slower fitness drain. Hire, upgrade or let go anytime.</div>
+        <div className="grid sm:grid-cols-2 gap-2">
+          {Object.keys(COACH_ROLES).map(role=>{
+            const lvl = coachLvl(user, role);
+            return (
+              <div key={role} className="bg-[#0d1526] rounded p-2">
+                <div className="text-sm font-medium mb-1">{COACH_ROLES[role].emoji} {COACH_ROLES[role].name}</div>
+                <div className="flex gap-1 flex-wrap">
+                  {COACH_TIER_NAME.map((nm,i)=>(
+                    <button key={i} onClick={()=>{ user.coaches = user.coaches||{att:0,def:0,gk:0,fit:0}; user.coaches[role]=i; commit(G); tShow(i===0?`${COACH_ROLES[role].name} released`:`${COACH_TIER_NAME[i]} ${COACH_ROLES[role].name} hired (${money(COACH_WAGE[i])}/yr)`); }}
+                      className={"px-2 py-1 rounded text-xs font-semibold "+(lvl===i?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300 hover:bg-[#1d2940]")}>
+                      {nm}{i>0 && <span className="opacity-70"> {money(COACH_WAGE[i])}</span>}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      {/* hospitality boxes */}
+      <Card>
+        <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+          <div className="font-semibold">🥂 Hospitality Boxes <span className="text-slate-500 text-xs font-normal">({user.boxes||0}/{BOX_MAX} built)</span></div>
+          {(user.boxes||0) < BOX_MAX
+            ? <button onClick={()=>{ if(user.budget<BOX_COST){ tShow("Not enough budget."); return; } user.budget=round((user.budget-BOX_COST)*10)/10; user.boxes=(user.boxes||0)+BOX_UNIT; logNews(G,"finance",`🥂 Built ${BOX_UNIT} hospitality boxes at ${user.stadium} (${user.boxes} total)`, user.id); commit(G); tShow(`+${BOX_UNIT} boxes built`); }}
+                disabled={user.budget<BOX_COST}
+                className={"px-3 py-1.5 rounded text-sm font-semibold "+(user.budget>=BOX_COST?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-500 cursor-not-allowed")}>
+                Build {BOX_UNIT} boxes · {money(BOX_COST)}
+              </button>
+            : <span className="text-amber-300 text-xs font-semibold">Fully built</span>}
+        </div>
+        <div className="text-xs text-slate-500">Premium corporate seating sold every home game — worth ~{money(boxIncomePerGame(user))} per game at your current level (corporate demand is far higher in the top flight; cup and continental nights pay a premium). Earned so far this season: <span className="text-emerald-300 font-semibold">{money(round((user.seasonBoxes||0)*10)/10)}</span>.</div>
       </Card>
 
       {/* active sponsors */}
@@ -6278,6 +6503,23 @@ function BoxScore({m, G}){
         ? <div className="text-center text-xs text-amber-300 mb-1">After extra time · {(m.pens.winner==="H"?m.homeName:m.awayName)} win {Math.max(m.pens.h,m.pens.a)}-{Math.min(m.pens.h,m.pens.a)} on penalties 🥅</div>
         : m.extraTime ? <div className="text-center text-xs text-amber-300 mb-1">After extra time</div>
         : m.cup ? <div className="text-center text-xs text-amber-300 mb-1">Cup tie</div> : null}
+      {m.pens && Array.isArray(m.pens.shots) && m.pens.shots.length>0 && (
+        <div className="mb-2 bg-[#0d1526] rounded-lg p-2">
+          <div className="text-[11px] text-slate-500 text-center mb-1">Penalty shootout — kick by kick</div>
+          <div className="grid grid-cols-2 gap-4 text-xs">
+            <div className="text-right space-y-0.5">
+              {m.pens.shots.filter(s=>s.side==="H").map((s,i)=>(
+                <div key={i} className={s.ok?"text-slate-300":"text-slate-500"}><span className="text-slate-600 mr-1">{i+1}.</span>{s.name} {s.ok?"⚽":"❌"}</div>
+              ))}
+            </div>
+            <div className="space-y-0.5">
+              {m.pens.shots.filter(s=>s.side==="A").map((s,i)=>(
+                <div key={i} className={s.ok?"text-slate-300":"text-slate-500"}>{s.ok?"⚽":"❌"} {s.name}<span className="text-slate-600 ml-1">.{i+1}</span></div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-4 text-sm">
         <div className="text-right">
           {m.hScorers.map((s,i)=><div key={i} className="text-slate-300">{s.name} {s.min}'{s.pk?<span className="text-amber-400"> (pen)</span>:s.fk?<span className="text-amber-400"> (FK)</span>:s.assist?<span className="text-slate-500"> ({s.assist})</span>:""}</div>)}
