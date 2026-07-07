@@ -2786,20 +2786,28 @@ function buildSellContext(G){
 // player lands at ONE club that wanted him, and money actually circulates.
 // Returns true if a sale happened.
 function trySellPlayer(G, p, ctx){
-  if(!p || p.teamId==null || p.ovr<63 || p.age>33) return false;
-  // a player who moved in the last window stays put — no same-window flips or
-  // back-to-back-season sales (a good player shouldn't bounce club to club)
-  if((p.transfers||[]).some(t=>t.t==="buy" && t.s>=G.season-1)) return false;
+  if(!p || p.teamId==null || p.age>35) return false;
+  // Value a player by his PROJECTED ability, so a young wonderkid is worth selling
+  // for a fee well before he's a finished player (not lost on a free). Genuine
+  // filler (low current + low ceiling) still gets released free below.
+  const yw = clamp((26 - p.age)/10, 0, 1);
+  const proj = p.ovr + Math.max(0, (p.pot||p.ovr) - p.ovr) * yw;
+  if(proj < 60) return false;
+  // he stays put if he already moved this season (no same-window flip) or was
+  // bought last season (no back-to-back sales) — a good player shouldn't bounce
+  if((p.transfers||[]).some(t=>t.s===G.season || (t.t==="buy" && t.s===G.season-1))) return false;
   const seller = G.clubs[p.teamId];
   const val = playerValue(p);
+  const prospect = p.age<=21 && (p.pot||0) >= p.ovr+7;   // bought for the future, not to start now
   let best=null, bestScore=-1;
   for(const c of ctx.buyers){
     if(c.id===seller.id) continue;
-    if((ctx.size[c.id]||0) >= 25) continue;
-    if(c.budget < val*0.5 + 4) continue;
-    if(p.ovr < (ctx.xiAvg[c.id]||50) - 5) continue;   // he'd actually get a game there
+    if((ctx.size[c.id]||0) >= 26) continue;
+    if(c.budget < val*0.5 + 2) continue;
+    // he'd get a game — relaxed for prospects (big clubs stockpile young talent)
+    if(!prospect && p.ovr < (ctx.xiAvg[c.id]||50) - 6) continue;
     // prefer clubs where he'd be an upgrade, with money to spend
-    const score = (p.ovr - (ctx.xiAvg[c.id]||50)) + c.budget/200 + _rng()*2;
+    const score = (proj - (ctx.xiAvg[c.id]||50)) + c.budget/200 + (prospect?3:0) + _rng()*2;
     if(score>bestScore){ bestScore=score; best=c; }
   }
   if(!best) return false;
@@ -2817,6 +2825,10 @@ function trySellPlayer(G, p, ctx){
 // to have a market, otherwise release him free.
 function shedPlayer(G, p, ctx){
   if(ctx && trySellPlayer(G, p, ctx)) return;
+  // A genuinely good player who couldn't be sold this window is NOT dumped on a
+  // free (unrealistic for quality) — the club keeps him one more year on a short
+  // deal. Only filler and end-of-career players actually hit free agency.
+  if(p.ovr>=67 && p.age<34 && p.teamId!=null){ p.years=Math.max(p.years||0,1); p.unhappy=false; p.expiredSince=null; return; }
   releaseToFA(G, p);
 }
 function aiTransferWindow(G){
@@ -5663,7 +5675,10 @@ function relieveFinancialDistress(G, club){
   }
   // AI fire-sale: sell the most valuable player to whichever solvent club can
   // afford it; if nobody can, release the highest earners to cut the wage bill.
-  let squad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth).sort((a,b)=>b.value-a.value);
+  // Exclude players who already moved this season — a club shouldn't immediately
+  // fire-sell someone it just signed (that's a same-window bounce).
+  const settled = p => !(p.transfers||[]).some(t=>t.s===G.season);
+  let squad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth && settled(p)).sort((a,b)=>b.value-a.value);
   let guard=0;
   while(club.budget < FINANCIAL_CRISIS && squad.length>14 && guard++<10){
     const target = squad[0];
