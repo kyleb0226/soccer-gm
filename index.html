@@ -337,6 +337,14 @@ function wageFor(p){
   if(p.age < 23) s *= 0.5; else if(p.age < 27) s *= 0.82;
   return clamp(round(s*10)/10, 0.2, 30);
 }
+// Wages scale with the DIVISION a club plays in: the same ability commands a
+// fraction of a top-flight wage at a 4th-tier club (income there is a fraction
+// too). Without this, lower-league squads demanded top-flight wages their tiny
+// income couldn't cover, so they hemorrhaged money and dumped players every year.
+const DIV_WAGE_MULT = [1, 0.60, 0.34, 0.20];
+function divWageMult(div){ return DIV_WAGE_MULT[clamp(div||0,0,3)]; }
+// The wage an AI club in `div` actually pays a player (used on signings/renewals).
+function aiWageFor(p, div){ return clamp(round(wageFor(p)*divWageMult(div)*10)/10, 0.1, 30); }
 // What a player demands per year to re-sign: his market wage, plus an ambition
 // premium for young talent with headroom, plus a form premium from last season.
 function wageDemand(p){
@@ -2086,6 +2094,7 @@ function startNextSeason(G){
   // current: re-signs add their delta, releases subtract.
   const _bills = {};
   Object.values(G.players).forEach(p=>{ if(p.teamId!=null) _bills[p.teamId]=(_bills[p.teamId]||0)+(p.salary||0); });
+  const _sellCtx = buildSellContext(G);   // lets the AI SELL good players for a fee instead of dumping them free
   Object.values(G.players).forEach(p=>{
     if(p.teamId==null) return;
     p.years = (Number.isFinite(p.years)?p.years:1) - 1;
@@ -2110,13 +2119,13 @@ function startNextSeason(G){
         // let the rest walk so the wage bill stays inside income.
         const incomeEst = aiIncomeEstimate(G, club);
         const wageRoom = incomeEst*0.78 - (_bills[club.id]||0);   // headroom under a sane wage:income ratio
-        const demand = wageDemand(p);
+        const demand = round(wageDemand(p)*divWageMult(club.div)*10)/10;   // division-scaled wage
         const keyMan = p.ovr>=72;                                  // genuine first-teamers are kept harder
         const affordable = demand <= Math.max(wageRoom, 0) + (keyMan?1.5:0.4);
         if(p.ovr>=58 && (keyMan || affordable) && chance(keyMan?0.94:0.80)){
           _bills[club.id] = (_bills[club.id]||0) + demand - (p.salary||0);
           p.years=rint(2,4); p.salary=demand; p.unhappy=false;
-        } else { _bills[club.id] = (_bills[club.id]||0) - (p.salary||0); releaseToFA(G, p); }
+        } else { _bills[club.id] = (_bills[club.id]||0) - (p.salary||0); shedPlayer(G, p, _sellCtx); }
       }
     } else if(p.years<=1 && club && club.userControlled && p.ovr>=60){
       p.unhappy=true;   // wants a new deal before running down (Bosman risk next year)
@@ -2136,13 +2145,25 @@ function startNextSeason(G){
   capRetired(G);
   // promotion / relegation WITHIN each country: at every tier boundary the
   // bottom 3 of the division above swap with the top 3 of the division below.
+  const _movedDiv = [];
   COUNTRIES.forEach((C,ci)=>{
     // snapshot all tables BEFORE any swaps so a club moves at most one tier
     const tables = []; for(let d=0; d<NUM_DIVS; d++) tables.push(tableFor(G,d,ci));
     for(let d=0; d<NUM_DIVS-1; d++){
-      tables[d].slice(-3).forEach(c=>{ c.div=d+1; logNews(G,"releg",`⬇️ ${c.name} are relegated to the ${divName(ci,d+1)}`, c.id); });
-      tables[d+1].slice(0,3).forEach(c=>{ c.div=d; logNews(G,"promo",`⬆️ ${c.name} are promoted to the ${divName(ci,d)}`, c.id); addHonour(c, G.season, "promo", `Promoted to ${divName(ci,d)}`); });
+      tables[d].slice(-3).forEach(c=>{ c.div=d+1; _movedDiv.push(c); logNews(G,"releg",`⬇️ ${c.name} are relegated to the ${divName(ci,d+1)}`, c.id); });
+      tables[d+1].slice(0,3).forEach(c=>{ c.div=d; _movedDiv.push(c); logNews(G,"promo",`⬆️ ${c.name} are promoted to the ${divName(ci,d)}`, c.id); addHonour(c, G.season, "promo", `Promoted to ${divName(ci,d)}`); });
     }
+  });
+  // Normalize every AI club's wage bill to its DIVISION each season. This is the
+  // structural guarantee that keeps clubs solvent: a squad's wages track the income
+  // its tier actually generates, so relegated clubs shed the top-flight burden their
+  // new income can't cover and no club drifts into a wage spiral it can't escape.
+  // (The user's own club keeps its individually negotiated contracts.)
+  Object.values(G.players).forEach(p=>{
+    if(p.teamId==null || p.youth) return;
+    const c = G.clubs[p.teamId];
+    if(!c || c.userControlled) return;
+    p.salary = aiWageFor(p, c.div);
   });
   // finances: settle the season P&L for every club.
   // one-pass wage bills (post-renewals) instead of a world-scan per club
@@ -2152,13 +2173,13 @@ function startNextSeason(G){
     const pos = leaguePos(G,c);
     // richer leagues have richer TV deals & prize pots (Albion > Rhineland > Iberia > Padania)
     const wealth = (COUNTRIES[c.country||0]||{}).wealth || 1;
-    const base = round(([30,13,5,2.5][c.div]||2.5) * wealth * 10)/10;
+    const base = round(([72,22,7,3][c.div]||3) * wealth * 10)/10;   // TV / central distribution — top flight is huge, esp. the rich leagues
     const prize = round(leaguePrize(c.div, pos) * wealth * 10)/10;
     // Gate is now accrued per home match across the season (league + cup + UCL),
     // flexing with attendance/price. AI clubs are simmed the same way, so any club
     // with no recorded gate (shouldn't happen) falls back to a full-season estimate.
     let gate = round((c.seasonGate||0)*10)/10;
-    if(gate<=0){ gate = round(c.capacity/1000 * ([0.028,0.017,0.010,0.006][c.div]||0.006) * facilityGateMult(c) * 0.85 * 19 *10)/10; }
+    if(gate<=0){ gate = round(c.capacity/1000 * ([0.040,0.023,0.013,0.007][c.div]||0.006) * facilityGateMult(c) * 0.85 * 19 *10)/10; }
     const homeGames = (c.gateLog||[]).length;
     let conc = round((c.seasonConcession||0)*10)/10;
     if(conc<=0 && homeGames===0){ conc = round((c.capacity/1000)*([0.009,0.006,0.004,0.0025][c.div]||0.0025)*facilityGateMult(c)*0.85*19*10)/10; }
@@ -2179,7 +2200,7 @@ function startNextSeason(G){
     // sustain a payroll smaller clubs can't — success is allowed to compound
     // (bounded: honours accumulate slowly, and the cap still exists)
     const prest = Math.min(((c.honours||[]).filter(h=>h.type==="league"||h.type==="continental").length), 30);
-    const reserveCap = ([350,120,50,25][c.div]||25) + prest*10;
+    const reserveCap = ([800,260,90,40][c.div]||40) + prest*22;   // winners can hoard a real war chest — dynasties spend it on fees
     if(c.budget > reserveCap) c.budget = round((reserveCap + (c.budget-reserveCap)*0.5)*10)/10;
     // let the user see what their season's performance earned in prize money
     if(c.userControlled){
@@ -2213,7 +2234,7 @@ function startNextSeason(G){
   // into crisis — without this, wages drift up via renewals every season
   // while income stays roughly flat, and the whole league's budgets erode
   // year over year (not just a few badly-run clubs).
-  G.clubs.forEach(c=>capAIWageBill(G, c));
+  { const wageCtx = buildSellContext(G); G.clubs.forEach(c=>capAIWageBill(G, c, wageCtx)); }
   // financial distress: a club that's badly run can't just spiral forever.
   // AI clubs get force-restructured (fire-sale a player, or release expensive
   // wages); the user's club instead takes a real consequence — board confidence.
@@ -2228,11 +2249,12 @@ function startNextSeason(G){
   // surplus seniors go to free agency, surplus youth are released entirely.
   { const byTeamTrim = {};
     Object.values(G.players).forEach(p=>{ if(p.teamId!=null){ (byTeamTrim[p.teamId]=byTeamTrim[p.teamId]||[]).push(p); } });
+    const trimCtx = buildSellContext(G);
     G.clubs.forEach(c=>{
       if(c.userControlled) return;
       const mine = byTeamTrim[c.id]||[];
       const sen = mine.filter(p=>!p.youth).sort((a,b)=>b.ovr-a.ovr);
-      sen.slice(24).forEach(p=>releaseToFA(G, p));
+      sen.slice(24).forEach(p=>shedPlayer(G, p, trimCtx));   // sell the surplus for a fee where possible
       const yth = mine.filter(p=>p.youth).sort((a,b)=>(b.pot||b.ovr)-(a.pot||a.ovr));
       yth.slice(7).forEach(p=>retireOrDrop(G, p));
     });
@@ -2423,7 +2445,7 @@ function youthIntake(G, club){
 function refillSquad(G, club){
   let squad = teamPlayersOf(G.players, club.id).filter(p=>!p.youth);
   const adj = [-2,-8,-15,-21][club.div] || -8;
-  const add = pos => { const p=makePlayer(pos,[18,29],adj,club.country||0); p.teamId=club.id; p.years=rint(1,3); G.players[p.id]=p; squad.push(p);
+  const add = pos => { const p=makePlayer(pos,[18,29],adj,club.country||0); p.teamId=club.id; p.years=rint(1,3); p.salary=aiWageFor(p, club.div); G.players[p.id]=p; squad.push(p);
     if(TEAM_IDX) (TEAM_IDX[club.id]=TEAM_IDX[club.id]||[]).push(p); };   // keep the fast index truthful for the autoPickXI below
   const has = arr => squad.filter(p=>arr.includes(p.pos)).length;
   const DEF=["RB","LB","CB","RWB","LWB"], MID=["CDM","CM","CAM","RM","LM"], ATT=["RW","LW","ST"];
@@ -2737,6 +2759,54 @@ function sellPlayer(G, p, fee, toClubId){
 // can sustain a run — while selling clubs bank the fee and rebuild. Bounded so
 // it's dynasty-FRIENDLY, not dynasty-guaranteed: rich sellers usually keep their
 // star, fees scale with the seller's leverage, and squad caps still apply.
+// Build a lightweight "who's buying" context once per offseason so the shed
+// helpers below can broker fee sales without an O(world²) rescan each call.
+function buildSellContext(G){
+  const size={}, ratings={};
+  Object.values(G.players).forEach(p=>{ if(p.teamId!=null && !p.youth){ size[p.teamId]=(size[p.teamId]||0)+1; (ratings[p.teamId]=ratings[p.teamId]||[]).push(p.ovr); } });
+  const xiAvg={};
+  G.clubs.forEach(c=>{ const a=(ratings[c.id]||[]).sort((x,y)=>y-x); xiAvg[c.id]=a.length?a.slice(0,11).reduce((s,v)=>s+v,0)/Math.min(11,a.length):50; });
+  return { size, xiAvg, buyers: G.clubs.filter(c=>!c.userControlled) };
+}
+// Try to SELL a good player to a solvent club that could use him — for a FEE —
+// instead of dumping him into free agency. This is what stops good players from
+// endlessly bouncing club-to-club on frees: clubs shedding quality get paid, the
+// player lands at ONE club that wanted him, and money actually circulates.
+// Returns true if a sale happened.
+function trySellPlayer(G, p, ctx){
+  if(!p || p.teamId==null || p.ovr<63 || p.age>33) return false;
+  // a player who moved in the last window stays put — no same-window flips or
+  // back-to-back-season sales (a good player shouldn't bounce club to club)
+  if((p.transfers||[]).some(t=>t.t==="buy" && t.s>=G.season-1)) return false;
+  const seller = G.clubs[p.teamId];
+  const val = playerValue(p);
+  let best=null, bestScore=-1;
+  for(const c of ctx.buyers){
+    if(c.id===seller.id) continue;
+    if((ctx.size[c.id]||0) >= 25) continue;
+    if(c.budget < val*0.5 + 4) continue;
+    if(p.ovr < (ctx.xiAvg[c.id]||50) - 5) continue;   // he'd actually get a game there
+    // prefer clubs where he'd be an upgrade, with money to spend
+    const score = (p.ovr - (ctx.xiAvg[c.id]||50)) + c.budget/200 + _rng()*2;
+    if(score>bestScore){ bestScore=score; best=c; }
+  }
+  if(!best) return false;
+  const fee = round(val*(0.55+_rng()*0.35)*10)/10;   // a real but motivated-sale fee
+  best.budget = round((best.budget - fee)*10)/10;
+  if(seller) seller.budget = round((seller.budget + fee)*10)/10;
+  logMove(G, p, "buy", seller.id, best.id, fee);
+  ctx.size[best.id] = (ctx.size[best.id]||0)+1;
+  ctx.size[seller.id] = Math.max(0,(ctx.size[seller.id]||1)-1);
+  p.teamId = best.id; p.years = rint(2,4); p.salary = aiWageFor(p, best.div);
+  p.unhappy=false; p.expiredSince=null; p.wantsOut=false; p.listed=false;
+  return true;
+}
+// Shed a player the club no longer wants: sell him for a fee if he's good enough
+// to have a market, otherwise release him free.
+function shedPlayer(G, p, ctx){
+  if(ctx && trySellPlayer(G, p, ctx)) return;
+  releaseToFA(G, p);
+}
 function aiTransferWindow(G){
   const deals = [];
   const dealt = new Set();   // a player only moves once per window (no same-window flips)
@@ -2786,7 +2856,7 @@ function aiTransferWindow(G){
       dealt.add(target.id);
       byTeam[seller.id] = (byTeam[seller.id]||[]).filter(p=>p!==target);
       (byTeam[c.id]=byTeam[c.id]||[]).push(target);
-      target.teamId = c.id; target.years = rint(2,4); target.salary = wageFor(target);
+      target.teamId = c.id; target.years = rint(2,4); target.salary = aiWageFor(target, c.div);
       target.wantsOut = false; target.listed = false; target.expiredSince = null;
       autoPickXI(c, G.players); autoPickXI(seller, G.players);
       deals.push({ fee, name:target.name, pos:target.pos, ovr:target.ovr, from:seller.abbr, to:c.abbr, country:c.country });
@@ -2860,7 +2930,7 @@ function aiSignFreeAgents(G){
     if(!club) return;
     logMove(G, p, "free", null, club.id, null);
     p.teamId = club.id; p.years = rint(1,3);
-    p.salary = clamp(wageDemand(p)*0.9, 0.2, 30);
+    p.salary = clamp(round(wageDemand(p)*0.9*divWageMult(club.div)*10)/10, 0.1, 30);
     p.unhappy = false; p.expiredSince = null; p.wantsOut = false; p.listed = false;
     if(p.youth && p.age>=17) p.youth = false;   // signed off the street = straight into the senior squad
     G.players[p.id] = p;
@@ -5263,7 +5333,7 @@ function homeFillRate(G, c, opts={}){
 function recordHomeGate(G, club, opts={}){
   if(!club || opts.neutral) return 0;   // neutral-venue finals: no home gate
   const cap = stadiumCapacity(club);
-  const rate = [0.028,0.017,0.010,0.006][club.div] || 0.006;
+  const rate = [0.040,0.023,0.013,0.007][club.div] || 0.006;
   const tier = ticketTier(club);
   // Season-ticket holders are loyal — they show up regardless of form (an
   // attendance FLOOR) but pay a discounted rate, so a big allocation stabilises
@@ -5322,7 +5392,7 @@ function merchIncome(G, c, gate){
 // the table (smaller gate, no prize money) can fall short and start losing money,
 // which is what forces sales / wage cuts. Also stops budgets ballooning forever.
 function runningCosts(G, c, wages){
-  const staff   = (wages||0) * 0.30;                                             // staff wages scale with the playing budget
+  const staff   = (wages||0) * 0.22;                                             // staff wages scale with the playing budget
   const stadium = (stadiumCapacity(c)/1000) * ([0.15,0.09,0.06,0.04][c.div]||0.04) * facilityGateMult(c);
   const facils  = (((c.facilityTier||0)) + ((c.academy&&c.academy.level)||1) + (c.trainTier||0) + (c.scoutTier||0) + (c.pitchTier||0)) * 2
                 + (c.boxes||0)*0.05;                                             // upkeep on every built tier + box maintenance
@@ -5388,33 +5458,44 @@ function generateSponsorOffer(G, club){
 // League prize money: a per-position merit payment PLUS a proper placement bonus
 // so winning the title (and finishing in the European places) actually pays off,
 // instead of 1st barely beating 2nd.
-const LEAGUE_TITLE_BONUS = { 1:34, 2:15, 3:10, 4:7, 5:4, 6:2 };        // top flight: champion + Euro spots
-const LEAGUE_TITLE_BONUS_D1 = { 1:9, 2:6, 3:4 };                        // 2nd tier: promotion payments
+const LEAGUE_TITLE_BONUS = { 1:55, 2:30, 3:22, 4:16, 5:12, 6:9, 7:6, 8:4 };  // top flight: champion + European places
+const LEAGUE_TITLE_BONUS_D1 = { 1:16, 2:11, 3:7 };                       // 2nd tier: promotion payments
 function leaguePrize(div, pos){
-  if(div===0){ const merit = clamp((21-pos)*1.4, 3, 28); return round((merit + (LEAGUE_TITLE_BONUS[pos]||0))*10)/10; }
-  if(div===1){ const merit = clamp((21-pos)*0.6, 1, 13); return round((merit + (LEAGUE_TITLE_BONUS_D1[pos]||0))*10)/10; }
-  if(div===2){ const merit = clamp((21-pos)*0.25, 0.5, 5); return round((merit + ({1:2.5,2:1.6,3:1.1}[pos]||0))*10)/10; }
-  const merit = clamp((21-pos)*0.12, 0.2, 2.4); return round((merit + ({1:1.2,2:0.8,3:0.5}[pos]||0))*10)/10;
+  // per-position merit money (every place is worth more than the one below) PLUS a
+  // placement bonus, so winning the league — and finishing in the continental spots —
+  // is a serious financial reward that compounds the strong clubs' advantage.
+  if(div===0){ const merit = clamp((21-pos)*2.6, 6, 52); return round((merit + (LEAGUE_TITLE_BONUS[pos]||0))*10)/10; }
+  if(div===1){ const merit = clamp((21-pos)*1.0, 2, 22); return round((merit + (LEAGUE_TITLE_BONUS_D1[pos]||0))*10)/10; }
+  if(div===2){ const merit = clamp((21-pos)*0.35, 0.8, 7); return round((merit + ({1:4,2:2.5,3:1.6}[pos]||0))*10)/10; }
+  const merit = clamp((21-pos)*0.18, 0.3, 3.6); return round((merit + ({1:2,2:1.2,3:0.8}[pos]||0))*10)/10;
 }
 // Cup & continental prize money — rewards a good run AND, crucially, pays extra
 // for actually winning (lifting the trophy beats losing the final).
 function cupPrizeMoney(G, clubId){
   let total=0;
+  const wealth = (COUNTRIES[(G.clubs[clubId]||{}).country||0]||{}).wealth || 1;
   (G.cups||[]).forEach(cup=>{
     if(cup.country!==((G.clubs[clubId]||{}).country||0)) return;
-    if(cup.winner===clubId){ total+=8; return; }               // winners
-    if(cup.runnerUp===clubId){ total+=3.5; return; }            // beaten finalists
+    if(cup.winner===clubId){ total+=14; return; }              // winners
+    if(cup.runnerUp===clubId){ total+=6; return; }             // beaten finalists
     const r=Object.keys(cup.results||{}).filter(k=>(cup.results[k]||[]).some(t=>t.home===clubId||t.away===clubId)).pop();
-    total += ({PR:0.05,R64:0.1,R32:0.2,R16:0.5,QF:1.2,SF:2.5}[r]||0);   // paid by furthest round reached
+    total += ({PR:0.1,R64:0.2,R32:0.5,R16:1.2,QF:3,SF:6}[r]||0);   // paid by furthest round reached
   });
   if(G.contCup){
+    // The Champions Cup is a financial game-changer — just qualifying is a windfall,
+    // and a deep run funds a squad. This is the engine of the big-club dynasty.
     const cc=G.contCup;
-    if(cc.winner===clubId) total+=20;                           // continental champions
-    else if(cc.runnerUp===clubId) total+=11;                    // beaten finalists
-    else if((cc.alive||[]).includes(clubId)) total+=6;          // reached the knockouts (QF+)
-    else if((cc.qualifiers||[]).includes(clubId)) total+=3;     // group stage
+    if(cc.winner===clubId) total+=90;                          // continental champions
+    else if(cc.runnerUp===clubId) total+=55;                   // beaten finalists
+    else if((cc.alive||[]).includes(clubId)) total+=32;        // reached the knockouts (R16+)
+    else if((cc.qualifiers||[]).includes(clubId)) total+=18;   // group-stage participation fee
+    // per-group-game win/draw bonuses reward a strong group campaign
+    (cc.groups||[]).forEach(grp=>(grp.results||[]).forEach(res=>{
+      if(res.home===clubId){ total += res.hs>res.as?1.5 : res.hs===res.as?0.6:0; }
+      else if(res.away===clubId){ total += res.as>res.hs?1.5 : res.as===res.hs?0.6:0; }
+    }));
   }
-  return round(total*10)/10;
+  return round(total*wealth*10)/10;   // richer nations' clubs earn more from the same run
 }
 
 // Rough estimate of a club's annual income, from last season's settled P&L
@@ -5531,26 +5612,26 @@ function processCommercials(G, club){
 // constraints; without this, renewals quietly inflate every club's wages each
 // season while income stays flat, and the whole league's finances erode over
 // a long save. Releases the worst value-for-wage player until back in line.
-function capAIWageBill(G, club){
+function capAIWageBill(G, club, sellCtx){
   if(club.userControlled) return;
   const pnl = club.lastPnl||{};
   const income = (pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.conc||0)+(pnl.merch||0)+(pnl.shirt||0)+(pnl.sleeve||0)+(pnl.sponsor||0)+(pnl.cup||0);
   // prestigious clubs sustain a payroll smaller clubs can't (their commercial
   // income is bigger too, so this compounds) — up to +15% wage headroom
   const prest = Math.min(((club.honours||[]).filter(h=>h.type==="league"||h.type==="continental").length), 30);
-  const cap = income*(0.62 + prest*0.005);   // leave room for running costs on top of wages
+  const cap = income*(0.52 + prest*0.006);   // wages stay well under income, leaving room for overhead AND a surplus
   // one squad scan, then maintain the bill locally (a wageBill() world-scan per
   // release was O(world²) across 640 clubs)
   const mine = teamPlayersOf(G.players, club.id);
   let bill = mine.reduce((s,p)=>s+(p.salary||0),0);
   let squad = mine.filter(p=>!p.youth);
   let guard=0;
-  while(bill > cap && guard++<6){
-    if(squad.length<=14) break;
+  while(bill > cap && guard++<14){
+    if(squad.length<=16) break;
     const worst = squad.slice().sort((a,b)=>(b.salary/(b.ovr||1))-(a.salary/(a.ovr||1)))[0];
     bill -= (worst.salary||0);
     squad = squad.filter(p=>p!==worst);
-    releaseToFA(G, worst);
+    shedPlayer(G, worst, sellCtx);   // sell for a fee where there's a market, else free
   }
 }
 // A badly-run club can't spiral into bottomless debt forever — that's not how
@@ -5653,7 +5734,7 @@ function Finances({G, commit, tShow}){
   // a rough full-season projection at the current price/standing (19 league homes
   // + a few cup/UCL nights), used only for the headline "net commercial" tile
   const projFill = homeFillRate(G, user, {});
-  const gateYrly = round(cap/1000*([0.028,0.017,0.010,0.006][user.div]||0.006)*facilityGateMult(user)*projFill*tier.priceMult*21*10)/10;
+  const gateYrly = round(cap/1000*([0.040,0.023,0.013,0.007][user.div]||0.006)*facilityGateMult(user)*projFill*tier.priceMult*21*10)/10;
   const setTicket = i => { user.ticketTier=i; commit(G); tShow(`Tickets set to ${TICKET_TIERS[i].name}`); };
   const ctier = concessionTier(user);
   const concSoFar = round((user.seasonConcession||0)*10)/10;
@@ -5972,7 +6053,7 @@ function Finances({G, commit, tShow}){
 
       <Card>
         <div className="font-semibold mb-1">🏟️ {user.stadium}</div>
-        <div className="text-xs text-slate-400 mb-3">Expand each stand independently. At a full house each +3,000 seats is worth ~{money(round(3*([0.028,0.017,0.010,0.006][user.div]||0.006)*facilityGateMult(user)*ticketTier(user).priceMult*10)/10)} in gate <b>per home game</b> — so it pays off more the more home games you play (cup & continental runs included).</div>
+        <div className="text-xs text-slate-400 mb-3">Expand each stand independently. At a full house each +3,000 seats is worth ~{money(round(3*([0.040,0.023,0.013,0.007][user.div]||0.006)*facilityGateMult(user)*ticketTier(user).priceMult*10)/10)} in gate <b>per home game</b> — so it pays off more the more home games you play (cup & continental runs included).</div>
         <div className="mx-auto" style={{maxWidth:"360px"}}>
           {/* top-down view: 4 stands around the pitch, thickness scales with seats */}
           <div className="grid gap-1" style={{gridTemplateColumns:"auto 1fr auto", gridTemplateRows:"auto 1fr auto"}}>
