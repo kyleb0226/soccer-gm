@@ -2251,8 +2251,20 @@ function startNextSeason(G){
     Object.values(G.players).forEach(p=>{ if(p.teamId!=null){ (byTeamTrim[p.teamId]=byTeamTrim[p.teamId]||[]).push(p); } });
     const trimCtx = buildSellContext(G);
     G.clubs.forEach(c=>{
-      if(c.userControlled) return;
       const mine = byTeamTrim[c.id]||[];
+      if(c.userControlled){
+        // The user manages their own squad, but a passive player's academy (and the
+        // seniors it graduates) would otherwise grow without bound. Apply generous
+        // "registration limit" caps that never bite a normally-sized squad (~23-30):
+        // keep up to 40 seniors and 24 prospects, releasing only true fringe players.
+        const keep = new Set([...(c.xi||[]), ...(c.bench||[])]);
+        const sen = mine.filter(p=>!p.youth && !keep.has(p.id)).sort((a,b)=>a.ovr-b.ovr);
+        const overS = (mine.filter(p=>!p.youth).length) - 40;
+        for(let i=0;i<overS && i<sen.length;i++){ logNews(G,"transfer",`🚪 ${sen[i].name} (${sen[i].pos} ${sen[i].ovr}) released — no room in the senior squad (40 max)`, c.id); releaseToFA(G, sen[i]); }
+        const yth = mine.filter(p=>p.youth).sort((a,b)=>(a.pot||a.ovr)-(b.pot||b.ovr));
+        yth.slice(0, Math.max(0, yth.length-24)).forEach(p=>{ logNews(G,"youth",`👋 Released academy prospect ${p.name} (${p.pos}) — academy full (24 max)`, c.id); retireOrDrop(G, p); });
+        return;
+      }
       const sen = mine.filter(p=>!p.youth).sort((a,b)=>b.ovr-a.ovr);
       sen.slice(24).forEach(p=>shedPlayer(G, p, trimCtx));   // sell the surplus for a fee where possible
       const yth = mine.filter(p=>p.youth).sort((a,b)=>(b.pot||b.ovr)-(a.pot||a.ovr));
