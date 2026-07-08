@@ -1013,6 +1013,7 @@ function applyMatch(home, away, hs, as, players, box, opts){
   if(motm){ motm.stats.MOTM++; addComp(motm,"MOTM"); }
   box.motm = motm ? motm.name : null;
   recordH2H(G, home, away, hs, as, compKey);   // derby bookkeeping (all competitions)
+  recordClubMatchResult(G, home, hs, as, away.abbr); recordClubMatchResult(G, away, as, hs, home.abbr);   // biggest win / heaviest defeat
   // standings (cup matches don't affect the league table)
   if(!isCup){
     home.pld++; away.pld++; home.gf+=hs; home.ga+=as; away.gf+=as; away.ga+=hs;
@@ -1036,10 +1037,22 @@ function recordH2H(G, home, away, hs, as, comp){
   if(r.games.length>12) r.games.length = 12;
 }
 // Win / unbeaten streaks — tracked on every club, announced for the user's.
+// ---- per-club all-time records + recent form (league) ----
+function ensureClubRecords(c){ if(!c.records) c.records={}; return c.records; }
+// Track a club's biggest win and heaviest defeat (any competition). Called for
+// both sides of every match.
+function recordClubMatchResult(G, c, gf, ga, oppAbbr){
+  if(!c) return; const r=ensureClubRecords(c);
+  if(gf>ga){ const m=gf-ga; if(!r.bigWin || m>r.bigWin.margin || (m===r.bigWin.margin && gf>r.bigWin.gf)) r.bigWin={gf,ga,margin:m,opp:oppAbbr,season:G.season}; }
+  else if(gf<ga){ const m=ga-gf; if(!r.bigLoss || m>r.bigLoss.margin || (m===r.bigLoss.margin && ga>r.bigLoss.ga)) r.bigLoss={gf,ga,margin:m,opp:oppAbbr,season:G.season}; }
+}
 function recordStreak(G, club, res){
   if(!club) return;
   club.winStreak = res>0 ? (club.winStreak||0)+1 : 0;
   club.unbeaten  = res>=0 ? (club.unbeaten||0)+1 : 0;
+  // rolling last-5 league form (newest last), and the club's all-time best unbeaten run
+  club.form5 = (club.form5||[]).concat(res>0?"W":res<0?"L":"D"); if(club.form5.length>5) club.form5=club.form5.slice(-5);
+  { const r=ensureClubRecords(club); if((club.unbeaten||0) > (r.bestUnbeaten||0)) r.bestUnbeaten=club.unbeaten; }
   if(!club.userControlled) return;
   if(res>0 && [5,8,10,12,15,20,25].includes(club.winStreak)) logNews(G,"streak",`🔥 ${club.name} have won ${club.winStreak} league games in a row!`, club.id);
   else if(res===0 && club.unbeaten>=10 && [10,15,20,25,30,40].includes(club.unbeaten)) logNews(G,"streak",`🛡️ ${club.name} extend their unbeaten run to ${club.unbeaten} matches`, club.id);
@@ -1908,6 +1921,7 @@ function liveFinish(G, M){
   home.pld++; away.pld++; home.gf+=M.hs; home.ga+=M.as; away.gf+=M.as; away.ga+=M.hs;
   if(M.hs>M.as){home.w++;home.pts+=3;away.l++;} else if(M.hs<M.as){away.w++;away.pts+=3;home.l++;} else {home.d++;away.d++;home.pts++;away.pts++;}
   recordH2H(G, home, away, M.hs, M.as, "L");
+  recordClubMatchResult(G, home, M.hs, M.as, away.abbr); recordClubMatchResult(G, away, M.as, M.hs, home.abbr);
   recordStreak(G, home, M.hs>M.as?1:M.hs<M.as?-1:0); recordStreak(G, away, M.as>M.hs?1:M.as<M.hs?-1:0);
   M.gref.played=true; M.gref.hs=M.hs; M.gref.as=M.as;
   recordHomeGate(G, home, { derby: home.rivalId===away.id, oppAbbr: away.abbr });
@@ -2275,7 +2289,7 @@ function startNextSeason(G){
     }
     // reset the season matchday accruals for the new campaign
     c.seasonGate=0; c.seasonConcession=0; c.seasonBoxes=0; c.gateLog=[];
-    c.pld=0;c.w=0;c.d=0;c.l=0;c.gf=0;c.ga=0;c.pts=0;
+    c.pld=0;c.w=0;c.d=0;c.l=0;c.gf=0;c.ga=0;c.pts=0; c.form5=[];
   });
   // Keep AI wage bills sane relative to their actual income BEFORE they go
   // into crisis — without this, wages drift up via renewals every season
@@ -2759,8 +2773,15 @@ function logMove(G, p, type, fromId, toId, fee){
   if(!p) return;
   if(!Array.isArray(p.transfers)) p.transfers = [];
   const ab = id => (id!=null && G.clubs[id]) ? G.clubs[id].abbr : null;
-  p.transfers.push({ s:G.season, t:type, from:ab(fromId), to:ab(toId), fee:(fee!=null&&fee>0)?round(fee*10)/10:null });
+  const f = (fee!=null&&fee>0)?round(fee*10)/10:null;
+  p.transfers.push({ s:G.season, t:type, from:ab(fromId), to:ab(toId), fee:f });
   if(p.transfers.length>30) p.transfers = p.transfers.slice(-30);
+  // per-club record signing / sale (fee moves only)
+  if(type==="buy" && f){
+    const buyer=G.clubs[toId], seller=G.clubs[fromId];
+    if(buyer){ const r=ensureClubRecords(buyer); if(!r.recordBuy || f>r.recordBuy.fee) r.recordBuy={fee:f, name:p.name, pos:p.pos, from:ab(fromId), season:G.season}; }
+    if(seller){ const r=ensureClubRecords(seller); if(!r.recordSale || f>r.recordSale.fee) r.recordSale={fee:f, name:p.name, pos:p.pos, to:ab(toId), season:G.season}; }
+  }
 }
 function transferWindowOpen(G){
   if(G.phase==="offseason") return true;
@@ -3598,6 +3619,36 @@ function App(){
 
 /* ----------------------------- shared bits ----------------------------- */
 function Badge({children}){ return <span className="px-2 py-1 rounded bg-[#16213a] text-slate-200 tnum text-xs">{children}</span>; }
+// Deterministic club colours + a tiny crest, so every club has a visual identity.
+// Derived from the club id (stable), or from club.colors if the user ever sets one.
+const CLUB_PALETTE = [
+  ["#e63946","#f1faee"],["#1d3557","#a8dadc"],["#2a9d8f","#e9c46a"],["#e76f51","#264653"],
+  ["#6a4c93","#ffca3a"],["#118ab2","#ffd166"],["#ef476f","#073b4c"],["#06d6a0","#073b4c"],
+  ["#ff7b00","#03071e"],["#c1121f","#fdf0d5"],["#4361ee","#f72585"],["#3a0ca3","#4cc9f0"],
+  ["#780000","#c1121f"],["#008000","#ffffff"],["#14213d","#fca311"],["#5f0f40","#fb8b24"],
+  ["#0b525b","#9df9ef"],["#7f5539","#ddb892"],["#22223b","#c9ada7"],["#1a535c","#ff6b6b"],
+];
+function clubColors(c){
+  if(c && c.colors && c.colors[0]) return c.colors;
+  const id = (c && c.id!=null) ? c.id : 0;
+  // mix id + a second hash so same-index clubs across countries differ
+  const primary = CLUB_PALETTE[id % CLUB_PALETTE.length];
+  return primary;
+}
+function Crest({club, size=16}){
+  const [a,b] = clubColors(club);
+  const s = size+"px";
+  return <span title={club?club.name:""} style={{width:s,height:s,background:a,borderColor:b}}
+    className="inline-block rounded-full border-2 align-middle shrink-0" />;
+}
+// Last-5 league form as coloured dots (oldest → newest).
+function FormDots({form}){
+  const f = (form||[]).slice(-5);
+  if(!f.length) return <span className="text-slate-600 text-xs">—</span>;
+  return <span className="inline-flex gap-0.5">{f.map((r,i)=>(
+    <span key={i} title={r} className={"inline-block w-2 h-2 rounded-full "+(r==="W"?"bg-emerald-500":r==="L"?"bg-red-500":"bg-slate-500")} />
+  ))}</span>;
+}
 function Card({children, className="", onClick}){ return <div onClick={onClick} className={"bg-[#101a30] border border-[#1d2940] rounded-xl p-4 "+className}>{children}</div>; }
 function OvrPill({v}){
   const c = v>=80?"bg-emerald-500 text-slate-900":v>=70?"bg-lime-500 text-slate-900":v>=60?"bg-yellow-500 text-slate-900":v>=50?"bg-orange-500 text-slate-900":"bg-slate-600 text-slate-100";
@@ -3885,7 +3936,9 @@ function Hub({G, commit, tShow, setTab}){
       {live && <LiveMatch G={G} commit={commit} tShow={tShow} onClose={()=>setLive(false)} />}
       <Card>
         <div className="flex items-center justify-between flex-wrap gap-2">
-          <div>
+          <div className="flex items-start gap-2">
+            <Crest club={user} size={30} />
+           <div>
             <div className="text-xl font-bold">{user.name}</div>
             <div className="text-sm text-slate-400">{COUNTRIES[user.country||0].flag} {divName(user.country||0,user.div)} · {pos>0?ordinal(pos):"—"} place · {user.pts} pts · GD {gd(user)>=0?"+":""}{gd(user)}</div>
             <div className="text-xs text-amber-300/90 mt-1">Board: {G.expectation?G.expectation.text:"—"}</div>
@@ -3894,6 +3947,7 @@ function Hub({G, commit, tShow, setTab}){
                 <div className="flex justify-between text-[11px] text-slate-400"><span>Job security</span><span className={c<20?"text-red-400":""}>{confLabel(c)}</span></div>
                 <div className="h-1.5 rounded bg-[#0d1526] overflow-hidden"><div className={"h-full "+col} style={{width:c+"%"}}></div></div>
               </div>); })()}
+           </div>
           </div>
           <div className="text-right">
             <div className="text-3xl font-black">{clubStrength(user, G.players)}</div>
@@ -4340,7 +4394,7 @@ function LeagueTable({G}){
       <Card className="p-0 overflow-x-auto">
         <table className="w-full text-sm tnum">
           <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]">
-            <th className="p-2">#</th><th className="text-left p-2">Club</th><th className="p-2">Pld</th><th className="p-2">W</th><th className="p-2">D</th><th className="p-2">L</th><th className="p-2">GF</th><th className="p-2">GA</th><th className="p-2">GD</th><th className="p-2">Pts</th>
+            <th className="p-2">#</th><th className="text-left p-2">Club</th><th className="p-2">Pld</th><th className="p-2">W</th><th className="p-2">D</th><th className="p-2">L</th><th className="p-2">GF</th><th className="p-2">GA</th><th className="p-2">GD</th><th className="p-2">Pts</th><th className="p-2">Form</th>
           </tr></thead>
           <tbody>
             {table.map((c,i)=>{
@@ -4350,10 +4404,11 @@ function LeagueTable({G}){
                   <td className="p-2 text-center">
                     <span className={champ?"text-amber-300 font-bold":promo?"text-emerald-400":releg?"text-red-400":""}>{i+1}</span>
                   </td>
-                  <td className="p-2 text-left font-medium">{c.name}{c.id===G.userTeamId&&<span className="text-emerald-400"> ★</span>}</td>
+                  <td className="p-2 text-left font-medium"><span className="inline-flex items-center gap-1.5"><Crest club={c} size={13} />{c.name}</span>{c.id===G.userTeamId&&<span className="text-emerald-400"> ★</span>}</td>
                   <td className="p-2 text-center">{c.pld}</td><td className="p-2 text-center">{c.w}</td><td className="p-2 text-center">{c.d}</td><td className="p-2 text-center">{c.l}</td>
                   <td className="p-2 text-center">{c.gf}</td><td className="p-2 text-center">{c.ga}</td><td className="p-2 text-center">{gd(c)>=0?"+":""}{gd(c)}</td>
                   <td className="p-2 text-center font-bold">{c.pts}</td>
+                  <td className="p-2"><FormDots form={c.form5} /></td>
                 </tr>
               );
             })}
@@ -4455,9 +4510,12 @@ function ClubBrowser({G, commit, tShow}){
       {/* club header + quick stats */}
       <Card>
         <div className="flex items-center justify-between flex-wrap gap-2">
-          <div>
-            <div className="font-bold text-lg">{club.name}</div>
-            <div className="text-sm text-slate-400">{COUNTRIES[club.country||0].flag} {divName(club.country||0,club.div)} · {club.w}-{club.d}-{club.l} · {club.pts} pts</div>
+          <div className="flex items-center gap-2">
+            <Crest club={club} size={26} />
+            <div>
+              <div className="font-bold text-lg">{club.name}</div>
+              <div className="text-sm text-slate-400">{COUNTRIES[club.country||0].flag} {divName(club.country||0,club.div)} · {club.w}-{club.d}-{club.l} · {club.pts} pts</div>
+            </div>
           </div>
           <div className="text-right text-xs text-slate-400">
             <div>Squad OVR {club.xi&&club.xi.length?Math.round(club.xi.map(id=>G.players[id]).filter(Boolean).reduce((s,p)=>s+p.ovr,0)/(club.xi.length||1)):clubStrength(club,G.players)}</div>
@@ -4577,6 +4635,31 @@ function ClubBrowser({G, commit, tShow}){
             </div>
             {recComp==="C" && !recs.C.pld && <div className="text-xs text-slate-500 mt-2">Cup match records started being tracked from this update — older seasons show only league data.</div>}
           </Card>
+          {(()=>{
+            const rec = club.records||{};
+            const hist = (club.history||[]).concat(curRow&&curRow.live?[curRow]:[]);
+            const bestGoals = hist.reduce((b,h)=>Math.max(b,h.gf||0),0);
+            const bestPts = hist.reduce((b,h)=>Math.max(b,h.pts||0),0);
+            const bestFin = hist.filter(h=>h.div===0).reduce((b,h)=>Math.min(b,h.pos||99),99);
+            const R = ({label, children}) => <div className="bg-[#0d1526] rounded p-2"><div className="text-[11px] text-slate-400">{label}</div><div className="text-sm font-semibold">{children}</div></div>;
+            const anything = rec.bigWin||rec.bigLoss||rec.recordBuy||rec.recordSale||rec.bestUnbeaten||bestGoals;
+            if(!anything) return null;
+            return (
+              <Card>
+                <div className="font-semibold mb-2">📌 {club.name} club records</div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {rec.bigWin && <R label="💥 Biggest win">{rec.bigWin.gf}-{rec.bigWin.ga} v {rec.bigWin.opp} <span className="text-slate-500 tnum">'{String(rec.bigWin.season).slice(2)}</span></R>}
+                  {rec.bigLoss && <R label="💔 Heaviest defeat">{rec.bigLoss.gf}-{rec.bigLoss.ga} v {rec.bigLoss.opp} <span className="text-slate-500 tnum">'{String(rec.bigLoss.season).slice(2)}</span></R>}
+                  {rec.bestUnbeaten>0 && <R label="🛡️ Longest unbeaten">{rec.bestUnbeaten} league games</R>}
+                  {rec.recordBuy && <R label="📥 Record signing"><span className="text-emerald-300">{money(rec.recordBuy.fee)}</span> · {rec.recordBuy.name}</R>}
+                  {rec.recordSale && <R label="📤 Record sale"><span className="text-emerald-300">{money(rec.recordSale.fee)}</span> · {rec.recordSale.name}</R>}
+                  {bestGoals>0 && <R label="⚽ Most goals (season)">{bestGoals}</R>}
+                  {bestPts>0 && <R label="📈 Most points (season)">{bestPts}</R>}
+                  {bestFin<99 && <R label="🏅 Highest finish">{ord(bestFin)} in {divName(club.country||0,0)}</R>}
+                </div>
+              </Card>
+            );
+          })()}
           {rows.length>0 && (
             <Card className="p-0 overflow-x-auto">
               <div className="p-3 font-semibold">📜 {club.name} — season by season</div>
@@ -6623,6 +6706,40 @@ function RecordsView({G}){
           {!champs.length && <div className="text-slate-500">No champions recorded yet for {COUNTRIES[country].name}.</div>}
         </div>
       </Card>
+
+      {(()=>{
+        const rows = G.clubs.filter(c=>(c.country||0)===country).map(c=>{
+          const h=c.history||[];
+          const titles=(c.honours||[]).filter(x=>x.type==="league").length;
+          const topSeasons=h.filter(r=>r.div===0).length;
+          const topPts=h.filter(r=>r.div===0).reduce((s,r)=>s+(r.pts||0),0);
+          const totalPts=h.reduce((s,r)=>s+(r.pts||0),0);
+          const bestFin=h.filter(r=>r.div===0).reduce((b,r)=>Math.min(b,r.pos||99),99);
+          return {c, titles, topSeasons, topPts, totalPts, bestFin};
+        }).filter(x=>x.topSeasons>0 || x.titles>0)
+          .sort((a,b)=>b.titles-a.titles || b.topPts-a.topPts || b.totalPts-a.totalPts).slice(0,24);
+        if(!rows.length) return null;
+        return (
+          <Card className="p-0 overflow-x-auto">
+            <div className="p-3 font-semibold">🏛️ All-time {divName(country,0)} table <span className="text-slate-500 text-xs font-normal">— most successful clubs</span></div>
+            <table className="w-full text-sm tnum">
+              <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="p-2">#</th><th className="text-left p-2">Club</th><th className="p-2" title="League titles">🏆</th><th className="p-2" title="Top-flight seasons">Sea</th><th className="p-2" title="Best finish">Best</th><th className="p-2" title="Total top-flight points">Pts</th></tr></thead>
+              <tbody>
+                {rows.map((x,i)=>(
+                  <tr key={x.c.id} className={"border-b border-[#15203a] "+(x.c.id===user.id?"bg-emerald-500/10":"")}>
+                    <td className="p-2 text-center text-slate-500">{i+1}</td>
+                    <td className="p-2 text-left font-medium"><span className="inline-flex items-center gap-1.5"><Crest club={x.c} size={13} />{x.c.name}</span></td>
+                    <td className="p-2 text-center font-bold text-amber-300">{x.titles||""}</td>
+                    <td className="p-2 text-center text-slate-400">{x.topSeasons}</td>
+                    <td className="p-2 text-center text-slate-400">{x.bestFin<99?ordinal(x.bestFin):"—"}</td>
+                    <td className="p-2 text-center font-semibold">{x.topPts}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Card>
+        );
+      })()}
 
       <Card>
         <div className="font-semibold mb-2">🎖️ {cupName(country)} winners</div>
