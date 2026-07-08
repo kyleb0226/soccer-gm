@@ -1763,6 +1763,44 @@ function simToNextUserMatch(G){
   }
 }
 
+/* ----------------------------- auto-manage / bulk sim ------------------ */
+// Put the user's club under FULL AI management for a hands-off multi-season sim:
+// it re-signs its players, signs free agents, buys upgrades within budget,
+// fast-tracks & promotes youth, and fields its best XI every match — exactly like
+// the AI clubs that build dynasties. Without this a simmed-through user club gets
+// no management at all (players walk on frees, no signings) and just rots at the
+// bottom. Implemented by temporarily treating the club as non-user-controlled;
+// G.userTeamId is unchanged, so results/news still belong to the user.
+// Module-level switch (NOT saved on G) — while true, the management routines treat
+// the user's club exactly like an AI club. Using a flag instead of flipping
+// club.userControlled keeps a mid-sim autosave safe: the saved club is still
+// correctly marked user-controlled even if the tab is hidden mid-simulation.
+let AUTO_MANAGE = false;
+// Is this club run by the AI right now? (AI clubs always; the user's only while a
+// bulk auto-sim is in progress.)
+function aiManaged(c){ return !c.userControlled || AUTO_MANAGE; }
+function beginAutoManage(G){
+  const u = G.clubs[G.userTeamId];
+  G._autoSaved = { auto:u.autoRotate };
+  AUTO_MANAGE = true;
+  u.autoRotate = true;        // → best available XI each matchday
+}
+function endAutoManage(G){
+  const u = G.clubs[G.userTeamId], s = G._autoSaved||{};
+  AUTO_MANAGE = false;
+  u.autoRotate = !!s.auto;
+  G.pendingSack = false; G.jobOffers = null;
+  delete G._autoSaved;
+}
+// Advance exactly one full season (finish the current one, then roll over) with
+// the user's club auto-managed. Wrap calls in begin/endAutoManage.
+function autoSimSeason(G){
+  let guard = 0;
+  while(G.phase==="regular" && guard++ < 80) simRound(G);
+  startNextSeason(G);
+  G.pendingSack = false; G.jobOffers = null;   // belt-and-braces: never interrupt a bulk sim
+}
+
 /* ----------------------------- live match ------------------------------ */
 // "Watch my matches": the user's fixture is played in two halves with a chance
 // to make substitutions and change tactic at the break. The engine fully owns
@@ -2077,10 +2115,10 @@ function startNextSeason(G){
     const club = p.teamId!=null ? G.clubs[p.teamId] : null;
     // everyone auto-graduates at 20; AI clubs also fast-track standout teen
     // prospects (already senior-quality or high-ceiling) straight into the squad
-    const aiFastTrack = club && !club.userControlled && p.age>=17 && (p.ovr>=62 || (p.pot||0)>=78);
+    const aiFastTrack = club && aiManaged(club) && p.age>=17 && (p.ovr>=62 || (p.pot||0)>=78);
     if(p.age>=20 || aiFastTrack){
       p.youth = false;
-      if(club && club.userControlled){
+      if(club && club.userControlled && !AUTO_MANAGE){
         logNews(G,"youth",`🎓 ${p.name} (${p.pos} ${p.ovr}) graduates from the academy to the senior squad`, p.teamId);
       }
     }
@@ -2101,7 +2139,7 @@ function startNextSeason(G){
     const club = G.clubs[p.teamId];
     if(p.years<=0){
       // AI clubs re-sign most of their useful players (at the player's demand); the rest hit the market
-      if(club && club.userControlled){
+      if(club && club.userControlled && !AUTO_MANAGE){
         // One grace season after a contract expires: warn the first time, then he
         // ACTUALLY LEAVES on a free if still not re-signed by the next rollover.
         // expiredSince is a season stamp (robust — can't silently desync), and the
@@ -2162,7 +2200,7 @@ function startNextSeason(G){
   Object.values(G.players).forEach(p=>{
     if(p.teamId==null || p.youth) return;
     const c = G.clubs[p.teamId];
-    if(!c || c.userControlled) return;
+    if(!c || (c.userControlled && !AUTO_MANAGE)) return;
     p.salary = aiWageFor(p, c.div);
   });
   // finances: settle the season P&L for every club.
@@ -2203,7 +2241,7 @@ function startNextSeason(G){
     const reserveCap = ([800,260,90,40][c.div]||40) + prest*22;   // winners can hoard a real war chest — dynasties spend it on fees
     if(c.budget > reserveCap) c.budget = round((reserveCap + (c.budget-reserveCap)*0.5)*10)/10;
     // let the user see what their season's performance earned in prize money
-    if(c.userControlled){
+    if(c.userControlled && !AUTO_MANAGE){
       const cupP=(c.lastPnl&&c.lastPnl.cup)||0;
       const ord = n => n+(n===1?"st":n===2?"nd":n===3?"rd":"th");
       const place = pos===1 ? "as CHAMPIONS 🏆" : `${ord(pos)} in the ${divName(c.country||0,c.div)}`;
@@ -2252,7 +2290,7 @@ function startNextSeason(G){
     const trimCtx = buildSellContext(G);
     G.clubs.forEach(c=>{
       const mine = byTeamTrim[c.id]||[];
-      if(c.userControlled){
+      if(c.userControlled && !AUTO_MANAGE){
         // The user manages their own squad, but a passive player's academy (and the
         // seniors it graduates) would otherwise grow without bound. Apply generous
         // "registration limit" caps that never bite a normally-sized squad (~23-30):
@@ -2447,7 +2485,7 @@ function youthIntake(G, club){
     G.players[p.id] = p; intake.push(p);
     if(TEAM_IDX) (TEAM_IDX[club.id]=TEAM_IDX[club.id]||[]).push(p);
   }
-  if(club.userControlled){
+  if(club.userControlled && !AUTO_MANAGE){
     G.youthIntake = intake.map(p=>({ id:p.id, name:p.name, pos:p.pos, ovr:p.ovr, pot:p.pot }));
     if(intake.length) logNews(G,"youth",`🎓 Youth intake: ${intake.map(p=>p.name+" ("+p.pos+" "+p.ovr+"→"+p.pot+")").join(", ")}`, club.id);
   }
@@ -2778,7 +2816,7 @@ function buildSellContext(G){
   Object.values(G.players).forEach(p=>{ if(p.teamId!=null && !p.youth){ size[p.teamId]=(size[p.teamId]||0)+1; (ratings[p.teamId]=ratings[p.teamId]||[]).push(p.ovr); } });
   const xiAvg={};
   G.clubs.forEach(c=>{ const a=(ratings[c.id]||[]).sort((x,y)=>y-x); xiAvg[c.id]=a.length?a.slice(0,11).reduce((s,v)=>s+v,0)/Math.min(11,a.length):50; });
-  return { size, xiAvg, buyers: G.clubs.filter(c=>!c.userControlled) };
+  return { size, xiAvg, buyers: G.clubs.filter(aiManaged) };
 }
 // Try to SELL a good player to a solvent club that could use him — for a FEE —
 // instead of dumping him into free agency. This is what stops good players from
@@ -2848,7 +2886,7 @@ function aiTransferWindow(G){
   });
   for(const k in buckets) buckets[k].sort((a,b)=>b.ovr-a.ovr);
   const seniors = id => (byTeam[id]||[]).filter(p=>!p.youth);
-  const buyers = G.clubs.filter(c=>!c.userControlled).sort((a,b)=>b.budget-a.budget);
+  const buyers = G.clubs.filter(aiManaged).sort((a,b)=>b.budget-a.budget);
   buyers.forEach(c=>{
     const nBuys = c.budget>250 ? rint(1,3) : c.budget>120 ? rint(0,2) : (chance(0.3)?1:0);
     for(let i=0;i<nBuys;i++){
@@ -2932,7 +2970,7 @@ function aiSignFreeAgents(G){
     size[c.id]=arr.length;
     xiAvg[c.id]=arr.length ? arr.slice(0,11).reduce((s,v)=>s+v,0)/Math.min(11,arr.length) : 50;
   });
-  const aiClubs = G.clubs.filter(c=>!c.userControlled);
+  const aiClubs = G.clubs.filter(aiManaged);
   const signed = new Set();
   const headlines = [];
   fas.forEach(p=>{
@@ -3749,49 +3787,64 @@ function LiveMatch({G, commit, tShow, onClose}){
 // shake out. Runs one season per tick (yielding between so the progress bar
 // paints), and mutes sacking for the duration so the run always completes;
 // the job-security setting is restored afterward.
-function SimYears({G, commit, tShow, years=50}){
-  const [run, setRun] = useState(null);   // {done,total} while running, else null
+// Pick how many seasons to fast-forward, then Go. During the sim the user's club
+// is put under FULL auto-management (re-signs, free agents, transfers, youth
+// promotion, best XI) so a hands-off club keeps up and can climb divisions,
+// instead of rotting. Runs in matchday-sized chunks via a MessageChannel so the
+// tab stays responsive and the progress bar updates smoothly.
+function SimYears({G, commit, tShow}){
+  const [years, setYears] = useState(10);
+  const [run, setRun] = useState(null);   // {done,total,md,mdTotal,season} while running
   const stopRef = React.useRef(false);
   const go = () => {
     if(run) return;
-    const total = years;
-    setRun({ done:0, total });
-    const savedJS = G.settings ? G.settings.jobSecurity : undefined;
-    if(G.settings) G.settings.jobSecurity = false;
-    G.pendingSack = false; G.jobOffers = null;
-    const ch = new MessageChannel();
+    const total = clamp(parseInt(years,10)||1, 1, 100);
+    stopRef.current = false;
+    beginAutoManage(G);
     let done = 0;
-    ch.port1.onmessage = () => {
-      try {
-        let guard = 0;
-        while(G.phase==="regular" && guard++<500) simRound(G);
-        if(G.phase==="offseason") startNextSeason(G);
-        done++;
-        if(done < total && !stopRef.current){ setRun({ done, total }); ch.port2.postMessage(1); }
-        else finish();
-      } catch(e){ finish(String(e&&e.message||e)); }
-    };
+    setRun({ done:0, total, md:G.phase==="regular"?G.day+1:0, mdTotal:G.schedule.length, season:G.season });
+    const ch = new MessageChannel();
     const finish = (err) => {
-      if(G.settings && savedJS!==undefined) G.settings.jobSecurity = savedJS;
+      endAutoManage(G);
       commit(G);
       setRun(null);
-      tShow(err ? ("Sim stopped: "+err) : `Simulated ${done} season${done!==1?"s":""} → ${G.season}`);
+      tShow(err ? ("Sim stopped: "+err) : `Auto-simulated ${done} season${done!==1?"s":""} → now ${G.season}`);
+    };
+    ch.port1.onmessage = () => {
+      try {
+        // advance ~8 matchdays, or roll the season over, then yield to paint
+        let steps = 0;
+        while(steps < 8){
+          if(G.phase==="regular"){ simRound(G); steps++; }
+          else { autoSimSeason(G); done++; break; }   // note: autoSimSeason also finishes any remaining rounds
+        }
+        if(done < total && !stopRef.current){
+          setRun({ done, total, md:G.phase==="regular"?G.day+1:0, mdTotal:G.schedule.length, season:G.season });
+          ch.port2.postMessage(1);
+        } else finish();
+      } catch(e){ finish(String(e&&e.message||e)); }
     };
     ch.port2.postMessage(1);
   };
   React.useEffect(()=>()=>{ stopRef.current = true; }, []);
   return (
     <>
-      <button onClick={go} disabled={!!run} className={"px-4 py-2 rounded-lg text-sm font-semibold "+(run?"bg-[#16213a] text-slate-500":"bg-indigo-500/90 text-white")} title={`Fast-forward ${years} seasons to see how the world develops`}>
-        {run ? `Simulating… ${run.done}/${run.total}` : `⏩ Simulate ${years} years`}
-      </button>
+      <div className="flex items-center gap-1">
+        <input type="number" min="1" max="100" value={years} disabled={!!run}
+          onChange={e=>setYears(e.target.value)}
+          className="w-14 bg-[#16213a] rounded-lg px-2 py-2 text-sm text-center tnum disabled:opacity-50" title="Number of seasons to auto-simulate" />
+        <button onClick={go} disabled={!!run} className={"px-3 py-2 rounded-lg text-sm font-semibold whitespace-nowrap "+(run?"bg-[#16213a] text-slate-500":"bg-indigo-500/90 text-white")} title="Fast-forward, with your club fully auto-managed">
+          {run ? "Simulating…" : "⏩ Auto-sim seasons"}
+        </button>
+      </div>
       {run && (
         <div className="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center p-4">
           <div className="bg-[#101a30] border border-[#1d2940] rounded-xl p-6 w-full max-w-sm text-center">
-            <div className="text-lg font-bold mb-1">⏩ Simulating the world</div>
-            <div className="text-sm text-slate-400 mb-4">Season {run.done} of {run.total} · now {G.season}</div>
-            <div className="h-2 rounded bg-[#0d1526] overflow-hidden mb-2"><div className="h-full bg-indigo-500 transition-all" style={{width:Math.round(run.done/run.total*100)+"%"}}></div></div>
-            <div className="text-xs text-slate-500">Running matches, transfers, youth intake and finances for every club…</div>
+            <div className="text-lg font-bold mb-1">⏩ Auto-simulating</div>
+            <div className="text-sm text-slate-400 mb-1">Season {run.done+ (run.md>0?1:0)} of {run.total} · {G.season}{run.md>0?` · matchday ${run.md}/${run.mdTotal}`:""}</div>
+            <div className="h-2 rounded bg-[#0d1526] overflow-hidden my-3"><div className="h-full bg-indigo-500 transition-all" style={{width:Math.round((run.done + (run.mdTotal?run.md/run.mdTotal:0))/run.total*100)+"%"}}></div></div>
+            <div className="text-xs text-slate-500 mb-4">Your club is auto-managed — re-signing players, promoting youth, making transfers and picking its best XI to compete.</div>
+            <button onClick={()=>{ stopRef.current = true; }} className="px-4 py-2 rounded-lg bg-[#16213a] hover:bg-[#1c2c4a] text-slate-200 text-sm font-semibold">■ Stop after this season</button>
           </div>
         </div>
       )}
@@ -3852,7 +3905,7 @@ function Hub({G, commit, tShow, setTab}){
             <button onClick={()=>doSim(simRound)} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200 text-sm">Play whole matchday</button>
             <button onClick={()=>{ for(let i=0;i<7 && G.phase==="regular" && !G.pendingSack;i++) simToNextUserMatch(G); commit(G); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200 text-sm">Skip 7 weeks</button>
             <button onClick={()=>{ generateTransferOffers(G); commit(G); tShow("Checked the market"); }} className="px-4 py-2 rounded-lg bg-[#16213a] text-slate-200 text-sm">Check Market</button>
-            <SimYears G={G} commit={commit} tShow={tShow} years={50} />
+            <SimYears G={G} commit={commit} tShow={tShow} />
           </div>
         </Card>
       )}
@@ -3862,7 +3915,7 @@ function Hub({G, commit, tShow, setTab}){
           <div className="text-sm text-slate-400 mb-3">Review awards, the transfer market, your youth intake, then start the next season.</div>
           <div className="flex flex-wrap gap-2">
             <button onClick={()=>setTab("offseason")} className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold">Go to Offseason</button>
-            <SimYears G={G} commit={commit} tShow={tShow} years={50} />
+            <SimYears G={G} commit={commit} tShow={tShow} />
           </div>
         </Card>
       )}
@@ -5565,7 +5618,7 @@ function ensureCommercials(G, club){
 // Called at the rollover — pays out shirt/sponsor income and renegotiates expiring deals.
 function processCommercials(G, club){
   ensureCommercials(G, club);
-  const isUser = !!club.userControlled;
+  const isUser = !!club.userControlled && !AUTO_MANAGE;   // auto-managed → grow commercials like an AI club
   // shirt deal
   let shirtIncome=0;
   if(club.shirt){
@@ -5637,7 +5690,7 @@ function processCommercials(G, club){
 // season while income stays flat, and the whole league's finances erode over
 // a long save. Releases the worst value-for-wage player until back in line.
 function capAIWageBill(G, club, sellCtx){
-  if(club.userControlled) return;
+  if(club.userControlled && !AUTO_MANAGE) return;
   const pnl = club.lastPnl||{};
   const income = (pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.conc||0)+(pnl.merch||0)+(pnl.shirt||0)+(pnl.sleeve||0)+(pnl.sponsor||0)+(pnl.cup||0);
   // prestigious clubs sustain a payroll smaller clubs can't (their commercial
@@ -5666,7 +5719,7 @@ function capAIWageBill(G, club, sellCtx){
 const FINANCIAL_CRISIS = -25;     // budget below this triggers action
 function relieveFinancialDistress(G, club){
   if(club.budget >= FINANCIAL_CRISIS) return;
-  if(club.userControlled){
+  if(club.userControlled && !AUTO_MANAGE){
     if(jobSecurityOn(G)){
       G.boardConfidence = clamp((G.boardConfidence==null?60:G.boardConfidence) - 12, 0, 100);
       logNews(G,"finance",`⚠️ The board is alarmed by the club's finances (${money(club.budget)}). Balance the books or risk your job.`, club.id);
