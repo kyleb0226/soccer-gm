@@ -2113,10 +2113,14 @@ function startNextSeason(G){
   Object.values(G.players).forEach(p=>{
     if(!p.youth) return;
     const club = p.teamId!=null ? G.clubs[p.teamId] : null;
-    // everyone auto-graduates at 20; AI clubs also fast-track standout teen
-    // prospects (already senior-quality or high-ceiling) straight into the squad
+    // The user can set an OVR gate on their own academy (club.academyMinOvr): prospects
+    // then stay in the academy developing until they reach that rating, instead of the
+    // default auto-graduation at age 20. AI clubs (and an auto-managed user club) keep
+    // the default: everyone graduates at 20, plus fast-track for standout teens.
+    const userGate = (club && club.userControlled && !AUTO_MANAGE) ? (club.academyMinOvr||0) : 0;
     const aiFastTrack = club && aiManaged(club) && p.age>=17 && (p.ovr>=62 || (p.pot||0)>=78);
-    if(p.age>=20 || aiFastTrack){
+    const graduate = userGate>0 ? (p.ovr>=userGate) : (p.age>=20 || aiFastTrack);
+    if(graduate){
       p.youth = false;
       if(club && club.userControlled && !AUTO_MANAGE){
         logNews(G,"youth",`🎓 ${p.name} (${p.pos} ${p.ovr}) graduates from the academy to the senior squad`, p.teamId);
@@ -3794,39 +3798,44 @@ function LiveMatch({G, commit, tShow, onClose}){
 // tab stays responsive and the progress bar updates smoothly.
 function SimYears({G, commit, tShow}){
   const [years, setYears] = useState(10);
-  const [run, setRun] = useState(null);   // {done,total,md,mdTotal,season} while running
+  const [run, setRun] = useState(null);   // {done,total,md,mdTotal,season,stopping} while running
   const stopRef = React.useRef(false);
+  const busyRef = React.useRef(false);    // guard against double-start / re-entrancy
   const go = () => {
-    if(run) return;
+    if(run || busyRef.current) return;
     const total = clamp(parseInt(years,10)||1, 1, 100);
-    stopRef.current = false;
+    stopRef.current = false; busyRef.current = true;
     beginAutoManage(G);
     let done = 0;
-    setRun({ done:0, total, md:G.phase==="regular"?G.day+1:0, mdTotal:G.schedule.length, season:G.season });
+    const snap = () => ({ done, total, md:G.phase==="regular"?G.day+1:0, mdTotal:G.schedule.length, season:G.season, stopping:stopRef.current });
+    setRun(snap());
     const ch = new MessageChannel();
     const finish = (err) => {
-      endAutoManage(G);
+      endAutoManage(G);     // ALWAYS restore manual control + settings first
+      busyRef.current = false;
       commit(G);
       setRun(null);
       tShow(err ? ("Sim stopped: "+err) : `Auto-simulated ${done} season${done!==1?"s":""} → now ${G.season}`);
     };
     ch.port1.onmessage = () => {
       try {
-        // advance ~8 matchdays, or roll the season over, then yield to paint
-        let steps = 0;
-        while(steps < 8){
+        // advance ~10 matchdays, or roll the season over, then yield to paint
+        let steps = 0, rolled = false;
+        while(steps < 10){
           if(G.phase==="regular"){ simRound(G); steps++; }
-          else { autoSimSeason(G); done++; break; }   // note: autoSimSeason also finishes any remaining rounds
+          else { autoSimSeason(G); done++; rolled = true; break; }   // finishes the season + rolls over
         }
-        if(done < total && !stopRef.current){
-          setRun({ done, total, md:G.phase==="regular"?G.day+1:0, mdTotal:G.schedule.length, season:G.season });
-          ch.port2.postMessage(1);
-        } else finish();
+        // Stop always lands at a CLEAN season boundary — never mid-season — so the
+        // user resumes at the start of a fresh season, not stranded mid-campaign.
+        const stopNow = stopRef.current && rolled;
+        if(done >= total || stopNow){ finish(); }
+        else { setRun(snap()); ch.port2.postMessage(1); }
       } catch(e){ finish(String(e&&e.message||e)); }
     };
     ch.port2.postMessage(1);
   };
-  React.useEffect(()=>()=>{ stopRef.current = true; }, []);
+  // if this component unmounts mid-sim, make sure control is restored
+  React.useEffect(()=>()=>{ stopRef.current = true; if(busyRef.current){ endAutoManage(G); busyRef.current=false; } }, []);
   return (
     <>
       <div className="flex items-center gap-1">
@@ -3840,11 +3849,16 @@ function SimYears({G, commit, tShow}){
       {run && (
         <div className="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center p-4">
           <div className="bg-[#101a30] border border-[#1d2940] rounded-xl p-6 w-full max-w-sm text-center">
-            <div className="text-lg font-bold mb-1">⏩ Auto-simulating</div>
+            <div className="text-lg font-bold mb-1">{run.stopping?"⏹ Finishing the season…":"⏩ Auto-simulating"}</div>
             <div className="text-sm text-slate-400 mb-1">Season {run.done+ (run.md>0?1:0)} of {run.total} · {G.season}{run.md>0?` · matchday ${run.md}/${run.mdTotal}`:""}</div>
-            <div className="h-2 rounded bg-[#0d1526] overflow-hidden my-3"><div className="h-full bg-indigo-500 transition-all" style={{width:Math.round((run.done + (run.mdTotal?run.md/run.mdTotal:0))/run.total*100)+"%"}}></div></div>
-            <div className="text-xs text-slate-500 mb-4">Your club is auto-managed — re-signing players, promoting youth, making transfers and picking its best XI to compete.</div>
-            <button onClick={()=>{ stopRef.current = true; }} className="px-4 py-2 rounded-lg bg-[#16213a] hover:bg-[#1c2c4a] text-slate-200 text-sm font-semibold">■ Stop after this season</button>
+            <div className="h-2 rounded bg-[#0d1526] overflow-hidden my-3"><div className={"h-full transition-all "+(run.stopping?"bg-amber-500":"bg-indigo-500")} style={{width:Math.round((run.done + (run.mdTotal?run.md/run.mdTotal:0))/run.total*100)+"%"}}></div></div>
+            <div className="text-xs text-slate-500 mb-4">{run.stopping
+              ? "Wrapping up the current season, then handing control back to you…"
+              : "Your club is auto-managed — re-signing players, promoting youth, making transfers and picking its best XI to compete."}</div>
+            <button onClick={()=>{ stopRef.current = true; setRun(r=>r?{...r,stopping:true}:r); }} disabled={run.stopping}
+              className={"px-4 py-2 rounded-lg text-sm font-semibold "+(run.stopping?"bg-[#16213a] text-slate-500":"bg-[#16213a] hover:bg-[#1c2c4a] text-slate-200")}>
+              {run.stopping?"Finishing this season…":"■ Finish season & stop"}
+            </button>
           </div>
         </div>
       )}
@@ -5275,7 +5289,22 @@ function YouthView({G, commit, tShow}){
     <div className="space-y-3">
       <Card>
         <div className="font-semibold">🎓 {user.name} Academy — 5-a-side</div>
-        <div className="text-sm text-slate-400">Academy players are on contracts and play a small-sided youth match each matchday — they develop fastest here while young. Promote them to the senior squad when ready; they auto-graduate at age 20. (Senior players 21 and under can be sent back down from the Squad tab.)</div>
+        <div className="text-sm text-slate-400">Academy players are on contracts and play a small-sided youth match each matchday — they develop fastest here while young. Promote them to the senior squad when ready. (Senior players 21 and under can be sent back down from the Squad tab.)</div>
+        {(()=>{
+          const gate = user.academyMinOvr||0;
+          const setGate = v => { user.academyMinOvr = clamp(parseInt(v,10)||0, 0, 99); commit(G); };
+          return (
+            <div className="mt-3 flex items-center gap-2 flex-wrap bg-[#0d1526] rounded-lg p-2">
+              <span className="text-sm font-medium">Auto-promotion policy:</span>
+              {gate>0
+                ? <span className="text-sm text-emerald-300">only promote at <b>{gate}+ OVR</b></span>
+                : <span className="text-sm text-slate-400">graduate at age 20 (default)</span>}
+              <input type="number" min="0" max="99" value={gate} onChange={e=>setGate(e.target.value)}
+                className="w-16 bg-[#16213a] rounded px-2 py-1 text-sm text-center tnum ml-auto" title="0 = graduate at age 20; otherwise prospects stay in the academy until they reach this OVR" />
+              <div className="w-full text-[11px] text-slate-500">Set an OVR (e.g. 90) to keep prospects developing in the academy until they hit that rating instead of graduating at 20. Set 0 for the default. You can always promote or release anyone manually below.</div>
+            </div>
+          );
+        })()}
       </Card>
 
       {last && (
@@ -6482,11 +6511,13 @@ function RecordsView({G}){
   const bw = G.records && G.records.biggestWin;
   const honours = (user.honours||[]).slice().reverse();
   const hCount = t => honours.filter(h=>h.type===t).length;
-  const LeaderTable = ({title, rows, valKey, valLabel}) => (
+  // `extra` = optional secondary stat columns shown before the sorted value, so a
+  // leaderboard can display goals AND assists (not just the one it's ranked by).
+  const LeaderTable = ({title, rows, valKey, valLabel, extra=[]}) => (
     <Card className="p-0 overflow-x-auto">
       <div className="p-3 font-semibold">{title}</div>
       <table className="w-full text-sm">
-        <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="p-2 text-left">#</th><th className="p-2 text-left">Player</th><th className="p-2">Pos</th><th className="p-2">Club</th><th className="p-2">{valLabel}</th></tr></thead>
+        <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]"><th className="p-2 text-left">#</th><th className="p-2 text-left">Player</th><th className="p-2">Pos</th><th className="p-2">Club</th>{extra.map(e=><th key={e.label} className="p-2">{e.label}</th>)}<th className="p-2">{valLabel}</th></tr></thead>
         <tbody>
           {rows.map((p,i)=>(
             <tr key={p.id} className="border-b border-[#15203a] cursor-pointer hover:bg-[#16213a]" onClick={()=>openRec(p)}>
@@ -6494,14 +6525,17 @@ function RecordsView({G}){
               <td className="p-2 text-left">{flag(p.nat)}{p.name}{p.hof&&<span className="ml-1" title="Hall of Fame">🏅</span>}{p.retired&&<span className="ml-1 text-[10px] text-slate-500">ret.</span>}</td>
               <td className="p-2 text-center text-slate-400">{p.pos}</td>
               <td className="p-2 text-center text-slate-400">{p.club}</td>
+              {extra.map(e=><td key={e.label} className="p-2 text-center tnum text-slate-400">{p[e.key]||0}</td>)}
               <td className="p-2 text-center tnum font-bold">{p[valKey]}</td>
             </tr>
           ))}
-          {!rows.length && <tr><td colSpan="5" className="p-4 text-center text-slate-500">Nothing recorded yet — play some seasons.</td></tr>}
+          {!rows.length && <tr><td colSpan={5+extra.length} className="p-4 text-center text-slate-500">Nothing recorded yet — play some seasons.</td></tr>}
         </tbody>
       </table>
     </Card>
   );
+  // combined goal-contributions board (goals + assists), computed since it isn't a stored key
+  const leadGA = (n=12) => recPlayers.map(p=>({ ...p, GA:(p.G||0)+(p.A||0) })).filter(p=>p.GA>0).sort((a,b)=>b.GA-a.GA).slice(0,n);
   return (
     <div className="space-y-3">
       <Card>
@@ -6552,9 +6586,10 @@ function RecordsView({G}){
       )}
 
       <div className="grid lg:grid-cols-2 gap-3">
-        <LeaderTable title="⚽ All-time top scorers" rows={lead("G")} valKey="G" valLabel="Goals" />
-        <LeaderTable title="👟 Most appearances" rows={lead("App")} valKey="App" valLabel="Apps" />
-        <LeaderTable title="🅰️ Most assists" rows={lead("A")} valKey="A" valLabel="Assists" />
+        <LeaderTable title="⚽ All-time top scorers" rows={lead("G")} valKey="G" valLabel="Goals" extra={[{label:"A",key:"A"}]} />
+        <LeaderTable title="🅰️ Most assists" rows={lead("A")} valKey="A" valLabel="Assists" extra={[{label:"G",key:"G"}]} />
+        <LeaderTable title="⚡ Goal contributions (G+A)" rows={leadGA()} valKey="GA" valLabel="G+A" extra={[{label:"G",key:"G"},{label:"A",key:"A"}]} />
+        <LeaderTable title="👟 Most appearances" rows={lead("App")} valKey="App" valLabel="Apps" extra={[{label:"G",key:"G"},{label:"A",key:"A"}]} />
         <LeaderTable title="⭐ Most MOTM awards" rows={lead("MOTM")} valKey="MOTM" valLabel="MOTM" />
         <LeaderTable title="🛡️ Most tackles" rows={lead("Tkl")} valKey="Tkl" valLabel="Tackles" />
         <LeaderTable title="🧠 Most interceptions" rows={lead("Int")} valKey="Int" valLabel="Interc." />
