@@ -1982,8 +1982,46 @@ function finalizeSeason(G){
     }
   });
   computeAwards(G);
+  runPromotionPlayoffs(G);   // decide the 3rd promotion spot at each tier via a play-off
   evaluateBoardSeasonEnd(G);
   G.phase = "offseason";
+}
+// Promotion play-offs: at each tier boundary the top 2 of the lower division go up
+// automatically, and clubs finishing 3rd–6th fight a knockout (semis 3v6 & 4v5,
+// then a one-off final) for the last promotion spot. Run at season end (squads +
+// stats still live). Winners are applied in startNextSeason's promotion block.
+function playPromoTie(G, home, away){
+  ensureXI(home, G.players); ensureXI(away, G.players);
+  const box = simMatch(home, away, G.players, { cup:true, mustDecide:true, neutral:false, G });
+  recordUserBox(G, box, "Play-off");
+  const w = box.pens ? (box.pens.winner==="H"?home:away) : (box.hs>=box.as?home:away);
+  return { home:home.abbr, away:away.abbr, hs:box.hs, as:box.as, pens:box.pens?`${box.pens.h}-${box.pens.a}`:null, aet:!!box.extraTime, winId:w.id, winAbbr:w.abbr };
+}
+function playPromoPlayoff(G, ci, lowerDiv){
+  const t = tableFor(G, lowerDiv, ci);
+  const s = [t[2], t[3], t[4], t[5]];   // 3rd, 4th, 5th, 6th
+  if(s.some(x=>!x)) return null;
+  const sf1 = playPromoTie(G, s[0], s[3]);   // 3 v 6
+  const sf2 = playPromoTie(G, s[1], s[2]);   // 4 v 5
+  const fin = playPromoTie(G, G.clubs[sf1.winId], G.clubs[sf2.winId]);
+  return { country:ci, lowerDiv, semis:[sf1, sf2], final:fin, promotedId:fin.winId, promotedAbbr:fin.winAbbr };
+}
+function runPromotionPlayoffs(G){
+  const results = [];
+  COUNTRIES.forEach((C,ci)=>{
+    for(let lowerDiv=1; lowerDiv<NUM_DIVS; lowerDiv++){
+      const r = playPromoPlayoff(G, ci, lowerDiv);
+      if(r) results.push(r);
+    }
+  });
+  G.playoffs = { season:G.season, results };
+  const user = G.clubs[G.userTeamId];
+  results.forEach(r=>{
+    if(!user) return;
+    const involvedUser = r.semis.concat([r.final]).some(m=>m && (G.clubs[r.promotedId], [r.final.home,r.final.away,r.semis[0].home,r.semis[0].away,r.semis[1].home,r.semis[1].away].includes(user.abbr)));
+    if(r.promotedId===user.id) logNews(G,"promo",`🎉 ${user.name} win the promotion play-off — up to the ${divName(user.country||0,r.lowerDiv-1)}!`, user.id);
+    else if(involvedUser && (user.country||0)===r.country && user.div===r.lowerDiv) logNews(G,"promo",`😔 ${user.name}'s promotion play-off ends in heartbreak.`, user.id);
+  });
 }
 // End-of-season verdict: did the manager meet the owner's expectation? Adjust
 // confidence sharply, then sack an underperformer or field a poaching approach.
@@ -2245,12 +2283,20 @@ function startNextSeason(G){
   // promotion / relegation WITHIN each country: at every tier boundary the
   // bottom 3 of the division above swap with the top 3 of the division below.
   const _movedDiv = [];
+  // play-off winner promoted to div d from div d+1 (keyed country-lowerDiv); falls
+  // back to the 3rd-placed club for old saves with no play-off recorded.
+  const _poWin = {};
+  ((G.playoffs && G.playoffs.season===G.season) ? G.playoffs.results : []).forEach(r=>{ _poWin[r.country+"-"+r.lowerDiv]=r.promotedId; });
   COUNTRIES.forEach((C,ci)=>{
     // snapshot all tables BEFORE any swaps so a club moves at most one tier
     const tables = []; for(let d=0; d<NUM_DIVS; d++) tables.push(tableFor(G,d,ci));
     for(let d=0; d<NUM_DIVS-1; d++){
       tables[d].slice(-3).forEach(c=>{ c.div=d+1; _movedDiv.push(c); logNews(G,"releg",`⬇️ ${c.name} are relegated to the ${divName(ci,d+1)}`, c.id); });
-      tables[d+1].slice(0,3).forEach(c=>{ c.div=d; _movedDiv.push(c); logNews(G,"promo",`⬆️ ${c.name} are promoted to the ${divName(ci,d)}`, c.id); addHonour(c, G.season, "promo", `Promoted to ${divName(ci,d)}`); });
+      // top 2 auto-promote, plus the play-off winner (or 3rd place as a fallback)
+      const lower = tables[d+1];
+      const poId = _poWin[ci+"-"+(d+1)];
+      const third = (poId!=null && G.clubs[poId] && G.clubs[poId].div===d+1) ? G.clubs[poId] : lower[2];
+      [lower[0], lower[1], third].filter(Boolean).forEach(c=>{ c.div=d; _movedDiv.push(c); logNews(G,"promo",`⬆️ ${c.name} are promoted to the ${divName(ci,d)}`, c.id); addHonour(c, G.season, "promo", `Promoted to ${divName(ci,d)}`); });
     }
   });
   // Normalize every AI club's wage bill to its DIVISION each season. This is the
@@ -4521,11 +4567,11 @@ function LeagueTable({G}){
           </tr></thead>
           <tbody>
             {table.map((c,i)=>{
-              const promo = div>=1 && i<3, releg = div<NUM_DIVS-1 && i>=17, champ = div===0 && i===0;
+              const promo = div>=1 && i<2, playoff = div>=1 && i>=2 && i<6, releg = div<NUM_DIVS-1 && i>=17, champ = div===0 && i===0;
               return (
                 <tr key={c.id} className={"border-b border-[#15203a] "+(c.id===G.userTeamId?"bg-emerald-500/10":"")}>
                   <td className="p-2 text-center">
-                    <span className={champ?"text-amber-300 font-bold":promo?"text-emerald-400":releg?"text-red-400":""}>{i+1}</span>
+                    <span className={champ?"text-amber-300 font-bold":promo?"text-emerald-400":playoff?"text-sky-400":releg?"text-red-400":""} title={playoff?"Promotion play-off spot":""}>{i+1}</span>
                   </td>
                   <td className="p-2 text-left font-medium"><span className="inline-flex items-center gap-1.5"><Crest club={c} size={13} />{c.name}</span>{c.id===G.userTeamId&&<span className="text-emerald-400"> ★</span>}</td>
                   <td className="p-2 text-center">{c.pld}</td><td className="p-2 text-center">{c.w}</td><td className="p-2 text-center">{c.d}</td><td className="p-2 text-center">{c.l}</td>
@@ -4538,7 +4584,7 @@ function LeagueTable({G}){
           </tbody>
         </table>
       </Card>
-      <div className="text-xs text-slate-400">{div===0?"Bottom 3 are relegated. Champions in gold.":div===NUM_DIVS-1?"Top 3 are promoted.":"Top 3 are promoted · bottom 3 are relegated."}</div>
+      <div className="text-xs text-slate-400">{div===0?"Bottom 3 are relegated. Champions in gold.":<span>Top 2 <span className="text-emerald-400">auto-promote</span>; 3rd–6th <span className="text-sky-400">play off</span> for the last spot{div<NUM_DIVS-1?"; bottom 3 relegated":""}.</span>}</div>
     </div>
   );
 }
@@ -6941,6 +6987,26 @@ function Offseason({G, commit, tShow, setTab}){
         {champ && <div className="text-sm text-amber-300 mt-1">🏆 Champions: {G.clubs[champ.id].name}</div>}
         <div className="text-sm text-slate-400 mt-1">You finished {ordinal(leaguePos(G,user))} in the {divName(user.country||0,user.div)} ({user.w}-{user.d}-{user.l}, {user.pts} pts).</div>
       </Card>
+      {(()=>{
+        const po = (G.playoffs && G.playoffs.season===G.season) ? G.playoffs.results.filter(r=>r.country===(user.country||0)) : [];
+        if(!po.length) return null;
+        const line = m => <span>{m.home} <span className="font-bold tnum">{m.hs}-{m.as}</span>{m.pens?<span className="text-amber-400 text-xs"> (p{m.pens})</span>:m.aet?<span className="text-amber-400 text-xs"> aet</span>:""} {m.away} <span className="text-emerald-300">→ {m.winAbbr}</span></span>;
+        return (
+          <Card>
+            <div className="font-semibold mb-2">🎢 Promotion play-offs <span className="text-slate-500 text-xs font-normal">— {COUNTRIES[user.country||0].flag} {COUNTRIES[user.country||0].name}</span></div>
+            <div className="space-y-2 text-sm">
+              {po.map((r,i)=>(
+                <div key={i} className="bg-[#0d1526] rounded-lg p-2">
+                  <div className="text-xs text-slate-400 mb-1">Into the {divName(user.country||0,r.lowerDiv-1)} · winner: <span className="text-emerald-300 font-semibold">{r.promotedAbbr}</span>{r.promotedId===user.id&&<span className="text-amber-300"> — that's you! 🎉</span>}</div>
+                  <div className="text-slate-300">SF: {line(r.semis[0])}</div>
+                  <div className="text-slate-300">SF: {line(r.semis[1])}</div>
+                  <div className="text-slate-200 font-medium">Final: {line(r.final)}</div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        );
+      })()}
       {award && (()=>{
         const s = award.countries ? (award.countries.find(x=>x.country===(user.country||0))||award.countries[0]) : award;
         if(!s) return null;
