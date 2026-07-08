@@ -1988,13 +1988,46 @@ function finalizeSeason(G){
 // End-of-season verdict: did the manager meet the owner's expectation? Adjust
 // confidence sharply, then sack an underperformer or field a poaching approach.
 function evaluateBoardSeasonEnd(G){
-  if(!jobSecurityOn(G) || G.pendingSack) return;
   const user = G.clubs[G.userTeamId];
   const pos = leaguePos(G, user) || 12;
+  // ---- grade the season's objectives (met/missed) + fan mood ----
+  {
+    const uid2 = G.userTeamId;
+    const cup = (G.cups||[]).find(x=>x.country===(user.country||0));
+    const cupRun = clubCupRun(G, cup, uid2);
+    const contRun = clubContRun(G, G.contCup, uid2);
+    const roundIdx = r => ["PR","R64","R32","R16","QF","SF","Final","W"].indexOf(r);
+    const wonTrophy = (user.honours||[]).some(h=>h.season===G.season && ["league","cup","continental"].includes(h.type));
+    const pn = user.lastPnl||{};
+    const income = (pn.tv||0)+(pn.prize||0)+(pn.gate||0)+(pn.conc||0)+(pn.boxes||0)+(pn.merch||0)+(pn.shirt||0)+(pn.sleeve||0)+(pn.sponsor||0)+(pn.cup||0)+(pn.naming||0);
+    const spend = (pn.wages||0)+(pn.overhead||0);
+    let metCount=0, total=0;
+    (G.objectives||[]).forEach(o=>{
+      total++;
+      if(o.kind==="league"){ o.met = pos <= expTargetPos(G); }
+      else if(o.kind==="cup"){ o.met = !!cupRun && roundIdx(cupRun.round) >= roundIdx(o.target); }
+      else if(o.kind==="cont"){ o.met = !!contRun && contRun.round!=="Group"; }
+      else if(o.kind==="finance"){ o.met = income>=spend || user.budget>0; }
+      if(o.met) metCount++;
+    });
+    G.lastObjectives = { season:G.season, objectives:(G.objectives||[]).map(o=>({kind:o.kind,text:o.text,met:!!o.met})), met:metCount, total };
+    // fans: exceeding/missing the brief + trophies + relegation + ticket pricing
+    const relegatedF = user.div < NUM_DIVS-1 && pos > (tableFor(G,user.div,user.country||0).length - 3);
+    let fanDelta = (metCount - (total-metCount))*2.5;
+    if(wonTrophy) fanDelta += 12;
+    if(relegatedF) fanDelta -= 18;
+    const tt = user.ticketTier!=null?user.ticketTier:1;   // 0 cheapest .. 3 dearest
+    fanDelta += (1 - tt) * 1.5;                            // cheap tickets please fans, dear ones don't
+    G.fanConfidence = clamp((G.fanConfidence==null?65:G.fanConfidence) + fanDelta, 0, 100);
+  }
+  if(!jobSecurityOn(G) || G.pendingSack) return;
   const target = expTargetPos(G);
   if(G.boardConfidence==null) G.boardConfidence=60;
   const beat = target - pos;   // >0 = exceeded expectation
-  G.boardConfidence = clamp(G.boardConfidence + beat*5, 0, 100);
+  // secondary objectives (cup / continental / finance) nudge board confidence too
+  const secMet = (G.objectives||[]).filter(o=>o.kind!=="league" && o.met).length;
+  const secMiss = (G.objectives||[]).filter(o=>o.kind!=="league" && o.met===false).length;
+  G.boardConfidence = clamp(G.boardConfidence + beat*5 + secMet*3 - secMiss*3, 0, 100);
   const div0 = user.div===0;
   const relegated = user.div < NUM_DIVS-1 && pos > (tableFor(G,user.div,user.country||0).length - 3);
   if((relegated && G.boardConfidence<45) || G.boardConfidence<=12){
@@ -2100,6 +2133,10 @@ function startNextSeason(G){
   });
   // record club season history + reset table. Cup / continental runs are captured
   // here too (G.cups / G.contCup still hold the finished season at this point).
+  // Clubs the user has ever managed keep their FULL season history (so the club's
+  // season-by-season goes back to the very first year); AI clubs stay capped at 40
+  // to keep the 640-club save bounded.
+  const _managedIds = new Set(((G.career&&G.career.clubsManaged)||[]).map(s=>s.id));
   G.clubs.forEach(c=>{
     c.history = c.history || [];
     if(c.pld>0){   // a club that never kicked a ball (e.g. added by a world expansion) records nothing
@@ -2107,7 +2144,8 @@ function startNextSeason(G){
       c.history.push({ season:G.season, div:c.div, pos:leaguePos(G,c), w:c.w, d:c.d, l:c.l, gf:c.gf, ga:c.ga, pts:c.pts,
         cup: clubCupRun(G, cup, c.id), cont: clubContRun(G, G.contCup, c.id) });
     }
-    if(c.history.length>40) c.history = c.history.slice(-40);
+    const histCap = (c.userControlled || _managedIds.has(c.id)) ? 400 : 40;
+    if(c.history.length>histCap) c.history = c.history.slice(-histCap);
   });
   // the manager's own season log (mirrors the club history row he just produced)
   {
@@ -2809,6 +2847,9 @@ function buyPlayer(G, p, fee, opts={}){
   autoPickXI(buyer, G.players);
   logNews(G,"transfer",`➡️ Signed ${p.pos} ${p.name} (${p.ovr}) for ${money(fee)}${opts.via==="release"?" (release clause)":""}`, buyer.id);
   ensureCareer(G); G.career.transferSpend = round((G.career.transferSpend+fee)*10)/10;
+  // fans love a marquee signing
+  if(p.ovr>=80 || fee>=60) bumpFans(G, 5, `The fans are buzzing about the signing of ${p.name}!`);
+  else if(p.ovr>=74 || fee>=25) bumpFans(G, 2);
   return { ok:true };
 }
 // Sell one of your players to an AI club for a fee. Honors any sell-on owed to a former club.
@@ -2831,6 +2872,10 @@ function sellPlayer(G, p, fee, toClubId){
   autoPickXI(seller, G.players);
   logNews(G,"transfer",`⬅️ Sold ${p.pos} ${p.name} (${p.ovr}) for ${money(fee)}`, seller.id);
   ensureCareer(G); G.career.transferIncome = round((G.career.transferIncome+proceeds)*10)/10;
+  // selling a star upsets the fans (unless he wanted out)
+  const wasStar = p.ovr>=80;
+  if(wasStar && !p.wantsOut) bumpFans(G, -6, `Fans are unhappy at selling star ${p.name}.`);
+  else if(p.ovr>=76 && !p.wantsOut) bumpFans(G, -2);
 }
 // The OFFSEASON TRANSFER MARKET between AI clubs. Without this, money never
 // converted into squad strength (AI squads only changed via youth + fire sales),
@@ -3110,12 +3155,23 @@ function returnLoans(G){
 /* ----------------------------- owner ----------------------------------- */
 function setOwnerExpectation(G){
   const c = G.clubs[G.userTeamId];
-  if(c.div>=1){ G.expectation = { text:"Win promotion to the "+divName(c.country||0,c.div-1), target:"promo" }; return; }
-  const last = (c.history||[]).slice(-1)[0];
-  const lastPos = last ? last.pos : 12;
-  if(lastPos<=4) G.expectation = { text:"Challenge for the title (top 3)", target:"top3" };
-  else if(lastPos<=10) G.expectation = { text:"Finish in the top half", target:"top10" };
-  else G.expectation = { text:"Avoid relegation", target:"safe" };
+  if(c.div>=1){ G.expectation = { text:"Win promotion to the "+divName(c.country||0,c.div-1), target:"promo" }; }
+  else {
+    const last = (c.history||[]).slice(-1)[0];
+    const lastPos = last ? last.pos : 12;
+    if(lastPos<=4) G.expectation = { text:"Challenge for the title (top 3)", target:"top3" };
+    else if(lastPos<=10) G.expectation = { text:"Finish in the top half", target:"top10" };
+    else G.expectation = { text:"Avoid relegation", target:"safe" };
+  }
+  // Fuller board brief: the league goal plus a cup goal, a Champions Cup goal
+  // (if in it), and a financial goal. Evaluated at season end (evaluateBoardSeasonEnd).
+  const obj = [{ kind:"league", text:G.expectation.text }];
+  const cupTarget = c.div===0 ? "QF" : "R16";
+  obj.push({ kind:"cup", text:`Reach the ${cupName(c.country||0)} ${cupTarget==="QF"?"quarter-finals":"round of 16"}`, target:cupTarget });
+  const inCC = G.contCup && (G.contCup.qualifiers||[]).includes(c.id);
+  if(inCC) obj.push({ kind:"cont", text:`Get out of the ${CONT_CUP_NAME} group`, target:"ko" });
+  obj.push({ kind:"finance", text:"Keep the club's finances in the black" });
+  G.objectives = obj;
 }
 
 /* ----------------------------- job security ---------------------------- */
@@ -3131,9 +3187,17 @@ function expTargetPos(G){
 }
 function confLabel(c){ return c>=80?"Secure":c>=60?"Backed":c>=40?"Watching":c>=20?"Under pressure":"On the brink"; }
 function bumpConfidenceForResult(G, win, draw, mult=1){
+  // fan mood tracks results too (a livelier, more forgiving swing than the board)
+  G.fanConfidence = clamp((G.fanConfidence==null?65:G.fanConfidence) + (win?1.6: draw?-0.2: -1.4)*mult, 0, 100);
   if(!jobSecurityOn(G)) return;
   if(G.boardConfidence==null) G.boardConfidence=60;
   G.boardConfidence = clamp(G.boardConfidence + (win?4: draw?0.5: -4)*mult, 0, 100);
+}
+function fanLabel(c){ return c>=80?"Euphoric":c>=62?"Happy":c>=42?"Restless":c>=22?"Unhappy":"Furious"; }
+// Nudge the fan mood (used on signings, sales, trophies, ticket pricing).
+function bumpFans(G, delta, reason){
+  G.fanConfidence = clamp((G.fanConfidence==null?65:G.fanConfidence) + delta, 0, 100);
+  if(reason) logNews(G,"fans",`${delta>=0?"😀":"😠"} ${reason}`, G.userTeamId);
 }
 // Pick clubs that would hire the user right now (a sacking) or come calling
 // (a poaching approach when overperforming). Returns up to 3 offers.
@@ -3413,6 +3477,7 @@ function migrate(G){
     const defs = { injuries:true, jobSecurity:true, morale:true, internationals:true, watchMatches:false };
     for(const k in defs){ if(G.settings[k]==null) G.settings[k]=defs[k]; }
     if(G.boardConfidence==null) G.boardConfidence=60;
+    if(G.fanConfidence==null) G.fanConfidence=65;
     if(G.pendingSack==null) G.pendingSack=false;
     if(!G.intl || typeof G.intl!=="object") G.intl={ history:[], lastPlayed:null };
     if(!Array.isArray(G.intl.history)) G.intl.history=[];
@@ -3452,6 +3517,28 @@ function migrate(G){
         const h=G.clubs[g.home], a=G.clubs[g.away];
         if(h && a && h.rivalId===a.id) recordH2H(G, h, a, g.hs, g.as, "L");
       }));
+    }
+    // Backfill newer all-time-leader fields (saves, caps, int'l goals, Ballon d'Ors,
+    // Golden Boots, blocks, aerials) onto existing record snapshots from the player's
+    // preserved career data — live players, the retired archive, or HOF snapshots —
+    // so the new leaderboards fill in retroactively for anyone we still have data on.
+    {
+      const pool = (G.records&&G.records.players)||{};
+      Object.keys(pool).forEach(id=>{
+        const rec = pool[id]; if(!rec || rec._fill2) return;
+        const src = (G.players||{})[id] || (G.retired||{})[id];
+        const ca = (src&&src.career)||{};
+        const set = (k, v) => { if(rec[k]==null || rec[k]===0) rec[k] = v||0; };
+        if(src){
+          set("Sv", ca.Sv); set("CS", ca.CS); set("Blk", ca.Blk); set("Aer", ca.Aer);
+          set("MOTM", ca.MOTM); set("Tkl", ca.Tkl); set("Int", ca.Int); set("Clr", ca.Clr); set("PrgP", ca.PrgP);
+          set("caps", src.caps); set("intlG", src.intlG); set("ballonDor", src.ballonDor); set("golden", src.golden);
+          if(!rec.peak) rec.peak = src.peakOvr||src.ovr||rec.peak||0;
+        }
+        // make sure every leaderboard key is a number so sorts never NaN
+        ["G","A","App","CS","MOTM","Sv","Tkl","Int","Clr","Blk","Aer","PrgP","caps","intlG","ballonDor","golden"].forEach(k=>{ if(rec[k]==null) rec[k]=0; });
+        rec._fill2 = true;
+      });
     }
     // one-time: reconstruct the manager's season log from the clubs he managed
     if(G.career && !Array.isArray(G.career.seasons)){
@@ -3501,7 +3588,7 @@ function newGame(userTeamId, opts={}){
     cups: null, contCup: null, lastMatch: null, lastMatches: [],
     finalsArchive: [], records: { players:{}, biggestWin:null }, trebles: [], doubles: [],
     intl: { history:[], lastPlayed:null },
-    boardConfidence: 60, pendingSack: false, jobOffers: null,
+    boardConfidence: 60, fanConfidence: 65, pendingSack: false, jobOffers: null,
     career: { seasonsManaged:0, transferSpend:0, transferIncome:0, academyGraduates:0,
       clubsManaged: [{ id:userTeamId, name:clubs[userTeamId].name, abbr:clubs[userTeamId].abbr, from:2026, to:null }] },
     settings: { injuries:true, jobSecurity:true, morale:true, internationals:true, watchMatches:false },
@@ -3942,11 +4029,18 @@ function Hub({G, commit, tShow, setTab}){
             <div className="text-xl font-bold">{user.name}</div>
             <div className="text-sm text-slate-400">{COUNTRIES[user.country||0].flag} {divName(user.country||0,user.div)} · {pos>0?ordinal(pos):"—"} place · {user.pts} pts · GD {gd(user)>=0?"+":""}{gd(user)}</div>
             <div className="text-xs text-amber-300/90 mt-1">Board: {G.expectation?G.expectation.text:"—"}</div>
-            {jobSecurityOn(G) && (()=>{ const c=G.boardConfidence==null?60:G.boardConfidence; const col=c>=60?"bg-emerald-500":c>=40?"bg-yellow-500":c>=20?"bg-orange-500":"bg-red-500";
-              return (<div className="mt-1.5 w-48 max-w-full">
-                <div className="flex justify-between text-[11px] text-slate-400"><span>Job security</span><span className={c<20?"text-red-400":""}>{confLabel(c)}</span></div>
-                <div className="h-1.5 rounded bg-[#0d1526] overflow-hidden"><div className={"h-full "+col} style={{width:c+"%"}}></div></div>
-              </div>); })()}
+            <div className="flex gap-4 flex-wrap">
+              {jobSecurityOn(G) && (()=>{ const c=G.boardConfidence==null?60:G.boardConfidence; const col=c>=60?"bg-emerald-500":c>=40?"bg-yellow-500":c>=20?"bg-orange-500":"bg-red-500";
+                return (<div className="mt-1.5 w-44 max-w-full">
+                  <div className="flex justify-between text-[11px] text-slate-400"><span>Job security</span><span className={c<20?"text-red-400":""}>{confLabel(c)}</span></div>
+                  <div className="h-1.5 rounded bg-[#0d1526] overflow-hidden"><div className={"h-full "+col} style={{width:c+"%"}}></div></div>
+                </div>); })()}
+              {(()=>{ const c=G.fanConfidence==null?65:G.fanConfidence; const col=c>=62?"bg-emerald-500":c>=42?"bg-yellow-500":c>=22?"bg-orange-500":"bg-red-500";
+                return (<div className="mt-1.5 w-44 max-w-full">
+                  <div className="flex justify-between text-[11px] text-slate-400"><span>🎌 Fan mood</span><span className={c<22?"text-red-400":""}>{fanLabel(c)}</span></div>
+                  <div className="h-1.5 rounded bg-[#0d1526] overflow-hidden"><div className={"h-full "+col} style={{width:c+"%"}}></div></div>
+                </div>); })()}
+            </div>
            </div>
           </div>
           <div className="text-right">
@@ -3955,6 +4049,20 @@ function Hub({G, commit, tShow, setTab}){
           </div>
         </div>
       </Card>
+
+      {Array.isArray(G.objectives) && G.objectives.length>0 && (
+        <Card>
+          <div className="font-semibold mb-2">📋 Board objectives <span className="text-slate-500 text-xs font-normal">— {offseason?"season graded":"this season"}</span></div>
+          <div className="grid sm:grid-cols-2 gap-x-4 gap-y-1 text-sm">
+            {G.objectives.map((o,i)=>(
+              <div key={i} className="flex items-center gap-2">
+                <span className="w-4 text-center">{o.met===true?"✅":o.met===false?"❌":"⬜"}</span>
+                <span className={o.met===true?"text-emerald-300":o.met===false?"text-red-400":"text-slate-300"}>{o.text}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {!offseason && (
         <Card>
@@ -3989,6 +4097,21 @@ function Hub({G, commit, tShow, setTab}){
           <div className="flex flex-wrap gap-2">
             <button onClick={()=>setTab("offseason")} className="px-4 py-2 rounded-lg bg-emerald-500 text-slate-900 font-semibold">Go to Offseason</button>
             <SimYears G={G} commit={commit} tShow={tShow} />
+          </div>
+        </Card>
+      )}
+
+      {Array.isArray(G.objectives) && G.objectives.length>0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-2"><div className="font-semibold">🎯 Board objectives — {G.season}</div>
+            {G.lastObjectives && G.lastObjectives.season===G.season-1 && <span className="text-xs text-slate-500">Last season: {G.lastObjectives.met}/{G.lastObjectives.total} met</span>}</div>
+          <div className="space-y-1.5 text-sm">
+            {G.objectives.map((o,i)=>(
+              <div key={i} className="flex items-center gap-2">
+                <span className="text-slate-500">{o.kind==="league"?"🏆":o.kind==="cup"?"🎖️":o.kind==="cont"?"🌍":"💰"}</span>
+                <span className="flex-1 text-slate-300">{o.text}</span>
+              </div>
+            ))}
           </div>
         </Card>
       )}
@@ -5518,6 +5641,7 @@ function homeFillRate(G, c, opts={}){
   if(opts.cont) fill += 0.10;          // continental glamour nights
   else if(opts.cup) fill += 0.02;
   if(opts.derby) fill += 0.08;         // rivalry sell-out push
+  if(c.userControlled && G.fanConfidence!=null) fill += (G.fanConfidence-65)/100*0.12;   // happy fans turn up
   fill *= tier.demandMult;             // pricing suppresses (or lifts) demand
   return clamp(fill, 0.28, 1.0);
 }
