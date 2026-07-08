@@ -283,6 +283,10 @@ const localIdx = id => id % CLUBS_PER_COUNTRY;
 const divOfIdx = id => Math.min(NUM_DIVS-1, Math.floor(localIdx(id) / TEAMS_PER_DIV));
 // Per-country division name, e.g. divName(0,0) -> "Premier League".
 function divName(country, div){ return (COUNTRIES[country]||COUNTRIES[0]).divNames[div]; }
+// Small tier marker shown next to a club in history tables: top flight has none,
+// then ² / ³ / ⁴ for the 2nd, 3rd and 4th tiers (same for every country).
+const DIV_SUP = ["", "²", "³", "⁴"];
+const divSup = div => DIV_SUP[div] || "";
 // Back-compat for older single-country references.
 const DIV_NAMES = COUNTRIES[0].divNames;
 
@@ -4589,7 +4593,7 @@ function ClubBrowser({G, commit, tShow}){
                     return (
                       <tr key={i} className={"border-b border-[#15203a] "+(h.live?"bg-emerald-500/5":"")}>
                         <td className="p-2 text-left">{h.season}{h.live&&<span className="text-emerald-400 text-[9px] ml-1">now</span>}</td>
-                        <td className="p-2 text-left whitespace-nowrap text-slate-300">{divName(club.country||0,h.div)}{h.div===1&&<span className="text-slate-600 text-[9px]">²</span>}</td>
+                        <td className="p-2 text-left whitespace-nowrap text-slate-300">{divName(club.country||0,h.div)}{h.div>0&&<span className="text-slate-600 text-[9px]">{divSup(h.div)}</span>}</td>
                         <td className={"p-2 text-center font-semibold "+(champ?"text-amber-300":promo?"text-emerald-300":"")}>{champ&&"👑"}{ord(h.pos)}</td>
                         <td className="p-2 text-center">{h.w}-{h.d}-{h.l}</td>
                         <td className="p-2 text-center text-slate-400">{h.gf}-{h.ga}</td>
@@ -6473,7 +6477,7 @@ function ManagerLegacyCard({G}){
                 <tr key={i} className="border-t border-[#15203a]">
                   <td className="text-left">{s.season}</td>
                   <td className="text-left whitespace-nowrap">{COUNTRIES[s.country]?COUNTRIES[s.country].flag:""} {s.club}</td>
-                  <td className="text-left text-slate-400 whitespace-nowrap">{divName(s.country,s.div)}{s.div===1&&<span className="text-slate-600 text-[9px]">²</span>}</td>
+                  <td className="text-left text-slate-400 whitespace-nowrap">{divName(s.country,s.div)}{s.div>0&&<span className="text-slate-600 text-[9px]">{divSup(s.div)}</span>}</td>
                   <td className={"text-center font-semibold "+(s.pos===1&&s.div===0?"text-amber-300":s.pos===1?"text-emerald-300":"")}>{s.pos===1&&s.div===0&&"👑"}{s.pos}</td>
                   <td className="text-center">{s.w}-{s.d}-{s.l}</td>
                   <td className="text-center">{s.pts}</td>
@@ -6967,7 +6971,7 @@ function PlayerModal({p, G, onClose}){
                   {histShown.slice().reverse().map((h,i)=>(
                     <tr key={i} className="border-t border-[#15203a]">
                       <td className="text-left">{h.season}</td>
-                      <td className="text-left whitespace-nowrap">{h.country!=null&&<span className="mr-0.5">{(COUNTRIES[h.country]||{}).flag}</span>}{h.team}{h.div===1&&<span className="text-slate-600 text-[9px]">²</span>}{h.loan&&<span className="ml-0.5 text-sky-300 text-[10px]" title="Loan spell">🔁</span>}</td>
+                      <td className="text-left whitespace-nowrap">{h.country!=null&&<span className="mr-0.5">{(COUNTRIES[h.country]||{}).flag}</span>}{h.team}{h.div>0&&<span className="text-slate-600 text-[9px]">{divSup(h.div)}</span>}{h.loan&&<span className="ml-0.5 text-sky-300 text-[10px]" title="Loan spell">🔁</span>}</td>
                       <td className="text-center">{h.age!=null?h.age:"—"}</td><td className="text-center">{h.App}</td>
                       <td className="text-center text-slate-400">{h.Start||0}</td><td className="text-center text-slate-400">{(h.Min||0).toLocaleString()}</td>
                       <td className="text-center">{h.G}</td><td className="text-center">{h.A}</td><td className="text-center">{h.KP||0}</td>
