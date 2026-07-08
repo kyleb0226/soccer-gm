@@ -1895,6 +1895,18 @@ function livePlayHalf(G, M){
   M.shH+=shH; M.shA+=shA; M.sotH+=sotH; M.sotA+=sotA;
   const spread=(lineup,shots,sot,xg)=>{ for(let i=0;i<shots;i++){ const o=wpick(lineup,q=>(SCORE_W[q.slot]||0)*(0.5+n01(q.p.sho))); if(!o)continue; o.p.stats.SH++; addCompL(o.p,"SH"); if(i<sot){ o.p.stats.SOT++; addCompL(o.p,"SOT"); } const xgAdd=+(xg/Math.max(1,shots)).toFixed(2); o.p.stats.xG+=xgAdd; addCompL(o.p,"xG",xgAdd);} const kp=Math.max(0,round(shots*0.55)); for(let i=0;i<kp;i++){ const o=wpick(lineup,q=>(CREATE_W[q.slot]||0)*(0.5+n01(q.p.pas))*(hasTrait(q.p,"playmaker")?1.5:1)); if(o){ o.p.stats.KP++; addCompL(o.p,"KP"); } } };
   spread(H,shH,sotH,xgH); spread(A,shA,sotA,xgA);
+  // ---- key-moment commentary (flavour): near-misses, saves, woodwork, bookings ----
+  M.moments = M.moments || [];
+  const gkOf = side => side.find(o=>o.slot==="GK");
+  const attk = side => wpick(side, o=>(SCORE_W[o.slot]||0)+0.2);
+  const pushM = (min,key,type,text)=>M.moments.push({min,side:key,type,text});
+  [["H",H,A,shH,sotH,gh],["A",A,H,shA,sotA,ga]].forEach(([key,side,opp,sh,sot,goals])=>{
+    const saved=Math.max(0,sot-goals), off=Math.max(0,sh-sot), gk=gkOf(opp);
+    for(let i=0;i<Math.min(saved,2);i++){ if(chance(0.55)){ const a=attk(side); if(a&&gk) pushM(base+rint(1,45),key,"save",`🧤 ${gk.p.name} denies ${a.p.name} with a fine save`); } }
+    if(off>0 && chance(0.5)){ const a=attk(side); if(a) pushM(base+rint(1,45),key,"miss",`😮 ${a.p.name} ${pick(["fires just wide","blazes over","drags it wide"])}`); }
+    if(chance(0.06)){ const a=attk(side); if(a) pushM(base+rint(1,45),key,"post",`💥 ${a.p.name} rattles the ${pick(["post","crossbar"])}!`); }
+    if(chance(0.33)){ const b=pick(side); if(b && b.slot!=="GK") pushM(base+rint(1,45),key,"card",`🟨 ${b.p.name} is booked`); }
+  });
   if(M.half>=2) M.done=true;
 }
 function liveFinish(G, M){
@@ -3913,16 +3925,25 @@ function LiveMatch({G, commit, tShow, onClose}){
           <div className="text-center text-xs text-slate-500 mt-1">{phase==="pre"?"Kick-off":phase==="ht"?"Half time":"Full time"} · {home.name} v {away.name}</div>
         </div>
         <div className="p-4 space-y-3">
-          {M.events.length>0 && (
-            <div className="space-y-0.5 text-xs">
-              {M.events.slice().sort((a,b)=>a.min-b.min).map((e,i)=>(
-                <div key={i} className={"flex gap-2 "+(e.side==="H"?"":"justify-end text-right")}>
-                  <span className="text-slate-500 w-8">{e.min}'</span>
-                  <span className="text-slate-300">⚽ {e.name}{e.assist?<span className="text-slate-500"> ({e.assist})</span>:""}</span>
+          {(() => {
+            // key-moments feed: goals (⚽, highlighted) merged with flavour moments
+            const goals = (M.events||[]).map(e=>({ min:e.min, side:e.side, goal:true, text:`⚽ GOAL — ${e.name}${e.assist?` (assist ${e.assist})`:e.pk?" (pen)":e.fk?" (free kick)":""}` }));
+            const feed = goals.concat(M.moments||[]).sort((a,b)=>a.min-b.min || (a.goal?1:0)-(b.goal?1:0));
+            if(!feed.length) return null;
+            return (
+              <div className="bg-[#0d1526] rounded-lg p-2">
+                <div className="text-[11px] text-slate-500 mb-1 text-center">Key moments</div>
+                <div className="space-y-0.5 text-xs max-h-52 overflow-y-auto">
+                  {feed.map((e,i)=>(
+                    <div key={i} className={"flex gap-2 "+(e.side==="H"?"":"justify-end text-right")}>
+                      <span className="text-slate-500 w-8 shrink-0">{e.min}'</span>
+                      <span className={e.goal?"text-emerald-300 font-semibold":"text-slate-300"}>{e.text}</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          )}
+              </div>
+            );
+          })()}
 
           {phase==="pre" && (
             <div className="text-center">
