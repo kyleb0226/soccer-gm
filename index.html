@@ -1738,8 +1738,9 @@ function updateRecords(G){
     const ca = p.career||{};
     if((ca.App||0)>=150 || (ca.G||0)>=60 || (ca.A||0)>=60 || (p.peakOvr||0)>=84 || p.hof){
       pool[p.id] = { id:p.id, name:p.name, pos:p.pos, nat:p.nat,
-        G:ca.G||0, A:ca.A||0, App:ca.App||0, CS:ca.CS||0, MOTM:ca.MOTM||0,
+        G:ca.G||0, A:ca.A||0, App:ca.App||0, CS:ca.CS||0, MOTM:ca.MOTM||0, Sv:ca.Sv||0,
         Tkl:ca.Tkl||0, Int:ca.Int||0, Clr:ca.Clr||0, Blk:ca.Blk||0, Aer:ca.Aer||0, PrgP:ca.PrgP||0, Err:ca.Err||0,
+        caps:p.caps||0, intlG:p.intlG||0, ballonDor:p.ballonDor||0, golden:p.golden||0,
         peak:p.peakOvr||p.ovr, hof:!!p.hof,
         club: p.teamId!=null && G.clubs[p.teamId] ? G.clubs[p.teamId].abbr : "—",
         season:G.season, retired:false };
@@ -2099,7 +2100,7 @@ function startNextSeason(G){
       G.career.seasons.unshift({ season:G.season, club:uc.abbr, name:uc.name, country:uc.country||0, div:uh.div, pos:uh.pos, pts:uh.pts, w:uh.w, d:uh.d, l:uh.l,
         cup:uh.cup?uh.cup.round:null, cont:uh.cont?uh.cont.round:null,
         trophies:(uc.honours||[]).filter(x=>x.season===G.season && ["league","cup","continental"].includes(x.type)).length });
-      if(G.career.seasons.length>60) G.career.seasons.length = 60;
+      if(G.career.seasons.length>1000) G.career.seasons.length = 1000;   // effectively every season you've managed
     }
   }
   // age + develop everyone exactly ONCE. Free agents live in BOTH G.players
@@ -6463,8 +6464,8 @@ function ManagerLegacyCard({G}){
       </div>
       {Array.isArray(c.seasons) && c.seasons.length>0 && (
         <div className="mb-3">
-          <div className="text-xs text-slate-400 mb-1">Season-by-season:</div>
-          <div className="overflow-x-auto max-h-64 overflow-y-auto">
+          <div className="text-xs text-slate-400 mb-1">Season-by-season <span className="text-slate-500">({c.seasons.length} season{c.seasons.length!==1?"s":""} managed)</span>:</div>
+          <div className="overflow-x-auto max-h-96 overflow-y-auto">
           <table className="w-full text-xs tnum">
             <thead><tr className="text-slate-500"><th className="text-left">Yr</th><th className="text-left">Club</th><th className="text-left">League</th><th>Pos</th><th>W-D-L</th><th>Pts</th><th className="text-left">🏆 Cup</th><th className="text-left">🌍 CC</th><th title="Major trophies won that season">🏆</th></tr></thead>
             <tbody>
@@ -6586,14 +6587,22 @@ function RecordsView({G}){
       )}
 
       <div className="grid lg:grid-cols-2 gap-3">
-        <LeaderTable title="⚽ All-time top scorers" rows={lead("G")} valKey="G" valLabel="Goals" extra={[{label:"A",key:"A"}]} />
-        <LeaderTable title="🅰️ Most assists" rows={lead("A")} valKey="A" valLabel="Assists" extra={[{label:"G",key:"G"}]} />
+        <LeaderTable title="⚽ All-time top scorers" rows={lead("G")} valKey="G" valLabel="Goals" extra={[{label:"A",key:"A"},{label:"App",key:"App"}]} />
+        <LeaderTable title="🅰️ Most assists" rows={lead("A")} valKey="A" valLabel="Assists" extra={[{label:"G",key:"G"},{label:"App",key:"App"}]} />
         <LeaderTable title="⚡ Goal contributions (G+A)" rows={leadGA()} valKey="GA" valLabel="G+A" extra={[{label:"G",key:"G"},{label:"A",key:"A"}]} />
         <LeaderTable title="👟 Most appearances" rows={lead("App")} valKey="App" valLabel="Apps" extra={[{label:"G",key:"G"},{label:"A",key:"A"}]} />
-        <LeaderTable title="⭐ Most MOTM awards" rows={lead("MOTM")} valKey="MOTM" valLabel="MOTM" />
+        <LeaderTable title="🧤 Most clean sheets" rows={lead("CS")} valKey="CS" valLabel="Clean Sh" extra={[{label:"App",key:"App"}]} />
+        <LeaderTable title="🥅 Most saves" rows={lead("Sv")} valKey="Sv" valLabel="Saves" extra={[{label:"CS",key:"CS"}]} />
+        <LeaderTable title="💎 Highest peak rating" rows={lead("peak")} valKey="peak" valLabel="Peak OVR" extra={[{label:"App",key:"App"}]} />
+        <LeaderTable title="🏆 Most Ballon d'Ors" rows={lead("ballonDor")} valKey="ballonDor" valLabel="Ballon d'Or" extra={[{label:"G",key:"G"}]} />
+        <LeaderTable title="🥇 Most Golden Boots" rows={lead("golden")} valKey="golden" valLabel="Boots" extra={[{label:"G",key:"G"}]} />
+        <LeaderTable title="🌍 Most int'l caps" rows={lead("caps")} valKey="caps" valLabel="Caps" extra={[{label:"IntG",key:"intlG"}]} />
+        <LeaderTable title="⭐ Most MOTM awards" rows={lead("MOTM")} valKey="MOTM" valLabel="MOTM" extra={[{label:"App",key:"App"}]} />
         <LeaderTable title="🛡️ Most tackles" rows={lead("Tkl")} valKey="Tkl" valLabel="Tackles" />
         <LeaderTable title="🧠 Most interceptions" rows={lead("Int")} valKey="Int" valLabel="Interc." />
         <LeaderTable title="🚧 Most clearances" rows={lead("Clr")} valKey="Clr" valLabel="Clear." />
+        <LeaderTable title="🧱 Most blocks" rows={lead("Blk")} valKey="Blk" valLabel="Blocks" />
+        <LeaderTable title="🎯 Most progressive passes" rows={lead("PrgP")} valKey="PrgP" valLabel="Prog. P" />
       </div>
 
       <Card>
@@ -6849,7 +6858,8 @@ function resolveRecordPlayer(G, rec){
   const base = ret ? { ...ret } : {
     id:rec.id, name:rec.name, pos:rec.pos, nat:rec.nat, retired:true, hof:!!rec.hof,
     ovr:rec.peak||0, pot:rec.peak||0, peakOvr:rec.peak,
-    career: Object.assign(emptyStats(), { G:rec.G||0, A:rec.A||0, App:rec.App||0, CS:rec.CS||0, MOTM:rec.MOTM||0, Tkl:rec.Tkl||0, Int:rec.Int||0, Clr:rec.Clr||0, PrgP:rec.PrgP||0 }),
+    caps:rec.caps||0, intlG:rec.intlG||0, ballonDor:rec.ballonDor||0, golden:rec.golden||0,
+    career: Object.assign(emptyStats(), { G:rec.G||0, A:rec.A||0, App:rec.App||0, CS:rec.CS||0, MOTM:rec.MOTM||0, Sv:rec.Sv||0, Tkl:rec.Tkl||0, Int:rec.Int||0, Clr:rec.Clr||0, Blk:rec.Blk||0, Aer:rec.Aer||0, PrgP:rec.PrgP||0 }),
   };
   base.retired = true;
   // HOF entries carry their own history/comp snapshot (rec.hist / rec.cc) — use
