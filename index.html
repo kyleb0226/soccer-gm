@@ -1710,8 +1710,58 @@ function simRoundInner(G){
     G.jobOffers = generateJobOffers(G, "sack");
     logNews(G, "job", `❗ The ${G.clubs[G.userTeamId].name} board has sacked you after a poor run.`, G.userTeamId);
   }
+  // DEADLINE DAY: the final matchday of the January window (day 21) triggers a late
+  // flurry of AI business and one last round of bids for the user's players.
+  if(G.day===21) deadlineDay(G);
   G.day++;
   if(G.day >= G.schedule.length){ G.phase = "offseason"; finalizeSeason(G); }
+}
+// A compact in-season transfer flurry on deadline day: solvent AI clubs make a few
+// quick upgrade signings, plus an extra wave of offers for the user's squad.
+function deadlineDay(G){
+  logNews(G,"transfer",`⏳ DEADLINE DAY — clubs scramble to get their late business done!`, G.userTeamId);
+  const byTeam={}, buckets={}, dealt=new Set();
+  Object.values(G.players).forEach(p=>{
+    if(p.teamId==null) return; (byTeam[p.teamId]=byTeam[p.teamId]||[]).push(p);
+    if(p.teamId===G.userTeamId || p.youth || isLoaned(p) || p.age>32) return;
+    if((p.transfers||[]).some(t=>t.t==="buy" && t.s>=G.season-1)) return;   // moved this window or last season
+    (p.positions||[p.pos]).forEach(pos=>{ (buckets[pos]=buckets[pos]||[]).push(p); });
+  });
+  for(const k in buckets) buckets[k].sort((a,b)=>b.ovr-a.ovr);
+  const seniors=id=>(byTeam[id]||[]).filter(p=>!p.youth);
+  const buyers=G.clubs.filter(c=>aiManaged(c) && c.budget>60).sort((a,b)=>b.budget-a.budget).slice(0,30);
+  const deals=[];
+  buyers.forEach(c=>{
+    if(!chance(0.5)) return;
+    if(seniors(c.id).length>=28) return;
+    ensureXI(c,G.players);
+    const xi=(c.xi||[]).map(id=>G.players[id]).filter(Boolean);
+    const weak=xi.filter(p=>p.pos!=="GK").sort((a,b)=>a.ovr-b.ovr)[0]; if(!weak) return;
+    let target=null;
+    for(const p of (buckets[weak.pos]||[])){
+      if(p.ovr<weak.ovr+2) break;
+      if(dealt.has(p.id)||p.teamId==null||p.teamId===c.id||p.teamId===G.userTeamId) continue;
+      if((p.value*1.15)>c.budget*0.5) continue;
+      const seller=G.clubs[p.teamId]; if(!seller||seniors(seller.id).length<=17) continue;
+      target=p; break;
+    }
+    if(!target) return;
+    const seller=G.clubs[target.teamId];
+    const fee=round(target.value*(1.1+_rng()*0.2)*10)/10; if(fee>c.budget*0.5) return;
+    c.budget=round((c.budget-fee)*10)/10; seller.budget=round((seller.budget+fee)*10)/10;
+    logMove(G,target,"buy",seller.id,c.id,fee); dealt.add(target.id);
+    byTeam[seller.id]=(byTeam[seller.id]||[]).filter(x=>x!==target); (byTeam[c.id]=byTeam[c.id]||[]).push(target);
+    target.teamId=c.id; target.years=rint(2,4); target.salary=aiWageFor(target,c.div); target.wantsOut=false; target.listed=false;
+    autoPickXI(c,G.players); autoPickXI(seller,G.players);
+    deals.push({fee,name:target.name,pos:target.pos,from:seller.abbr,to:c.abbr,country:c.country});
+  });
+  deals.sort((a,b)=>b.fee-a.fee);
+  const uc=(G.clubs[G.userTeamId]||{}).country||0;
+  deals.slice(0,2).concat((deals.find(d=>d.country===uc)?[deals.find(d=>d.country===uc)]:[]))
+    .filter((d,i,a)=>d && a.indexOf(d)===i)
+    .forEach(d=>logNews(G,"transfer",`💰 Deadline day: ${d.pos} ${d.name} joins ${d.to} from ${d.from} for ${money(d.fee)}`, G.userTeamId));
+  // one last flurry of bids for the user's players
+  generateTransferOffers(G); generateTransferOffers(G);
 }
 function serializeBox(box, G){
   return {
@@ -3071,20 +3121,37 @@ function aiTransferWindow(G){
 function generateTransferOffers(G){
   G.transferOffers = G.transferOffers || [];
   if(!transferWindowOpen(G)) return;
-  if(G.transferOffers.length>=4) return;
+  // 1) BIDDING WAR: a rival can gatecrash an existing offer for a coveted player and
+  // raise the bid, so a real auction develops for your best/wanted men.
+  const hot = G.transferOffers.filter(o=>{ const p=G.players[o.playerId]; return p && (p.listed||p.wantsOut||p.value>=35); });
+  if(hot.length && chance(0.55)){
+    const o = pick(hot);
+    const p = G.players[o.playerId];
+    const rivals = G.clubs.filter(c=>c.id!==G.userTeamId && c.id!==o.by && c.budget>o.fee*1.15);
+    if(p && rivals.length){
+      const by2 = pick(rivals);
+      const bump = round(o.fee*(1.12+_rng()*0.28)*10)/10;
+      o.by = by2.id; o.fee = bump; o.war = (o.war||1)+1;
+      logNews(G,"offer",`🔥 ${by2.name} enter the race for ${p.name} — the bid is up to ${money(bump)} (bidding war!)`, G.userTeamId);
+      return;
+    }
+  }
+  if(G.transferOffers.length>=5) return;
   const squad = Object.values(G.players).filter(p=>p.teamId===G.userTeamId && !p.youth);
   if(squad.length<=18) return;
   // unsettled or transfer-listed players attract far more interest
   const target = wpick(squad, p=>p.value * (p.wantsOut?6:1) * (p.listed?4:1));
   if(!target) return;
+  if(G.transferOffers.some(o=>o.playerId===target.id)) return;   // already has a live bid
   const suitors = G.clubs.filter(c=>c.id!==G.userTeamId && c.budget>target.value*1.1);
   if(!suitors.length) return;
   const by = pick(suitors);
   // if the player has a release clause a suitor can afford, they'll often just meet it
   const clauseMet = target.release!=null && by.budget>=target.release && chance(0.6);
   const fee = clauseMet ? target.release : round(target.value * ((target.wantsOut||target.listed?0.8:0.9) + _rng()*0.6) *10)/10;
-  G.transferOffers.push({ id:"of"+Date.now()+Math.floor(_rng()*999), playerId:target.id, by:by.id, fee, release:clauseMet });
-  logNews(G,"offer",`💬 ${by.name} ${clauseMet?"triggered the release clause for":"bid "+money(fee)+" for"} ${target.name}`, G.userTeamId);
+  const war = (target.listed||target.wantsOut||target.value>=45) && suitors.length>=2 && chance(0.5);
+  G.transferOffers.push({ id:"of"+Date.now()+Math.floor(_rng()*999), playerId:target.id, by:by.id, fee, release:clauseMet, war:war?2:1 });
+  logNews(G,"offer",`💬 ${by.name} ${clauseMet?"triggered the release clause for":"bid "+money(fee)+" for"} ${target.name}${war?" — and they're not the only club interested…":""}`, G.userTeamId);
 }
 // AI clubs shop the free-agent market every offseason, so good out-of-contract
 // players actually find clubs instead of rotting in the pool. A player signs
@@ -5393,8 +5460,8 @@ function Transfers({G, commit, tShow}){
             <Card key={o.id}>
               <div className="flex items-center gap-2 flex-wrap">
                 <div className="flex-1">
-                  <div className="font-semibold">{by.name} bid {money(o.fee)}</div>
-                  <div className="text-sm text-slate-400">for <PName p={p} className="text-slate-200" /> ({p.pos} {p.ovr}, valued {money(p.value)})</div>
+                  <div className="font-semibold">{by.name} bid {money(o.fee)}{o.war>1&&<span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-300 font-bold" title="Multiple clubs are competing — reject and the bid may rise">🔥 BIDDING WAR ×{o.war}</span>}</div>
+                  <div className="text-sm text-slate-400">for <PName p={p} className="text-slate-200" /> ({p.pos} {p.ovr}, valued {money(p.value)}){o.fee>p.value?<span className="text-emerald-400"> · {Math.round((o.fee/p.value-1)*100)}% over value</span>:""}</div>
                 </div>
                 <button onClick={()=>acceptOffer(o)} className="px-3 py-1.5 rounded bg-emerald-500 text-slate-900 text-sm font-semibold">Accept</button>
                 <button onClick={()=>rejectOffer(o)} className="px-3 py-1.5 rounded bg-[#16213a] text-slate-200 text-sm">Reject</button>
