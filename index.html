@@ -2282,8 +2282,8 @@ function startNextSeason(G){
   // the manager's own season log (mirrors the club history row he just produced)
   {
     const uc = G.clubs[G.userTeamId];
-    if(uc){
-      const uh = uc.history[uc.history.length-1];
+    const uh = uc && (uc.history||[])[uc.history.length-1];
+    if(uc && uh && uh.season===G.season){   // only log a season the club actually played
       G.career.seasons = G.career.seasons || [];
       G.career.seasons.unshift({ season:G.season, club:uc.abbr, name:uc.name, country:uc.country||0, div:uh.div, pos:uh.pos, pts:uh.pts, w:uh.w, d:uh.d, l:uh.l,
         cup:uh.cup?uh.cup.round:null, cont:uh.cont?uh.cont.round:null,
@@ -3292,12 +3292,66 @@ function loanIn(G, p){
   logNews(G,"loan",`📥 Loaned in ${p.pos} ${p.name} (${p.ovr}) from ${from?from.name:"?"} for the season`, G.userTeamId);
   return { ok:true };
 }
+// Loan-to-buy: loan a player now with an OBLIGATION to sign him permanently when
+// the loan ends, at an agreed fee (completed in returnLoans). The AI accepts a
+// small premium over value for the certainty of the sale.
+function loanToBuy(G, p){
+  const r = loanIn(G, p);
+  if(!r.ok) return r;
+  const fee = round(playerValue(p)*1.15*10)/10;
+  p.loanBuyFee = fee;
+  logNews(G,"loan",`📝 Loan-to-buy agreed for ${p.name} — obligation to sign for ${money(fee)} when the loan ends.`, G.userTeamId);
+  return { ok:true, fee };
+}
+// Swap deal: offer one of your players (+/- cash) for an AI club's player. The AI
+// accepts if the total value it receives roughly matches the player it gives up.
+// cash>0 = you pay cash on top; cash<0 = you receive cash.
+function proposeSwap(G, myId, theirId, cash){
+  if(!transferWindowOpen(G)) return { ok:false, msg:"The transfer window is closed." };
+  const mine=G.players[myId], theirs=G.players[theirId], user=G.clubs[G.userTeamId];
+  if(!mine||!theirs||mine.teamId!==G.userTeamId||mine.youth) return { ok:false, msg:"Pick one of your senior players to offer." };
+  if(theirs.teamId==null||theirs.teamId===G.userTeamId||theirs.youth) return { ok:false, msg:"Invalid swap target." };
+  const other=G.clubs[theirs.teamId];
+  cash=round((cash||0)*10)/10;
+  if(cash>0 && user.budget<cash) return { ok:false, msg:"Not enough budget for the cash you're adding." };
+  if(cash<0 && other.budget<-cash) return { ok:false, msg:`${other.abbr} can't afford the cash you're asking for.` };
+  const V1=playerValue(mine), V2=playerValue(theirs);
+  const accept = (V1 + cash) >= V2*(0.94+_rng()*0.10);
+  if(!accept) return { ok:false, msg:`${other.abbr} turned the swap down — they rate ${theirs.name} more highly.` };
+  if(Object.values(G.players).filter(x=>x.teamId===other.id && !x.youth).length<=17) return { ok:false, msg:`${other.abbr} can't spare ${theirs.name} — squad too thin.` };
+  user.budget=round((user.budget-cash)*10)/10; other.budget=round((other.budget+cash)*10)/10;
+  logMove(G, mine, "swap", G.userTeamId, other.id, null);
+  logMove(G, theirs, "swap", other.id, G.userTeamId, null);
+  mine.teamId=other.id; mine.salary=aiWageFor(mine, other.div); mine.years=rint(2,4); mine.wantsOut=false; mine.listed=false; mine.loanOwner=null;
+  theirs.teamId=G.userTeamId; theirs.salary=wageFor(theirs); theirs.years=rint(2,4); theirs.wantsOut=false; theirs.listed=false; theirs.loanOwner=null;
+  theirs.release = round(playerValue(theirs)*2*10)/10;
+  autoPickXI(user, G.players); autoPickXI(other, G.players);
+  logNews(G,"transfer",`🔄 Swap deal with ${other.abbr}: ${theirs.name} in, ${mine.name} out${cash>0?` + ${money(cash)}`:cash<0?` (you receive ${money(-cash)})`:""}.`, G.userTeamId);
+  return { ok:true };
+}
 // Return all loanees to their owners (run at the rollover, before develop/contracts).
 function returnLoans(G){
   Object.values(G.players).forEach(p=>{
     if(p.loanOwner==null) return;
     // only send him back once the loan term is up (offseason loans run a full season)
     if(p.loanUntil!=null && p.loanUntil > G.season) return;
+    // loan-to-buy: complete the permanent transfer instead of returning him
+    if(p.loanBuyFee!=null && p.teamId===G.userTeamId && p.loanOwner!==G.userTeamId){
+      const user=G.clubs[G.userTeamId], owner=G.clubs[p.loanOwner];
+      if(user.budget>=p.loanBuyFee){
+        user.budget=round((user.budget-p.loanBuyFee)*10)/10;
+        if(owner) owner.budget=round((owner.budget+p.loanBuyFee)*10)/10;
+        logMove(G, p, "buy", p.loanOwner, G.userTeamId, p.loanBuyFee);
+        ensureCareer(G); G.career.transferSpend=round((G.career.transferSpend+p.loanBuyFee)*10)/10;
+        logNews(G,"transfer",`✅ Loan-to-buy complete — ${p.name} signs permanently for ${money(p.loanBuyFee)}.`, G.userTeamId);
+        p.teamId=G.userTeamId; p.loanOwner=null; p.loanUntil=null; p.loanBuyFee=null; p._loanArchiveTeam=null;
+        p.years=rint(2,4); p.salary=wageFor(p);
+        return;
+      } else {
+        logNews(G,"finance",`⚠️ Couldn't complete the loan-to-buy for ${p.name} — not enough budget. He returns to his club.`, G.userTeamId);
+        p.loanBuyFee=null;
+      }
+    }
     const ownerId = p.loanOwner, loanClub = p.teamId!=null?G.clubs[p.teamId]:null, involvedUser = (p.teamId===G.userTeamId || ownerId===G.userTeamId);
     // remember where he actually played this season so the rollover archives the
     // season under the loan club (marked as a loan), not the parent club
@@ -5439,6 +5493,9 @@ function Transfers({G, commit, tShow}){
   const rejectOffer = o => { G.transferOffers=offers.filter(x=>x.id!==o.id); commit(G); };
   const doLoanOut = p => { const r=loanOutAuto(G,p); if(r.ok){ commit(G); tShow(`${p.name} out on loan`); } else tShow(r.msg); };
   const doLoanIn = p => { const r=loanIn(G,p); if(r.ok){ commit(G); tShow(`${p.name} in on loan`); } else tShow(r.msg); };
+  const doLoanBuy = p => { const r=loanToBuy(G,p); if(r.ok){ commit(G); tShow(`${p.name} loaned with an obligation to buy (${money(r.fee)})`); } else tShow(r.msg); };
+  const [swapTarget, setSwapTarget] = useState(null);   // AI player you want; opens the swap builder
+  const doSwap = (myP, cash) => { const r=proposeSwap(G, myP.id, swapTarget.id, cash); if(r.ok){ commit(G); tShow(`Swap complete — ${swapTarget.name} signed`); setSwapTarget(null); } else tShow(r.msg); };
   // loan-out candidates: your own players (not already loaned), youngest/fringe first
   const loanOutPool = squad.filter(p=>!isLoaned(p)).sort((a,b)=>(a.ovr-b.ovr)||(a.age-b.age)).slice(0,30);
   // loan-in candidates: AI fringe players (not in their XI), decent quality
@@ -5479,7 +5536,10 @@ function Transfers({G, commit, tShow}){
                     <td className="p-2 text-center tnum text-xs">{p.release!=null
                       ? <button onClick={()=>doRelease(p)} disabled={!windowOpen||user.budget<p.release} className={"px-1.5 py-0.5 rounded "+((!windowOpen||user.budget<p.release)?"text-slate-500":"bg-amber-500/20 text-amber-300 hover:bg-amber-500/30")} title="Trigger release clause">{money(p.release)}</button>
                       : <span className="text-slate-600">—</span>}</td>
-                    <td className="p-2 text-center"><button onClick={()=>doBuy(p)} disabled={!windowOpen||user.budget<feeFor(p)} className={"px-2 py-1 rounded text-xs font-semibold "+((!windowOpen||user.budget<feeFor(p))?"bg-[#16213a] text-slate-500":"bg-emerald-500 text-slate-900")}>Buy</button></td>
+                    <td className="p-2 text-center whitespace-nowrap">
+                      <button onClick={()=>doBuy(p)} disabled={!windowOpen||user.budget<feeFor(p)} className={"px-2 py-1 rounded text-xs font-semibold "+((!windowOpen||user.budget<feeFor(p))?"bg-[#16213a] text-slate-500":"bg-emerald-500 text-slate-900")}>Buy</button>
+                      <button onClick={()=>setSwapTarget(p)} disabled={!windowOpen} className={"ml-1 px-2 py-1 rounded text-xs font-semibold "+(windowOpen?"bg-indigo-500/80 text-white":"bg-[#16213a] text-slate-500")} title="Propose a player-swap deal">⇄</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -5554,7 +5614,10 @@ function Transfers({G, commit, tShow}){
                   <td className="p-2 text-center"><PosTag p={p} /></td>
                   <td className="p-2 text-center"><ScoutOvrPill p={p} /></td>
                   <td className="p-2 text-center tnum">{p.age}</td>
-                  <td className="p-2 text-center"><button onClick={()=>doLoanIn(p)} disabled={!windowOpen} className={"px-2 py-1 rounded text-xs font-semibold "+(windowOpen?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-500")}>Loan</button></td>
+                  <td className="p-2 text-center whitespace-nowrap">
+                    <button onClick={()=>doLoanIn(p)} disabled={!windowOpen} className={"px-2 py-1 rounded text-xs font-semibold "+(windowOpen?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-500")}>Loan</button>
+                    <button onClick={()=>doLoanBuy(p)} disabled={!windowOpen} className={"ml-1 px-2 py-1 rounded text-xs font-semibold "+(windowOpen?"bg-amber-500/80 text-slate-900":"bg-[#16213a] text-slate-500")} title={`Loan-to-buy: obligation to sign for ${money(round(playerValue(p)*1.15*10)/10)} at season's end`}>Loan-buy</button>
+                  </td>
                 </tr>
               ))}</tbody>
             </table>
@@ -5575,6 +5638,49 @@ function Transfers({G, commit, tShow}){
           </Card>
         </div>
       )}
+      {swapTarget && <SwapModal G={G} target={swapTarget} squad={squad} onSwap={doSwap} onClose={()=>setSwapTarget(null)} />}
+    </div>
+  );
+}
+// Build a swap: pick one of your players to offer for the target, add or ask for cash.
+function SwapModal({G, target, squad, onSwap, onClose}){
+  const user = G.clubs[G.userTeamId];
+  const [myId, setMyId] = useState(null);
+  const [cash, setCash] = useState(0);
+  const mine = myId!=null ? G.players[myId] : null;
+  const V2 = playerValue(target), V1 = mine ? playerValue(mine) : 0;
+  const gap = round((V2 - V1)*10)/10;   // positive = you likely need to add cash
+  const list = squad.filter(p=>!p.youth).sort((a,b)=>b.ovr-a.ovr);
+  return (
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-end sm:items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-[#101a30] border border-[#1d2940] rounded-xl w-full max-w-md max-h-[85vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
+        <div className="p-3 border-b border-[#1d2940] flex items-center justify-between sticky top-0 bg-[#101a30]">
+          <div className="font-semibold">🔄 Swap for {target.name} <span className="text-xs text-slate-400 font-normal">({target.pos} {target.ovr}, {G.clubs[target.teamId].abbr}, valued {money(V2)})</span></div>
+          <button onClick={onClose} className="text-slate-400">✕</button>
+        </div>
+        <div className="p-4 space-y-3">
+          <div className="text-sm text-slate-400">Offer one of your players (plus or minus cash). {G.clubs[target.teamId].abbr} accept if the value roughly matches.</div>
+          <div className="max-h-48 overflow-y-auto space-y-1">
+            {list.map(p=>(
+              <button key={p.id} onClick={()=>setMyId(p.id)} className={"w-full text-left flex items-center gap-2 px-2 py-1.5 rounded "+(myId===p.id?"bg-emerald-500/20 border border-emerald-500/50":"bg-[#0d1526] hover:bg-[#16213a]")}>
+                <OvrPill v={p.ovr} /><span className="flex-1 text-sm">{p.name}</span><span className="text-xs text-slate-400">{p.pos} · {money(playerValue(p))}</span>
+              </button>
+            ))}
+          </div>
+          {mine && (
+            <div className="bg-[#0d1526] rounded-lg p-2 text-sm">
+              <div className="flex justify-between"><span className="text-slate-400">You give</span><span>{mine.name} <span className="text-slate-500">({money(V1)})</span></span></div>
+              <div className="flex justify-between"><span className="text-slate-400">You get</span><span>{target.name} <span className="text-slate-500">({money(V2)})</span></span></div>
+              <div className="flex items-center justify-between mt-2 pt-2 border-t border-[#1d2940]">
+                <span className="text-slate-400">Cash you add</span>
+                <input type="number" value={cash} onChange={e=>setCash(round((parseFloat(e.target.value)||0)*10)/10)} className="w-24 bg-[#16213a] rounded px-2 py-1 text-sm text-center tnum" />
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1">{gap>0?`They'll likely want ~${money(gap)} on top.`:gap<0?`You could ask for ~${money(-gap)} back (use a negative number).`:"Roughly even value."} Negative = you receive cash.</div>
+            </div>
+          )}
+          <button onClick={()=>mine&&onSwap(mine,cash)} disabled={!mine} className={"w-full px-3 py-2 rounded-lg text-sm font-semibold "+(mine?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-500")}>Propose swap</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -7440,7 +7546,7 @@ function PlayerModal({p, G, onClose}){
           {Array.isArray(p.transfers) && p.transfers.length>0 && (()=>{
             const fees = p.transfers.filter(t=>t.t==="buy" && t.fee!=null);
             const total = round(fees.reduce((s,t)=>s+t.fee,0)*10)/10;
-            const label = t => t.t==="buy" ? null : t.t==="free" ? "Free transfer" : t.t==="rel" ? "Released" : t.t==="loan" ? "Loan" : t.t==="loanret" ? "End of loan" : t.t==="unret" ? "Out of retirement" : t.t;
+            const label = t => t.t==="buy" ? null : t.t==="free" ? "Free transfer" : t.t==="rel" ? "Released" : t.t==="loan" ? "Loan" : t.t==="loanret" ? "End of loan" : t.t==="unret" ? "Out of retirement" : t.t==="swap" ? "Swap deal" : t.t;
             return (
               <div>
                 <div className="text-sm font-semibold mb-1">💸 Transfer history{fees.length>1?<span className="text-xs text-slate-400 font-normal"> · {money(total)} in career fees</span>:null}</div>
