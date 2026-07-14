@@ -2399,11 +2399,14 @@ function startNextSeason(G){
   // its tier actually generates, so relegated clubs shed the top-flight burden their
   // new income can't cover and no club drifts into a wage spiral it can't escape.
   // (The user's own club keeps its individually negotiated contracts.)
+  churnOwnership(G);   // a few clubs change owner each year → some run recklessly
   Object.values(G.players).forEach(p=>{
     if(p.teamId==null || p.youth) return;
     const c = G.clubs[p.teamId];
     if(!c || (c.userControlled && !AUTO_MANAGE)) return;
-    p.salary = aiWageFor(p, c.div);
+    // a recklessly-run club (ambitious owner) pays over the sustainable wage, which
+    // steadily builds a deficit that can eventually tip it into administration.
+    p.salary = round(aiWageFor(p, c.div) * (1 + (c.finRisk||0)*0.32) *10)/10;
   });
   // finances: settle the season P&L for every club.
   // one-pass wage bills (post-renewals) instead of a world-scan per club
@@ -2468,17 +2471,23 @@ function startNextSeason(G){
     }
     // reset the season matchday accruals for the new campaign
     c.seasonGate=0; c.seasonConcession=0; c.seasonBoxes=0; c.gateLog=[];
-    c.pld=0;c.w=0;c.d=0;c.l=0;c.gf=0;c.ga=0;c.pts=0; c.form5=[];
+    c.pld=0;c.w=0;c.d=0;c.l=0;c.gf=0;c.ga=0;c.pts=0; c.form5=[]; c.pointDeduction=0;
   });
   // Keep AI wage bills sane relative to their actual income BEFORE they go
   // into crisis — without this, wages drift up via renewals every season
   // while income stays roughly flat, and the whole league's budgets erode
   // year over year (not just a few badly-run clubs).
-  { const wageCtx = buildSellContext(G); G.clubs.forEach(c=>capAIWageBill(G, c, wageCtx)); }
   // financial distress: a club that's badly run can't just spiral forever.
   // AI clubs get force-restructured (fire-sale a player, or release expensive
   // wages); the user's club instead takes a real consequence — board confidence.
-  G.clubs.forEach(c=>relieveFinancialDistress(G, c));
+  // Both passes route squad lookups through the fast team index (a full G.players
+  // scan per club per club would be O(clubs²·players) — seconds at 640 clubs/20k
+  // players); the lookups guard on p.teamId so mid-pass sales stay correct.
+  G._adminsThisYear = 0;   // cap how many clubs can collapse into administration this season
+  withTeamIndex(G.players, ()=>{
+    const wageCtx = buildSellContext(G); G.clubs.forEach(c=>capAIWageBill(G, c, wageCtx));
+    G.clubs.forEach(c=>relieveFinancialDistress(G, c));
+  });
   // youth intake into every club, refill thin squads (index-accelerated: both
   // only ADD players, and the adders push into the live index themselves)
   withTeamIndex(G.players, ()=>{
@@ -3681,6 +3690,7 @@ function migrate(G){
     G.clubs.forEach(c=>{ if(!c.formation) c.formation="4-3-3"; if(!c.tactic) c.tactic="balanced"; if(!c.academy) c.academy={level:1}; if(!Array.isArray(c.honours)) c.honours=[]; ensureStands(c); c.capacity=stadiumCapacity(c); ensureCommercials(G,c); if(!c.setPieces) c.setPieces={pen:null,fk:null,corner:null}; if(c.ticketTier==null) c.ticketTier=1; if(c.concessionTier==null) c.concessionTier=1; if(c.seasonGate==null) c.seasonGate=0; if(c.seasonConcession==null) c.seasonConcession=0; if(!Array.isArray(c.gateLog)) c.gateLog=[]; if(c.autoRotate==null) c.autoRotate=false; if(!c.instr) c.instr={press:"mid",tempo:"normal",width:"normal"}; if(c.formFam==null) c.formFam=100; if(c.formFamOf==null) c.formFamOf=c.formation; if(c.storeTier==null) c.storeTier=0; if(c.seasonTicketPct==null) c.seasonTicketPct=0; if(c.trainTier==null) c.trainTier=0; if(c.scoutTier==null) c.scoutTier=0; if(c.pitchTier==null) c.pitchTier=0; if(c.boxes==null) c.boxes=0; if(c.seasonBoxes==null) c.seasonBoxes=0; if(!c.coaches) c.coaches={att:0,def:0,gk:0,fit:0}; ensureXI(c, G.players); });
     if(!G.clubs.some(c=>c.rivalId!=null)) assignRivals(G.clubs);
     assignManagers(G);   // give every club a named manager (backfill existing saves)
+    assignFinRisk(G);    // some clubs run recklessly and can go bust
     if(!G.expectation) setOwnerExpectation(G);
     // history/records + feature-toggle backfill
     if(!Array.isArray(G.finalsArchive)) G.finalsArchive = [];
@@ -3812,6 +3822,7 @@ function newGame(userTeamId, opts={}){
   initCups(G);
   initContCup(G);
   assignManagers(G);
+  assignFinRisk(G);
   G.clubs.forEach(c=>ensureCommercials(G, c));   // give every club its opening sponsorship deals
   setOwnerExpectation(G);
   return G;
@@ -3849,7 +3860,7 @@ function App(){
   const TABS = [
     ["hub","Hub"],["squad","Squad"],["tactics","Tactics"],["table","Table"],
     ["players","Players"],["stats","Leaders"],["cup","Cup"],["contcup","Champions Cup"],["fixtures","Fixtures"],
-    ["transfers","Transfers"],["fa","Free Agents"],["youth","Youth"],["finances","Finances"],
+    ["transfers","Transfers"],["fa","Free Agents"],["youth","Youth"],["finances","Finances"],["payouts","Prize Money"],
     ["clubs","Clubs"],["awards","Awards"],["hof","Hall of Fame"],["records","Records"],["news","News"],
   ];
   if(intlOn(G)) TABS.splice(13, 0, ["nation","Nation"]);
@@ -3901,6 +3912,7 @@ function App(){
         {tab==="fa" && <FreeAgents G={G} commit={commit} tShow={tShow} />}
         {tab==="youth" && <YouthView G={G} commit={commit} tShow={tShow} />}
         {tab==="finances" && <Finances G={G} commit={commit} tShow={tShow} />}
+        {tab==="payouts" && <PayoutChart G={G} />}
         {tab==="clubs" && <ClubBrowser G={G} commit={commit} tShow={tShow} />}
         {tab==="awards" && <AwardsView G={G} />}
         {tab==="hof" && <HallOfFame G={G} />}
@@ -4774,7 +4786,7 @@ function LeagueTable({G}){
                   <td className="p-2 text-center">
                     <span className={champ?"text-amber-300 font-bold":promo?"text-emerald-400":playoff?"text-sky-400":releg?"text-red-400":""} title={playoff?"Promotion play-off spot":""}>{i+1}</span>
                   </td>
-                  <td className="p-2 text-left font-medium"><span className="inline-flex items-center gap-1.5"><Crest club={c} size={13} />{c.name}</span>{c.id===G.userTeamId&&<span className="text-emerald-400"> ★</span>}</td>
+                  <td className="p-2 text-left font-medium"><span className="inline-flex items-center gap-1.5"><Crest club={c} size={13} />{c.name}</span>{c.id===G.userTeamId&&<span className="text-emerald-400"> ★</span>}{c.pointDeduction>0&&<span className="text-red-400 text-xs font-bold ml-1" title={`${c.pointDeduction}-point deduction (administration)`}>[-{c.pointDeduction}]</span>}</td>
                   <td className="p-2 text-center">{c.pld}</td><td className="p-2 text-center">{c.w}</td><td className="p-2 text-center">{c.d}</td><td className="p-2 text-center">{c.l}</td>
                   <td className="p-2 text-center">{c.gf}</td><td className="p-2 text-center">{c.ga}</td><td className="p-2 text-center">{gd(c)>=0?"+":""}{gd(c)}</td>
                   <td className="p-2 text-center font-bold">{c.pts}</td>
@@ -6231,6 +6243,7 @@ function processCommercials(G, club){
 // a long save. Releases the worst value-for-wage player until back in line.
 function capAIWageBill(G, club, sellCtx){
   if(club.userControlled && !AUTO_MANAGE) return;
+  if((club.finRisk||0) >= 0.4) return;   // recklessly-run clubs ignore FFP and let wages run hot
   const pnl = club.lastPnl||{};
   const income = (pnl.tv||0)+(pnl.prize||0)+(pnl.gate||0)+(pnl.conc||0)+(pnl.merch||0)+(pnl.shirt||0)+(pnl.sleeve||0)+(pnl.sponsor||0)+(pnl.cup||0);
   // prestigious clubs sustain a payroll smaller clubs can't (their commercial
@@ -6256,28 +6269,91 @@ function capAIWageBill(G, club, sellCtx){
 // AI clubs in crisis get force-restructured; the user instead faces a real
 // consequence (board confidence hit) so financial mismanagement has teeth
 // without taking away the user's agency over their own transfers.
-const FINANCIAL_CRISIS = -25;     // budget below this triggers action
+const FINANCIAL_CRISIS = -25;     // budget below this: sell to raise cash / warning
+const ADMIN_CAP = 3;              // at most this many clubs collapse into administration per season
+// How catastrophic a single-season loss must leave a club's balance before it
+// collapses. Deeper than the -25 restructuring floor so only a genuine blow-up
+// (a reckless owner overspending, not a normal deficit) tips a club over.
+function adminDebtLimit(club){ return -([90,62,46,36][club.div]||36); }
+// Give ~9% of clubs a reckless, ambitious owner who overspends; the rest run prudently.
+function assignFinRisk(G){
+  G.clubs.forEach(c=>{ if(c.finRisk==null) c.finRisk = chance(0.09) ? round((0.4+_rng()*0.5)*100)/100 : 0; });
+}
+// Each season a handful of clubs change owner — a new backer might be reckless
+// (splashing cash, courting a crash) or steady the ship. Keeps the churn alive.
+function churnOwnership(G){
+  G.clubs.forEach(c=>{
+    if(c.userControlled) return;
+    if(chance(0.02)){
+      const reckless = chance(0.15);   // most takeovers steady the ship; keeps the reckless population bounded over a long save
+      c.finRisk = reckless ? round((0.4+_rng()*0.5)*100)/100 : 0;
+      if(reckless && c.div===0 && (c.budget>50||chance(0.3))){
+        c.budget = round((c.budget + rint(30,120))*10)/10;   // a rich new owner injects cash to spend
+        logNews(G,"finance",`💸 ${c.name} have been taken over by ambitious new owners promising big spending.`, G.userTeamId);
+      }
+    }
+  });
+}
+// ADMINISTRATION: a club whose debt spirals out of control collapses — creditors
+// write off the debt (clean but tiny budget), it's docked points for the coming
+// season, forced to sell its best players cheaply, and comes under prudent new
+// management. A real, visible consequence that reshapes the league now and then.
+function enterAdministration(G, club){
+  const penalty = club.userControlled ? rint(6,9) : rint(6,12);
+  club.pts = -penalty;              // pts already reset to 0 for the new season
+  club.pointDeduction = penalty;    // shown in the league table this season
+  club.finRisk = 0;                 // new, prudent ownership
+  club.inAdminSeason = G.season;
+  // hard fire-sale: unload the best 3-4 players cheaply to any solvent club
+  const settled = p => !(p.transfers||[]).some(t=>t.s===G.season);
+  let sold=0;
+  let squad = teamPlayersOf(G.players, club.id).filter(p=>p.teamId===club.id && !p.youth && settled(p)).sort((a,b)=>b.value-a.value);
+  for(let i=0;i<squad.length && sold<4;i++){
+    const target=squad[i]; const fee=round(target.value*0.6*10)/10;
+    const buyer=G.clubs.filter(c=>c.id!==club.id && c.id!==G.userTeamId && aiManaged(c) && c.budget>=fee+8
+      && teamPlayersOf(G.players,c.id).filter(p=>p.teamId===c.id && !p.youth).length<27).sort((a,b)=>b.budget-a.budget)[0];
+    if(!buyer) break;
+    buyer.budget=round((buyer.budget-fee)*10)/10;
+    logMove(G, target, "buy", club.id, buyer.id, fee);
+    target.teamId=buyer.id; target.salary=aiWageFor(target,buyer.div); autoPickXI(buyer,G.players); sold++;
+  }
+  // wage slash under the administrators
+  if(!club.userControlled) teamPlayersOf(G.players, club.id).forEach(p=>{ if(!p.youth) p.salary=round(aiWageFor(p,club.div)*0.8*10)/10; });
+  club.budget = round(rint(2,16)*10)/10;   // debt written off — a clean but gutted slate
+  autoPickXI(club, G.players);
+  const target = club.userControlled ? club.id : G.userTeamId;
+  logNews(G,"finance",`🚨 ${club.name} have gone into ADMINISTRATION — a ${penalty}-point deduction next season and a forced sell-off of ${sold} player${sold!==1?"s":""}.`, target);
+  if(club.userControlled && jobSecurityOn(G)) G.boardConfidence = clamp((G.boardConfidence==null?60:G.boardConfidence)-20, 0, 100);
+}
 function relieveFinancialDistress(G, club){
   if(club.budget >= FINANCIAL_CRISIS) return;
+  // ADMINISTRATION — the rare catastrophe. Only a recklessly-run club whose books
+  // have blown clean past the (deep, division-scaled) collapse line, and only up
+  // to ADMIN_CAP clubs a season, actually goes under. Everyone else just gets the
+  // ordinary fire-sale + restructuring floor below, so the league stays healthy.
+  const catastrophic = (club.finRisk||0) > 0 && club.budget < adminDebtLimit(club) && (G._adminsThisYear||0) < ADMIN_CAP;
   if(club.userControlled && !AUTO_MANAGE){
+    if(catastrophic){ G._adminsThisYear = (G._adminsThisYear||0)+1; enterAdministration(G, club); return; }
     if(jobSecurityOn(G)){
       G.boardConfidence = clamp((G.boardConfidence==null?60:G.boardConfidence) - 12, 0, 100);
-      logNews(G,"finance",`⚠️ The board is alarmed by the club's finances (${money(club.budget)}). Balance the books or risk your job.`, club.id);
+      logNews(G,"finance",`⚠️ The board is alarmed by the club's finances (${money(club.budget)}). Balance the books or you risk going under.`, club.id);
     }
-    return;   // no auto-rescue for the user — they must fix it themselves
+    return;
   }
-  // AI fire-sale: sell the most valuable player to whichever solvent club can
-  // afford it; if nobody can, release the highest earners to cut the wage bill.
-  // Exclude players who already moved this season — a club shouldn't immediately
-  // fire-sell someone it just signed (that's a same-window bounce).
+  if(catastrophic && chance(0.7)){ G._adminsThisYear = (G._adminsThisYear||0)+1; enterAdministration(G, club); return; }
+  // AI: sell the most valuable player to whichever solvent club can afford it (to
+  // claw back above the crisis line); if nobody can, release the highest earners.
   const settled = p => !(p.transfers||[]).some(t=>t.s===G.season);
-  let squad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth && settled(p)).sort((a,b)=>b.value-a.value);
+  // route through the team index; the p.teamId===club.id guard keeps results correct
+  // even though a static index doesn't reflect the sales we make inside this loop.
+  const seniorOf = id => teamPlayersOf(G.players, id).filter(p=>p.teamId===id && !p.youth);
+  let squad = seniorOf(club.id).filter(settled).sort((a,b)=>b.value-a.value);
   let guard=0;
   while(club.budget < FINANCIAL_CRISIS && squad.length>14 && guard++<10){
     const target = squad[0];
     const fee = round(target.value*0.75*10)/10;
     const buyer = G.clubs.filter(c=>c.id!==club.id && c.budget>=fee+10
-      && Object.values(G.players).filter(p=>p.teamId===c.id && !p.youth).length<26)
+      && seniorOf(c.id).length<26)
       .sort((a,b)=>b.budget-a.budget)[0];
     if(buyer){
       buyer.budget = round((buyer.budget-fee)*10)/10;
@@ -6286,18 +6362,146 @@ function relieveFinancialDistress(G, club){
       target.teamId = buyer.id; autoPickXI(buyer, G.players);
       logNews(G,"finance",`💰 Financial trouble forces ${club.name} to sell ${target.name} to ${buyer.name} for ${money(fee)}`, club.id);
     } else {
-      // no buyer — release the most expensive wage instead, to cut costs
-      const cutSquad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth).sort((a,b)=>b.salary-a.salary);
+      const cutSquad = seniorOf(club.id).sort((a,b)=>b.salary-a.salary);
       if(!cutSquad.length) break;
       releaseToFA(G, cutSquad[0]);
       logNews(G,"finance",`📉 ${club.name} release ${cutSquad[0].name} to cut their wage bill amid financial trouble`, club.id);
     }
-    squad = Object.values(G.players).filter(p=>p.teamId===club.id && !p.youth).sort((a,b)=>b.value-a.value);
+    squad = seniorOf(club.id).sort((a,b)=>b.value-a.value);
   }
-  // last resort: if fire-sales alone couldn't fully recover, a board loan/admin
-  // restructuring normalizes them so no AI club ends a season bottomlessly broke
-  if(club.budget < FINANCIAL_CRISIS) club.budget = round((FINANCIAL_CRISIS+rint(2,8))*10)/10;
+  // restructuring floor: creditors reschedule the remaining (recoverable) debt so
+  // no club drifts bottomlessly negative season after season. A prudently-run club
+  // gets its manageable debt cleared back to near-neutral so it recovers; a reckless
+  // club is only held at the edge — it keeps bleeding until it eventually collapses.
+  if(club.budget < FINANCIAL_CRISIS){
+    club.budget = (club.finRisk||0) > 0
+      ? round((FINANCIAL_CRISIS + rint(2,8))*10)/10   // reckless: stays near the danger zone
+      : round(rint(-4, 4)*10)/10;                     // well-run: debt cleared to ~break-even
+  }
   autoPickXI(club, G.players);
+}
+
+/* ----------------------------- prize money reference ----------------------------- */
+// A read-only reference of exactly what every competition pays, per finishing
+// position (leagues) or per round reached (cups), for any nation. Numbers are the
+// real ones the engine pays — league merit uses leaguePrize()/the TV base, cups use
+// the same tables as cupPrizeMoney() — scaled by the chosen nation's wealth.
+function PayoutChart({G}){
+  const [ci, setCi] = React.useState((G.clubs[G.userTeamId]||{}).country||0);
+  const co = COUNTRIES[ci]||COUNTRIES[0];
+  const wealth = co.wealth||1;
+  const r1 = m => round(m*10)/10;
+  // league: TV/central distribution (flat per division) + per-position merit prize
+  const tvBase = d => r1(([72,22,7,3][d]||3) * wealth);
+  const merit  = (d,pos) => r1(leaguePrize(d, pos) * wealth);
+  const leagueTotal = (d,pos) => r1(tvBase(d) + merit(d,pos));
+  // markers used to colour promotion / continental / relegation rows
+  const promoRow = (d,pos) => d>=1 && pos<=2;
+  const poRow    = (d,pos) => d>=1 && pos>=3 && pos<=6;   // promotion play-off places
+  const contRow  = (d,pos) => d===0 && pos<=3;   // top 3 qualify for the Champions Cup (a 4th route goes to the cup winner)
+  const relRow   = (d,pos) => d<NUM_DIVS-1 && pos>=18;
+  // national cup: paid by furthest round, with winning/losing-final on top
+  const CUP_ROWS = [
+    ["Winner", 14], ["Runner-up", 6], ["Semi-final", 6], ["Quarter-final", 3],
+    ["Round of 16", 1.2], ["Round of 32", 0.5], ["Round of 64", 0.2], ["Preliminary", 0.1],
+  ];
+  // continental (Champions Cup): the big money — participation → deep run
+  const CONT_ROWS = [
+    ["Champions", 90], ["Runner-up", 55], ["Reach knockouts (R16+)", 32], ["Group stage (qualify)", 18],
+  ];
+  const cell = "px-2 py-1 text-right tabular-nums";
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="text-lg font-bold">💰 Prize Money</div>
+            <div className="text-xs text-slate-400">What every competition pays out — per league position and per cup round reached.</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-400">Nation</span>
+            <select value={ci} onChange={e=>setCi(+e.target.value)} className="bg-[#16213a] border border-[#26324c] rounded px-2 py-1 text-sm">
+              {COUNTRIES.map((c,i)=><option key={i} value={i}>{c.flag} {c.name}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="text-[11px] text-slate-500 mt-2">Wealth multiplier <span className="text-slate-300 font-semibold">×{wealth.toFixed(2)}</span> — richer nations pay bigger TV, prize & cup pots. Figures are per season.</div>
+      </Card>
+
+      <Card>
+        <div className="font-semibold mb-2">🏆 League — payout by final position</div>
+        <div className="text-[11px] text-slate-400 mb-2">Each figure is TV/central distribution (flat for the division) + merit money for that placing.</div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-slate-400 border-b border-[#1d2940]">
+                <th className="px-2 py-1 text-left">Pos</th>
+                {[0,1,2,3].map(d=><th key={d} className="px-2 py-1 text-right">{divName(ci,d)}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from({length:20},(_,i)=>i+1).map(pos=>(
+                <tr key={pos} className="border-b border-[#141d30]">
+                  <td className="px-2 py-1 font-medium text-slate-300">{pos}</td>
+                  {[0,1,2,3].map(d=>{
+                    const cls = contRow(d,pos)?"text-emerald-300":promoRow(d,pos)?"text-emerald-400":poRow(d,pos)?"text-sky-300":relRow(d,pos)?"text-red-300":"text-slate-200";
+                    return <td key={d} className={cell+" "+cls}>{money(leagueTotal(d,pos))}</td>;
+                  })}
+                </tr>
+              ))}
+              <tr className="text-slate-400 text-xs">
+                <td className="px-2 py-1">TV base</td>
+                {[0,1,2,3].map(d=><td key={d} className={cell}>{money(tvBase(d))}</td>)}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div className="text-[11px] text-slate-500 mt-2 flex flex-wrap gap-x-4 gap-y-1">
+          <span><span className="text-emerald-300">■</span> continental spot</span>
+          <span><span className="text-emerald-400">■</span> automatic promotion</span>
+          <span><span className="text-sky-300">■</span> promotion play-off</span>
+          <span><span className="text-red-300">■</span> relegation</span>
+        </div>
+      </Card>
+
+      <div className="grid md:grid-cols-2 gap-3">
+        <Card>
+          <div className="font-semibold mb-2">🥇 National Cup — payout by round reached</div>
+          <div className="text-[11px] text-slate-400 mb-2">Paid for the furthest round a club reaches (winning the final beats losing it).</div>
+          <table className="w-full text-sm">
+            <tbody>
+              {CUP_ROWS.map(([label,val])=>(
+                <tr key={label} className="border-b border-[#141d30]">
+                  <td className="px-2 py-1 text-slate-300">{label}</td>
+                  <td className={cell+" text-slate-100 font-medium"}>{money(r1(val*wealth))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+
+        <Card>
+          <div className="font-semibold mb-2">🌍 Champions Cup — continental payout</div>
+          <div className="text-[11px] text-slate-400 mb-2">Qualification is a windfall; a deep run funds a squad.</div>
+          <table className="w-full text-sm">
+            <tbody>
+              {CONT_ROWS.map(([label,val])=>(
+                <tr key={label} className="border-b border-[#141d30]">
+                  <td className="px-2 py-1 text-slate-300">{label}</td>
+                  <td className={cell+" text-slate-100 font-medium"}>{money(r1(val*wealth))}</td>
+                </tr>
+              ))}
+              <tr className="border-b border-[#141d30]">
+                <td className="px-2 py-1 text-slate-400">+ per group win / draw</td>
+                <td className={cell+" text-slate-300"}>{money(r1(1.5*wealth))} / {money(r1(0.6*wealth))}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div className="text-[11px] text-slate-500 mt-2">These figures don't stack with the league/cup ones — they're separate income on top for clubs in the continental competition.</div>
+        </Card>
+      </div>
+    </div>
+  );
 }
 
 /* ----------------------------- finances UI ----------------------------- */
