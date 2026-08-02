@@ -476,10 +476,228 @@ function generateLeague(userTeamId, opts={}){
   return { clubs, players };
 }
 
+/* ----------------------------- league rules ----------------------------- */
+// Every rule the FA can bend, in one place. These are FOOTBALL rules — the shape of
+// the ladder, the points system, the substitution allowance — not a translation of
+// another sport's knobs. `G.rules` holds a franchise's set; `rules(G)` reads it with
+// defaults filled in so a save that predates a knob still sees a complete object.
+//
+// STRUCTURAL rules (fixture count, the promotion/relegation ladder) reshape the
+// calendar and the pyramid, so they're STAGED in `G.pendingRules` and promoted at the
+// season rollover. Match-day and money rules apply immediately.
+const RULES_DEFAULT = {
+  // --- the ladder ---
+  legs:          2,      // 2 = full double round-robin (38 games) · 1 = single (19)
+  pointsForWin:  3,      // 3 (modern) or 2 (pre-1981)
+  promoReleg:    3,      // clubs going down / coming up at each tier boundary
+  promoPlayoff:  true,   // is the last promotion place decided by a play-off?
+  // --- match day ---
+  subs:          3,      // substitutions allowed in normal time (+2 more in extra time)
+  var:           false,  // video review: overturns a few marginal goals each season
+  // --- squad & money ---
+  squadCap:      0,      // 0 = no limit; else max senior (non-youth) squad size
+  homegrownMin:  0,      // 0 = off; else how many of the squad must be from the club's nation
+  ffp:           "none", // "none" | "soft" (fined over the wage ceiling) | "hard" (can't sign past it)
+  wageCeilPct:   0.75,   // wage bill ceiling as a share of the club's budget
+  windows:       true,   // transfer windows (off = sign whenever you like)
+};
+function rules(G){
+  const r = (G && G.rules) || {};
+  const out = {};
+  for(const k in RULES_DEFAULT) out[k] = (r[k]==null ? RULES_DEFAULT[k] : r[k]);
+  return out;
+}
+const STRUCTURAL_RULES = ["legs","promoReleg","promoPlayoff"];
+const isStructural = k => STRUCTURAL_RULES.indexOf(k) >= 0;
+function setRule(G, k, v){
+  G.rules = G.rules || {};
+  if(isStructural(k) && G.phase!=="offseason"){ (G.pendingRules = G.pendingRules || {})[k] = v; }
+  else G.rules[k] = v;
+}
+function ruleValue(G, k){
+  if(G && G.pendingRules && G.pendingRules[k]!=null) return G.pendingRules[k];
+  return rules(G)[k];
+}
+function applyPendingRules(G){
+  if(!G.pendingRules) return;
+  G.rules = G.rules || {};
+  const changed = [];
+  for(const k in G.pendingRules){
+    if(G.rules[k]!==G.pendingRules[k]){ G.rules[k]=G.pendingRules[k]; changed.push(k); }
+  }
+  G.pendingRules = null;
+  if(changed.length) logNews(G,"event",`📋 Rule changes take effect this season: ${changed.map(k=>RULE_LABEL[k]||k).join(", ")}.`, null);
+}
+const RULE_LABEL = {
+  legs:"fixture count", pointsForWin:"points for a win", promoReleg:"promotion & relegation places",
+  promoPlayoff:"promotion play-off", subs:"substitutions", var:"VAR", squadCap:"squad limit",
+  homegrownMin:"homegrown quota", ffp:"financial fair play", wageCeilPct:"wage ceiling", windows:"transfer windows",
+};
+
+/* ------------------------------ difficulty ------------------------------ */
+// One preset bundles the knobs that decide how hard the world pushes back. These are
+// about PRESSURE on the manager — your budget, how hard rivals bid, how quickly the
+// board loses faith — never about giving the AI better information.
+const DIFFICULTIES = {
+  casual:   { label:"Casual",   blurb:"A bigger budget, softer rivals in the market, a patient board.",
+              budget:1.20, rivalBid:0.65, injury:0.6,  boardPatience:1.35 },
+  normal:   { label:"Normal",   blurb:"The world as designed — a fair fight.",
+              budget:1,    rivalBid:1,    injury:1,    boardPatience:1 },
+  hardball: { label:"Cutthroat",blurb:"Tighter money, rivals who outbid you, more injuries, an itchy trigger finger upstairs.",
+              budget:0.85, rivalBid:1.45, injury:1.35, boardPatience:0.7 },
+};
+const DIFFICULTY_ORDER = ["casual","normal","hardball"];
+function diff(G){ return DIFFICULTIES[(G && G.difficulty) || "normal"] || DIFFICULTIES.normal; }
+
+/* ----------------------------- personalities ---------------------------- */
+// Every player has a dressing-room character. It's pure flavour — it never touches
+// ratings or the match engine — but it decides how the room reacts when you face the
+// media. `moraleSwing` scales how hard a press conference moves this player.
+const PERSONALITIES = {
+  talisman:  { label:"Talisman",    icon:"🎖️", moraleSwing:1.35, blurb:"The room takes its lead from him." },
+  maverick:  { label:"Maverick",    icon:"🎭", moraleSwing:1.5,  blurb:"Brilliant, difficult, and always in the papers." },
+  modelPro:  { label:"Model pro",   icon:"🎯", moraleSwing:0.6,  blurb:"First in, last out, never a word out of place." },
+  hothead:   { label:"Hothead",     icon:"🌶️", moraleSwing:1.4,  blurb:"Plays on the edge — of the game and his temper." },
+  joker:     { label:"Joker",       icon:"🃏", moraleSwing:0.9,  blurb:"Keeps the dressing room loose, for better or worse." },
+  workhorse: { label:"Workhorse",   icon:"🐴", moraleSwing:0.75, blurb:"No headlines, no fuss, ten kilometres every week." },
+};
+const PERSONALITY_KEYS = Object.keys(PERSONALITIES);
+// Deterministic from the player id, so a player is always the same character and old
+// saves get one assigned without reshuffling anyone.
+function personalityOf(p){
+  if(!p) return PERSONALITIES.modelPro;
+  if(!p.persona) p.persona = PERSONALITY_KEYS[Math.abs(((p.id||0)*2654435761)>>>0) % PERSONALITY_KEYS.length];
+  return PERSONALITIES[p.persona] || PERSONALITIES.modelPro;
+}
+
+/* ---------------------------- press conferences -------------------------- */
+// Football managers face the media constantly, so this is the most natural fit of
+// anything in this batch. One question, three answers, and every answer is a real
+// trade-off — backing the squad lifts the dressing room but costs you with the
+// stands, and demanding more does the reverse. No free correct pick.
+const PRESSER_COOLDOWN = 4;   // matchdays
+const PRESSERS = {
+  badRun: {
+    q: c=>`${c.name} have lost ${c._runLen} on the bounce. Is your job safe?`,
+    options: [
+      { label:"Back the squad",       morale:+8, fans:-5, board:-2, line:()=>"“These players will come good. I'd pick every one of them again.”" },
+      { label:"Demand more",          morale:-8, fans:+6, board:+2, line:()=>"“That wasn't good enough. Nobody's shirt is guaranteed.”" },
+      { label:"Take the blame",       morale:+4, fans:+1, board:+1, line:()=>"“That's on me. I picked the side, I set them up.”" },
+    ],
+  },
+  goodRun: {
+    q: c=>`${c.name} are unbeaten in ${c._runLen}. Are you in a title race?`,
+    options: [
+      { label:"Talk up the title",    morale:+6, fans:+8, board:+1, line:()=>"“We're in it. Why pretend otherwise?”" },
+      { label:"Take each game as it comes", morale:+2, fans:-3, board:+2, line:()=>"“One game at a time. We've won nothing.”" },
+      { label:"Credit the players",   morale:+9, fans:+2, board:0,  line:()=>"“All them. Best group I've worked with.”" },
+    ],
+  },
+  derby: {
+    q: c=>`Derby week. What does beating ${c._rivalName} mean to this club?`,
+    options: [
+      { label:"Everything",           morale:+7, fans:+9, board:0,  line:c=>`“Ask anyone in this city what ${c._rivalName} means. Everything.”` },
+      { label:"Just three points",    morale:+1, fans:-6, board:+2, line:()=>"“Three points, same as any other week.”" },
+      { label:"Fire a warning",       morale:+5, fans:+6, board:-2, line:c=>`“They know where we are. Let them worry about us.”` },
+    ],
+  },
+  starUnrest: {
+    q: (c,p)=>`${p.name} looks unsettled. Is he staying?`,
+    options: [
+      { label:"He's not for sale",    morale:+8, fans:+4, board:-3, line:p=>`“${p.name} is going nowhere. End of.”` },
+      { label:"Everyone has a price", morale:-7, fans:-2, board:+4, line:()=>"“We're a selling club when the number's right. That's football.”" },
+      { label:"Refuse to discuss it", morale:+1, fans:-2, board:0,  line:()=>"“I'm not doing transfer talk in here.”" },
+    ],
+  },
+};
+// Decide whether the media get a question this matchday, and which one.
+function pickPresser(G){
+  const c = G.clubs[G.userTeamId]; if(!c) return null;
+  if(G.presser) return null;
+  if((G.day||0) - (G._lastPresser==null?-99:G._lastPresser) < PRESSER_COOLDOWN) return null;
+  if((c.pld||0) < 4) return null;
+  // club.form5 is a rolling "W"/"D"/"L" list, newest last
+  const f = c.form5 || [];
+  if(f.length){
+    const last = f[f.length-1];
+    let run=0; for(let i=f.length-1;i>=0;i--){ if(f[i]===last) run++; else break; }
+    if(last==="L" && run>=3){ c._runLen=run; return { kind:"badRun" }; }
+    if(last!=="L" && run>=4){ c._runLen=run; return { kind:"goodRun" }; }
+  }
+  // derby week — a fixture against the club's rival is coming up
+  const rival = c.rivalId!=null ? G.clubs[c.rivalId] : null;
+  if(rival){
+    const next = (G.schedule[G.day]||[]).find(g=>
+      (g.home===c.id && g.away===rival.id) || (g.away===c.id && g.home===rival.id));
+    if(next){ c._rivalName = rival.name; return { kind:"derby" }; }
+  }
+  // an unsettled star
+  const squad = Object.values(G.players).filter(p=>p.teamId===c.id && !p.youth);
+  const unhappy = squad.filter(p=>p.ovr>=74 && (p.morale!=null && p.morale<=45));
+  if(unhappy.length && chance(0.5)) return { kind:"starUnrest", pid:unhappy[0].id };
+  return null;
+}
+// Apply the chosen answer: dressing-room morale (scaled per player by personality),
+// fan confidence and board confidence all move, and the quote hits the news wire.
+function answerPresser(G, optIdx){
+  const pr = G.presser; if(!pr) return;
+  const spec = PRESSERS[pr.kind]; if(!spec){ G.presser=null; return; }
+  const opt = spec.options[optIdx]; if(!opt) return;
+  const c = G.clubs[G.userTeamId];
+  const subject = pr.pid!=null ? G.players[pr.pid] : null;
+  Object.values(G.players).forEach(p=>{
+    if(p.teamId!==c.id || p.youth) return;
+    const s = personalityOf(p).moraleSwing;
+    const extra = (subject && p.id===subject.id) ? 1.6 : 1;    // the man in question reacts hardest
+    p.morale = Math.round(clamp((p.morale==null?70:p.morale) + opt.morale*s*extra*0.6, 0, 100));
+  });
+  G.fanConfidence   = Math.round(clamp((G.fanConfidence==null?65:G.fanConfidence) + (opt.fans||0), 0, 100));
+  G.boardConfidence = Math.round(clamp((G.boardConfidence==null?60:G.boardConfidence) + (opt.board||0), 0, 100));
+  const line = typeof opt.line === "function" ? opt.line(subject || c) : opt.line;
+  logNews(G,"event",`🎤 Press conference — ${line}`, c.id);
+  G._lastPresser = G.day||0;
+  G.presser = null;
+}
+
+/* ----------------------------- squad shuffle ---------------------------- */
+// Football has no draft, so the honest translation of "blow up the established
+// order and start level" is a one-off REDISTRIBUTION: every senior player is thrown
+// into a pool and dealt back out at random. Each club is guaranteed a goalkeeper and
+// a full squad first, then the remainder is spread evenly — so nobody is left unable
+// to field a side and no club inherits a super-squad by luck of the deal.
+function shuffleSquads(G){
+  const clubs = G.clubs;
+  const pool = [];
+  Object.values(G.players).forEach(p=>{
+    if(p.teamId==null || p.youth) return;                    // academy players stay put
+    if(isLoaned(p)) return;                                  // leave loan spells alone
+    pool.push(p);
+  });
+  const perClub = Math.floor(pool.length / clubs.length);
+  const keepers = pool.filter(p=>p.pos==="GK");
+  const rest = pool.filter(p=>p.pos!=="GK");
+  const shuf = arr => { for(let i=arr.length-1;i>0;i--){ const j=Math.floor(_rng()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]]; } return arr; };
+  shuf(keepers); shuf(rest);
+  pool.forEach(p=>{ p.teamId = null; });
+  // 1) two keepers per club where supply allows, so nobody plays an outfielder in goal
+  const want = Math.min(2, Math.floor(keepers.length / clubs.length));
+  let ki = 0;
+  clubs.forEach(c=>{ for(let n=0;n<want && ki<keepers.length;n++) keepers[ki++].teamId = c.id; });
+  // 2) deal the rest round-robin so squad sizes stay level
+  const leftovers = keepers.slice(ki).concat(rest);
+  shuf(leftovers);
+  leftovers.forEach((p,i)=>{ p.teamId = clubs[i % clubs.length].id; });
+  // 3) rebuild every XI and re-seed morale — this is a brand-new dressing room
+  Object.values(G.players).forEach(p=>{ if(p.teamId!=null && !p.youth) p.morale = rint(60,80); });
+  withTeamIndex(G.players, ()=>{ clubs.forEach(c=>autoPickXI(c, G.players)); });
+  logNews(G,"event",`🔀 Squad shuffle — every senior player in the world has been redistributed.`, G.userTeamId);
+  return perClub;
+}
+
 /* ----------------------------- schedule -------------------------------- */
 // Double round-robin per division via the circle method: 20 teams -> 38 rounds.
 // Returns rounds[]; each round = array of {home, away, div, played, hs, as}.
-function divRounds(clubIds){
+function divRounds(clubIds, legs=2){
   const ids = clubIds.slice();
   if(ids.length % 2) ids.push(null);
   const n = ids.length, half = n/2;
@@ -497,7 +715,9 @@ function divRounds(clubIds){
     firstLeg.push(games);
     rot = [rot[rot.length-1]].concat(rot.slice(0, rot.length-1));   // rotate
   }
-  // second leg = reverse fixtures
+  // second leg = reverse fixtures. A ONE-leg season (the `legs` rule) plays the
+  // first half only — 19 rounds, everyone met once, home advantage decided by the draw.
+  if(legs<2) return firstLeg;
   const secondLeg = firstLeg.map(games => games.map(g => ({home:g.away, away:g.home})));
   return firstLeg.concat(secondLeg);
 }
@@ -515,12 +735,18 @@ const SEASON_SPECIALS = [
   [28,"C","SF"], [30,"K","QF"], [32,"K","SF"], [34,"C","Final"], [36,"K","Final"],
 ];
 function buildCalendar(G){
-  const league = buildSchedule(G.clubs);
+  const legs = rules(G).legs;
+  const league = buildSchedule(G.clubs, legs);
+  // SEASON_SPECIALS is written against a 38-round campaign. A short (one-leg) season
+  // has half the league rounds, so every special is re-anchored proportionally —
+  // otherwise the cup final and continental final sit past the end of the calendar
+  // and never get a matchday. De-duplicated so two specials can't claim one slot.
+  const specials = scaleSpecials(SEASON_SPECIALS, league.length);
   const schedule=[], cupMD={}, contMD={}, cupRev={}, contRev={}, intl=[];
   let li=0, si=0;
   for(let count=0; count<=league.length; count++){
-    while(si<SEASON_SPECIALS.length && SEASON_SPECIALS[si][0]===count){
-      const s=SEASON_SPECIALS[si]; const md=schedule.length+1;   // 1-based matchday number
+    while(si<specials.length && specials[si][0]===count){
+      const s=specials[si]; const md=schedule.length+1;   // 1-based matchday number
       schedule.push([]);   // empty league round on a cup/cont/intl week
       if(s[1]==="C"){ cupMD[md]=s[2]; cupRev[s[2]]=md; }
       else if(s[1]==="K"){ contMD[md]=s[2]; contRev[s[2]]=md; }
@@ -532,7 +758,24 @@ function buildCalendar(G){
   G.schedule=schedule; G.cupMD=cupMD; G.contMD=contMD; G.cupMD_rev=cupRev; G.contMD_rev=contRev; G.intlMD=intl;
   return schedule;
 }
-function buildSchedule(clubs){
+// Re-anchor the special-matchday table onto a league of `n` rounds (the table is
+// authored for 38). Positions scale proportionally, keep their original order, and
+// are nudged apart so no two specials land on the same anchor — every cup and
+// continental round still gets its own week in a short season.
+function scaleSpecials(table, n){
+  if(n>=38) return table;
+  const f = n/38;
+  const out=[]; let last=-1;
+  table.forEach(s=>{
+    let at = Math.min(n, Math.max(0, Math.round(s[0]*f)));
+    if(at<=last) at = last+1;                 // never collide with the previous special
+    if(at>n) at = n;                          // clamp; the tail all resolves on the last week
+    last = at;
+    out.push([at, s[1], s[2]]);
+  });
+  return out;
+}
+function buildSchedule(clubs, legs=2){
   // Each of the (countries x divisions) leagues plays its own double round-robin;
   // all leagues share the same 38 matchdays, merged into one round per matchday.
   const leagues = {};   // key country*10+div -> [clubIds]
@@ -540,7 +783,7 @@ function buildSchedule(clubs){
   const rounds = [];
   Object.keys(leagues).forEach(k=>{
     const country = Math.floor(k/10), div = k%10;
-    const lr = divRounds(leagues[k]);
+    const lr = divRounds(leagues[k], legs);
     lr.forEach((games, i)=>{
       const r = rounds[i] || (rounds[i]=[]);
       games.forEach(g => r.push({ home:g.home, away:g.away, div, country, played:false, hs:0, as:0 }));
@@ -740,6 +983,16 @@ function simMatch(home, away, players, opts={}){
     xgA = clamp(xgA * traitBoost(away), 0.15, 6);
   }
   let hs = poisson(xgH), as = poisson(xgA);
+  // VAR (a league rule): a small share of goals are chalked off on review. Applied
+  // symmetrically to both sides so the league's goal environment shifts slightly
+  // DOWN without tilting results either way. `varOff` is surfaced in the box so the
+  // match report can say a goal was disallowed.
+  let varOff = { h:0, a:0 };
+  if(opts.G && rules(opts.G).var){
+    const review = g => { let off=0; for(let i=0;i<g;i++) if(chance(0.035)) off++; return off; };
+    varOff.h = review(hs); varOff.a = review(as);
+    hs -= varOff.h; as -= varOff.a;
+  }
   // Knockout ties level after 90' go to extra time (reduced-rate goals); if STILL
   // level after ET, a penalty shootout decides it. ET is also when the 4th/5th
   // substitution unlocks (see the sub logic in applyMatch). etH/etA count which
@@ -759,7 +1012,7 @@ function simMatch(home, away, players, opts={}){
   const sotH = clamp(round(shH*(0.30+0.12*n01(uH.ATT))), hs, shH);
   const sotA = clamp(round(shA*(0.30+0.12*n01(uA.ATT))), as, shA);
   const box = { home, away, hs, as, hScorers:[], aScorers:[], hRatings:[], aRatings:[], neutral, extraTime, pens,
-    etg: { h: etH, a: etA },
+    etg: { h: etH, a: etA }, varOff: (varOff.h||varOff.a) ? varOff : null,
     hSubs:[], aSubs:[],
     stat:{ possH, possA:100-possH, shH, shA, sotH, sotA, xgH:+xgH.toFixed(2), xgA:+xgA.toFixed(2) }, timeline:[] };
   applyMatch(home, away, hs, as, players, box, opts);
@@ -850,8 +1103,8 @@ function applyMatch(home, away, hs, as, players, box, opts){
   const G = opts.G;
   const st = box.stat || {};
   const H = lineupOf(home, players), A = lineupOf(away, players);
-  // Appearances, minutes and SUBSTITUTIONS. Each side makes up to 3 subs in normal
-  // time (up to 5 if the tie goes to extra time). The keeper is never substituted
+  // Appearances, minutes and SUBSTITUTIONS. The allowance is a league RULE (3 or 5),
+  // with two extra permitted if the tie goes to extra time. The keeper is never substituted
   // (only outfield starters come off); the tiredest/weakest outfielders are hooked
   // and replaced by the best-fitting bench player. Subs get real minutes (and can
   // still score, weighted by time on the pitch); starters who are hooked have their
@@ -859,7 +1112,7 @@ function applyMatch(home, away, hs, as, players, box, opts){
   function credit(side, club, sideKey){
     const matchEnd = box.extraTime ? 120 : 90;
     const drain = tacticMods(club).drain;   // high press / fast tempo tires players faster
-    const maxSubs = box.extraTime ? 5 : 3;
+    const maxSubs = (rules(G).subs||3) + (box.extraTime ? 2 : 0);
     const xiIds = new Set(side.map(({p})=>p.id));
     const bench = (club.bench||[]).map(id=>players[id]).filter(p=>p && isAvailable(p) && !xiIds.has(p.id) && p.pos!=="GK" && !(p.positions||[]).includes("GK"));
     const offPool = side.filter(o=>o.slot!=="GK").slice().sort((a,b)=> (effRating(a.p,a.slot)*((a.p.fitness||100)/100)) - (effRating(b.p,b.slot)*((b.p.fitness||100)/100)) );
@@ -872,7 +1125,7 @@ function applyMatch(home, away, hs, as, players, box, opts){
       const on = poolAvail.filter(b=>GROUP(b.pos)===grp).sort((a,b)=>b.ovr-a.ovr)[0] || poolAvail.sort((a,b)=>b.ovr-a.ovr)[0];
       if(!on) break;
       usedOn.add(on.id);
-      const min = s<3 ? rint(58,85) : rint(93, matchEnd-3);
+      const min = s<(rules(G).subs||3) ? rint(58,85) : rint(93, matchEnd-3);
       subs.push({ off, on, min });
     }
     const offMin = {}; subs.forEach(x=>offMin[x.off.p.id]=x.min);
@@ -1017,8 +1270,9 @@ function applyMatch(home, away, hs, as, players, box, opts){
   // standings (cup matches don't affect the league table)
   if(!isCup){
     home.pld++; away.pld++; home.gf+=hs; home.ga+=as; away.gf+=as; away.ga+=hs;
-    if(hs>as){ home.w++; home.pts+=3; away.l++; }
-    else if(hs<as){ away.w++; away.pts+=3; home.l++; }
+    const _wp = rules(G).pointsForWin;      // 3 (modern) or 2 (the old system)
+    if(hs>as){ home.w++; home.pts+=_wp; away.l++; }
+    else if(hs<as){ away.w++; away.pts+=_wp; home.l++; }
     else { home.d++; away.d++; home.pts++; away.pts++; }
     recordStreak(G, home, hs>as?1:hs<as?-1:0); recordStreak(G, away, as>hs?1:as<hs?-1:0);
   }
@@ -1703,12 +1957,15 @@ function simRoundInner(G){
       if(derby) logNews(G,"match",`🔥 Derby day! ${home.abbr} ${box.hs}-${box.as} ${away.abbr}`, G.userTeamId);
     }
     const pinj = pitchTierOf(home).inj;
-    maybeInjure(home, G.players, G.settings, pinj); maybeInjure(away, G.players, G.settings, pinj);
+    { const dInj=diff(G).injury; maybeInjure(home, G.players, G.settings, pinj*dInj); maybeInjure(away, G.players, G.settings, pinj*dInj); }
   });
   checkMilestones(G);   // career-landmark news for the user's players
   updateFormFamiliarity(G);   // clubs settle into their current formation
   processTransferRequests(G);   // unhappy players may agitate to leave
-  if(G.day===18) aiSignFreeAgents(G);   // January window: AI clubs sweep the free-agent market once
+  // January window anchors scale with the season length (a one-leg campaign is half
+  // as long), so the AI sweep and deadline day still land inside the actual window.
+  const _n = G.schedule.length, _janOpen = Math.round(_n*0.41), _janShut = Math.round(_n*0.48);
+  if(G.day===_janOpen) aiSignFreeAgents(G);   // January window: AI clubs sweep the free-agent market once
   if([Math.round(G.schedule.length/3), Math.round(G.schedule.length*2/3)].includes(G.day+1)) inSeasonDev(G);   // gradual in-season growth checkpoints
   // youth 5v5 game time (drives prospect development)
   accrueYouth(G);
@@ -1744,7 +2001,12 @@ function simRoundInner(G){
   }
   // DEADLINE DAY: the final matchday of the January window (day 21) triggers a late
   // flurry of AI business and one last round of bids for the user's players.
-  if(G.day===21) deadlineDay(G);
+  if(G.day===_janShut) deadlineDay(G);
+  // the media want a word (never more than one open, and not every week)
+  if(G.settings && G.settings.pressers!==false){
+    const _pr = pickPresser(G);
+    if(_pr) G.presser = _pr;
+  }
   G.day++;
   if(G.day >= G.schedule.length){ G.phase = "offseason"; finalizeSeason(G); }
 }
@@ -2013,7 +2275,8 @@ function liveFinish(G, M){
   if(motm){ motm.stats.MOTM++; addCompL(motm,"MOTM"); }
   if(!G.settings||G.settings.morale!==false){ ids.forEach(id=>{ const p=players[id]; if(!p)return; const side=M.sideOf[id]; const result=(side==="H"?M.hs-M.as:M.as-M.hs); p.morale=clamp((p.morale==null?70:p.morale)+(result>0?2.5:result<0?-2.5:0.5),0,100); }); }
   home.pld++; away.pld++; home.gf+=M.hs; home.ga+=M.as; away.gf+=M.as; away.ga+=M.hs;
-  if(M.hs>M.as){home.w++;home.pts+=3;away.l++;} else if(M.hs<M.as){away.w++;away.pts+=3;home.l++;} else {home.d++;away.d++;home.pts++;away.pts++;}
+  const _wp = rules(G).pointsForWin;
+  if(M.hs>M.as){home.w++;home.pts+=_wp;away.l++;} else if(M.hs<M.as){away.w++;away.pts+=_wp;home.l++;} else {home.d++;away.d++;home.pts++;away.pts++;}
   recordH2H(G, home, away, M.hs, M.as, "L");
   recordClubMatchResult(G, home, M.hs, M.as, away.abbr); recordClubMatchResult(G, away, M.as, M.hs, home.abbr);
   recordStreak(G, home, M.hs>M.as?1:M.hs<M.as?-1:0); recordStreak(G, away, M.as>M.hs?1:M.as<M.hs?-1:0);
@@ -2030,7 +2293,7 @@ function liveFinish(G, M){
     motm:motm?motm.name:null, stat:{possH:poss,possA:100-poss,shH:M.shH,shA:M.shA,sotH:M.sotH,sotA:M.sotA,xgH:0,xgA:0}, timeline:tl };
   G.lastMatches=[G.lastMatch]; G._lmDay=G.day;   // seed this week's results with the watched game; cups append below
   logNews(G,"match",`${home.abbr} ${M.hs}-${M.as} ${away.abbr}`,G.userTeamId);
-  { const pinj=pitchTierOf(home).inj; maybeInjure(home,players,G.settings,pinj); maybeInjure(away,players,G.settings,pinj); }
+  { const pinj=pitchTierOf(home).inj*diff(G).injury; maybeInjure(home,players,G.settings,pinj); maybeInjure(away,players,G.settings,pinj); }
   simRound(G);   // plays the rest of the round (skips the already-played user game) + upkeep
 }
 // Swap a starter (xi index) for a bench player on the user's club, mid-match.
@@ -2092,8 +2355,11 @@ function playPromoTie(G, home, away){
   return { home:home.abbr, away:away.abbr, hs:box.hs, as:box.as, pens:box.pens?`${box.pens.h}-${box.pens.a}`:null, aet:!!box.extraTime, winId:w.id, winAbbr:w.abbr };
 }
 function playPromoPlayoff(G, ci, lowerDiv){
+  if(!rules(G).promoPlayoff) return null;        // every promotion place is automatic
   const t = tableFor(G, lowerDiv, ci);
-  const s = [t[2], t[3], t[4], t[5]];   // 3rd, 4th, 5th, 6th
+  // the four clubs just below the automatic places contest the last promotion spot
+  const auto = Math.max(0, rules(G).promoReleg - 1);
+  const s = [t[auto], t[auto+1], t[auto+2], t[auto+3]];
   if(s.some(x=>!x)) return null;
   const sf1 = playPromoTie(G, s[0], s[3]);   // 3 v 6
   const sf2 = playPromoTie(G, s[1], s[2]);   // 4 v 5
@@ -2159,7 +2425,9 @@ function evaluateBoardSeasonEnd(G){
   // secondary objectives (cup / continental / finance) nudge board confidence too
   const secMet = (G.objectives||[]).filter(o=>o.kind!=="league" && o.met).length;
   const secMiss = (G.objectives||[]).filter(o=>o.kind!=="league" && o.met===false).length;
-  G.boardConfidence = clamp(G.boardConfidence + beat*5 + secMet*3 - secMiss*3, 0, 100);
+  { const _bp=diff(G).boardPatience;   // difficulty softens or sharpens a bad verdict
+    const _raw = beat*5 + secMet*3 - secMiss*3;
+    G.boardConfidence = clamp(G.boardConfidence + (_raw<0 ? _raw/_bp : _raw*_bp), 0, 100); }
   const div0 = user.div===0;
   const relegated = user.div < NUM_DIVS-1 && pos > (tableFor(G,user.div,user.country||0).length - 3);
   if((relegated && G.boardConfidence<45) || G.boardConfidence<=12){
@@ -2385,12 +2653,21 @@ function startNextSeason(G){
     // snapshot all tables BEFORE any swaps so a club moves at most one tier
     const tables = []; for(let d=0; d<NUM_DIVS; d++) tables.push(tableFor(G,d,ci));
     for(let d=0; d<NUM_DIVS-1; d++){
-      tables[d].slice(-3).forEach(c=>{ c.div=d+1; _movedDiv.push(c); _relegatedIds.add(c.id); logNews(G,"releg",`⬇️ ${c.name} are relegated to the ${divName(ci,d+1)}`, c.id); });
-      // top 2 auto-promote, plus the play-off winner (or 3rd place as a fallback)
+      // How many go down / come up is a league RULE. With the play-off on, the last
+      // promotion place is decided by the play-off between the clubs just below the
+      // automatic spots; with it off, every place is automatic on league position.
+      const nMove = Math.max(1, rules(G).promoReleg);
+      const usePO = rules(G).promoPlayoff;
+      tables[d].slice(-nMove).forEach(c=>{ c.div=d+1; _movedDiv.push(c); _relegatedIds.add(c.id); logNews(G,"releg",`⬇️ ${c.name} are relegated to the ${divName(ci,d+1)}`, c.id); });
       const lower = tables[d+1];
-      const poId = _poWin[ci+"-"+(d+1)];
-      const third = (poId!=null && G.clubs[poId] && G.clubs[poId].div===d+1) ? G.clubs[poId] : lower[2];
-      [lower[0], lower[1], third].filter(Boolean).forEach(c=>{ c.div=d; _movedDiv.push(c); logNews(G,"promo",`⬆️ ${c.name} are promoted to the ${divName(ci,d)}`, c.id); addHonour(c, G.season, "promo", `Promoted to ${divName(ci,d)}`); });
+      const auto = usePO ? nMove-1 : nMove;          // automatic promotion places
+      const up = lower.slice(0, Math.max(0,auto));
+      if(usePO && nMove>=1){
+        const poId = _poWin[ci+"-"+(d+1)];
+        const viaPO = (poId!=null && G.clubs[poId] && G.clubs[poId].div===d+1) ? G.clubs[poId] : lower[auto];
+        if(viaPO) up.push(viaPO);
+      }
+      up.filter(Boolean).forEach(c=>{ c.div=d; _movedDiv.push(c); logNews(G,"promo",`⬆️ ${c.name} are promoted to the ${divName(ci,d)}`, c.id); addHonour(c, G.season, "promo", `Promoted to ${divName(ci,d)}`); });
     }
   });
   manageAIManagers(G, _relegatedIds);   // AI clubs may sack/replace their manager after a poor season
@@ -2438,7 +2715,8 @@ function startNextSeason(G){
     const merch = merchIncome(G, c, gate);
     const overhead = runningCosts(G, c, wages);
     const boxesInc = round((c.seasonBoxes||0)*10)/10;   // hospitality boxes accrued per home game
-    c.budget = round((c.budget + base + prize + gate + conc + boxesInc + merch.total - wages - overhead) * 10)/10;
+    const _dB = c.id===G.userTeamId ? diff(G).budget : 1;   // difficulty flexes YOUR money only
+    c.budget = round((c.budget + (base + prize + gate + conc + boxesInc + merch.total - wages - overhead) * _dB) * 10)/10;
     c.gatePerGame = homeGames>0 ? round(gate/homeGames*10)/10 : gate;
     if(!c.lastPnl) c.lastPnl={};
     c.lastPnl.tv=base; c.lastPnl.prize=prize; c.lastPnl.gate=gate; c.lastPnl.conc=conc; c.lastPnl.boxes=boxesInc; c.lastPnl.merch=merch.total; c.lastPnl.merchMatch=merch.matchday; c.lastPnl.merchOnline=merch.online; c.lastPnl.gateGames=homeGames; c.lastPnl.wages=wages; c.lastPnl.overhead=overhead;
@@ -2551,7 +2829,9 @@ function startNextSeason(G){
   G.freeAgents = keepFA.slice(0,500);
   capRetired(G);   // re-cap AFTER the purge above floods the archive (the earlier cap ran before it)
   // fresh fixtures + cups + reset XIs
+  ffpSettle(G);           // soft-ceiling fines are levied on last season's wage bill
   G.season++; G.day=0; G.phase="regular";
+  applyPendingRules(G);   // staged structural rule changes take effect on the new calendar
   buildCalendar(G);   // spread league / cup / continental onto their own matchdays
   withTeamIndex(G.players, ()=>{   // strength/XI passes over all 640 clubs use the fast index
     initContCup(G);   // seed continental cup from LAST season's standings + national cups (still on G.cups)
@@ -2984,14 +3264,22 @@ function logMove(G, p, type, fromId, toId, fee){
   }
 }
 function transferWindowOpen(G){
+  if(!rules(G).windows) return true;              // windows switched off — deal any time
   if(G.phase==="offseason") return true;
   if(G.phase!=="regular") return false;
-  return G.day<=2 || (G.day>=18 && G.day<=21);   // summer tail + January
+  // summer tail + a January window, both anchored proportionally so a short
+  // (one-leg) season still gets a mid-season window at roughly the halfway point
+  const n = (G.schedule && G.schedule.length) || 44;
+  const janOpen = Math.round(n*0.41), janShut = Math.round(n*0.48);
+  return G.day<=2 || (G.day>=janOpen && G.day<=janShut);
 }
 function transferWindowLabel(G){
+  if(!rules(G).windows) return "🟢 No transfer windows — the market is always open";
   if(G.phase==="offseason") return "🟢 Summer transfer window open";
-  if(transferWindowOpen(G)) return G.day<=2 ? "🟢 Summer window — closes after matchday 3" : "🟢 January window — closes after matchday 22";
-  if(G.day<18) return `🔴 Window closed — January opens at matchday 19 (in ${19-G.day})`;
+  const n = (G.schedule && G.schedule.length) || 44;
+  const janOpen = Math.round(n*0.41), janShut = Math.round(n*0.48);
+  if(transferWindowOpen(G)) return G.day<=2 ? "🟢 Summer window — closes after matchday 3" : `🟢 January window — closes after matchday ${janShut+1}`;
+  if(G.day<janOpen) return `🔴 Window closed — January opens at matchday ${janOpen+1} (in ${janOpen-G.day})`;
   return "🔴 Window closed — reopens in the summer";
 }
 function buyPlayer(G, p, fee, opts={}){
@@ -2999,6 +3287,10 @@ function buyPlayer(G, p, fee, opts={}){
   if(!transferWindowOpen(G)) return { ok:false, msg:"The transfer window is closed." };
   if((buyer.transferBan||0)>0) return { ok:false, msg:"⚖️ Your club is under a transfer ban — you can't register new signings this season." };
   if(buyer.budget < fee) return { ok:false, msg:"Not enough budget for that fee." };
+  // FINANCIAL FAIR PLAY (hard): a signing that would push the wage bill past the
+  // ceiling is refused outright. A SOFT ceiling lets it through and fines you later.
+  const _ffp = ffpCheck(G, buyer.id, wageFor(p));
+  if(!_ffp.ok) return { ok:false, msg:_ffp.msg };
   const seller = p.teamId!=null ? G.clubs[p.teamId] : null;
   buyer.budget = round((buyer.budget - fee)*10)/10;
   if(seller){ seller.budget = round((seller.budget + fee)*10)/10; }
@@ -3277,6 +3569,39 @@ function signFreeAgent(G, p){
 }
 function wageBill(G, clubId){
   return round(Object.values(G.players).filter(p=>p.teamId===clubId).reduce((s,p)=>s+(p.salary||0),0)*10)/10;
+}
+// The FFP wage ceiling for a club (0 when the rule is off).
+function wageCeiling(G, clubId){
+  const R = rules(G);
+  if(R.ffp==="none") return 0;
+  const c = G.clubs[clubId]; if(!c) return 0;
+  return round(Math.max(0, c.budget) * R.wageCeilPct * 10)/10;
+}
+// Would adding `addWage` to this club's bill break a HARD ceiling? Soft ceilings
+// always pass here — they're settled as a fine at the end of the season instead.
+function ffpCheck(G, clubId, addWage){
+  const R = rules(G);
+  if(R.ffp!=="hard") return { ok:true };
+  const ceil = wageCeiling(G, clubId);
+  if(!ceil) return { ok:true };
+  const after = wageBill(G, clubId) + (addWage||0);
+  if(after > ceil) return { ok:false, msg:`⚖️ Financial fair play: that deal would take your wage bill to ${money(after)}, over the ${money(ceil)} ceiling.` };
+  return { ok:true };
+}
+// Season-end settlement for a SOFT ceiling: the authorities fine the overage.
+function ffpSettle(G){
+  const R = rules(G);
+  if(R.ffp!=="soft") return;
+  G.clubs.forEach(c=>{
+    const ceil = wageCeiling(G, c.id);
+    if(!ceil) return;
+    const over = wageBill(G, c.id) - ceil;
+    if(over <= 0) return;
+    const fine = round(Math.min(over*0.5, Math.max(0,c.budget)*0.25)*10)/10;
+    if(fine<=0) return;
+    c.budget = round((c.budget - fine)*10)/10;
+    if(c.id===G.userTeamId) logNews(G,"event",`⚖️ Financial fair play: your wage bill ran ${money(over)} over the ${money(ceil)} ceiling — fined ${money(fine)}.`, c.id);
+  });
 }
 
 /* ----------------------------- loans ----------------------------------- */
@@ -3713,8 +4038,20 @@ function migrate(G){
     if(!G.records || typeof G.records!=="object") G.records = { players:{}, biggestWin:null };
     if(!G.records.players) G.records.players = {};
     G.settings = G.settings || {};
-    const defs = { injuries:true, jobSecurity:true, morale:true, internationals:true, watchMatches:false };
+    const defs = { injuries:true, jobSecurity:true, morale:true, internationals:true, watchMatches:false, pressers:true };
     for(const k in defs){ if(G.settings[k]==null) G.settings[k]=defs[k]; }
+    // League rules: an existing save adopts the classic defaults, but its ACTUAL
+    // fixture count wins over the preset so a season in progress is never reshaped.
+    if(!G.rules){
+      G.rules = Object.assign({}, RULES_DEFAULT);
+      const club = G.clubs && G.clubs[0];
+      if(club && G.schedule && G.schedule.length){
+        let n=0; G.schedule.forEach(rd=>rd.forEach(g=>{ if(g.home===club.id||g.away===club.id) n++; }));
+        if(n>0 && n<=24) G.rules.legs = 1;      // a short campaign was already being played
+      }
+    }
+    if(G.pendingRules===undefined) G.pendingRules=null;
+    if(!G.difficulty) G.difficulty="normal";
     if(G.boardConfidence==null) G.boardConfidence=60;
     if(G.fanConfidence==null) G.fanConfidence=65;
     if(G.pendingSack==null) G.pendingSack=false;
@@ -3831,6 +4168,8 @@ function newGame(userTeamId, opts={}){
     career: { seasonsManaged:0, transferSpend:0, transferIncome:0, academyGraduates:0,
       clubsManaged: [{ id:userTeamId, name:clubs[userTeamId].name, abbr:clubs[userTeamId].abbr, from:2026, to:null }] },
     settings: { injuries:true, jobSecurity:true, morale:true, internationals:true, watchMatches:false },
+    rules: Object.assign({}, RULES_DEFAULT, (opts && opts.rules) || {}), pendingRules: null,
+    difficulty: (opts && opts.difficulty) || "normal",
   };
   buildCalendar(G);   // spread league / cup / continental onto their own matchdays
   // seed a free-agent pool sized for a bigger world
@@ -3854,6 +4193,8 @@ function App(){
   const [toast, setToast] = useState("");
   const [globalPlayer, setGlobalPlayer] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showRules, setShowRules] = useState(false);
+  const [palette, setPalette] = useState(false);
 
   // Compressing the (large) save takes a beat, so DON'T block the click on it:
   // update the screen immediately, then persist shortly after (debounced, so a
@@ -3862,25 +4203,42 @@ function App(){
   const saveRef = React.useRef({ timer:null, g:null });
   const flushSave = () => { const s=saveRef.current; if(s.timer){ clearTimeout(s.timer); s.timer=null; } if(s.g){ const g=s.g; s.g=null; saveGame(g).then(ok=>{ if(!ok) tShow("⚠️ Save failed — try Save File to back up."); }); } };
   const commit = g => { if(!g.slotId) g.slotId = "s" + Date.now() + Math.floor(Math.random()*999); setG({...g}); saveRef.current.g=g; if(!saveRef.current.timer){ saveRef.current.timer=setTimeout(()=>{ saveRef.current.timer=null; flushSave(); }, 300); } };
+  // Keyboard: ⌘K / Ctrl-K opens the jump-to palette. Ignored while typing in a field
+  // so it never steals a keystroke from a search box or a contract negotiation.
+  React.useEffect(()=>{
+    const onKey = e => {
+      const el = e.target;
+      const typing = el && (el.tagName==="INPUT" || el.tagName==="TEXTAREA" || el.tagName==="SELECT" || el.isContentEditable);
+      if((e.metaKey||e.ctrlKey) && (e.key==="k"||e.key==="K")){ e.preventDefault(); setPalette(p=>!p); return; }
+      if(typing) return;
+      if(e.key==="?"){ e.preventDefault(); setPalette(true); }
+    };
+    window.addEventListener("keydown", onKey);
+    return ()=>window.removeEventListener("keydown", onKey);
+  }, []);
   React.useEffect(()=>{ migrateSavesToIDB(); const h=()=>{ if(document.visibilityState==="hidden") flushSave(); }; const b=()=>flushSave(); document.addEventListener("visibilitychange",h); window.addEventListener("pagehide",b); window.addEventListener("beforeunload",b); return ()=>{ document.removeEventListener("visibilitychange",h); window.removeEventListener("pagehide",b); window.removeEventListener("beforeunload",b); }; }, []);
   const tShow = msg => { setToast(msg); setTimeout(()=>setToast(""),2400); };
   const openSlot = id => { loadSlot(id).then(g=>{ if(g){ setG(g); setTab("hub"); setScreen("play"); } else tShow("Couldn't load that save."); }); };
   const toMenu = () => { flushSave(); if(G) saveGame(G); setG(null); setScreen("menu"); };
 
   if(screen==="menu") return <MainMenu onLoad={openSlot} onNew={()=>setScreen("splash")} />;
-  if(screen==="splash" || !G) return <Splash onStart={(id,opts)=>{ const g=newGame(id,opts); g.slotId=null; commit(g); setTab("hub"); setScreen("play"); }} onBack={listSlots().length?()=>setScreen("menu"):null} />;
+  if(screen==="splash" || !G) return <Splash onStart={(id,opts)=>{
+    const g=newGame(id,opts); g.slotId=null;
+    if(opts && opts.shuffle) shuffleSquads(g);
+    commit(g); setTab("hub"); setScreen("play");
+  }} onBack={listSlots().length?()=>setScreen("menu"):null} />;
 
   const user = G.clubs[G.userTeamId];
   SCOUT_FLOOR = scoutTierOf(user).floor;   // the user's scouting network lifts the fog everywhere in the UI
 
-  const TABS = [
-    ["hub","Hub"],["squad","Squad"],["tactics","Tactics"],["table","Table"],
-    ["players","Players"],["stats","Leaders"],["cup","Cup"],["contcup","Champions Cup"],["fixtures","Fixtures"],
-    ["transfers","Transfers"],["fa","Free Agents"],["youth","Youth"],["finances","Finances"],["payouts","Prize Money"],
-    ["clubs","Clubs"],["awards","Awards"],["hof","Hall of Fame"],["records","Records"],["news","News"],
-  ];
-  if(intlOn(G)) TABS.splice(13, 0, ["nation","Nation"]);
-  if(G.phase==="offseason") TABS.push(["offseason","Offseason"]);
+  // Two-level navigation. A flat strip of 19-21 tabs was unreadable (and brutal on a
+  // phone), so tabs live in five sections; the section row is always visible and only
+  // the active section's tabs sit below it. `groupOf` keeps the section in sync when
+  // something else navigates for you (a Hub shortcut, the ⌘K palette).
+  const GROUPS = navGroups(G);
+  const groupOf = k => (GROUPS.find(g=>g.tabs.some(t=>t[0]===k)) || GROUPS[0]).key;
+  const activeGroup = groupOf(tab);
+  const curGroup = GROUPS.find(g=>g.key===activeGroup) || GROUPS[0];
 
   return (
     <PlayerCtx.Provider value={p=>setGlobalPlayer(p)}>
@@ -3900,18 +4258,33 @@ function App(){
             <input type="file" accept="application/json,.json" className="hidden"
               onChange={e=>{ const f=e.target.files[0]; if(f) importSave(f, g=>{ g.slotId=null; commit(g); setTab("hub"); setScreen("play"); tShow("✅ Save loaded"); }); e.target.value=""; }} />
           </label>
+          <button onClick={()=>setShowRules(true)} title="Competition rules — fixtures, points, subs, VAR, promotion"
+            className="px-2 py-1 rounded bg-[#16213a] hover:bg-[#1c2c4a] text-slate-200 text-xs">📋 Rules</button>
           <button onClick={()=>setShowSettings(true)} className="px-2 py-1 rounded bg-[#16213a] hover:bg-[#1c2c4a] text-slate-200 text-xs">⚙</button>
           <button onClick={toMenu} className="px-2 py-1 rounded bg-[#16213a] hover:bg-[#1c2c4a] text-slate-200 text-xs">☰ Menu</button>
         </div>
       </header>
 
-      <nav className="flex gap-1 px-3 py-2 overflow-x-auto bg-[#0b1220] border-b border-[#15203a] sticky top-[57px] z-10">
-        {TABS.map(([k,label])=>(
-          <button key={k} onClick={()=>setTab(k)}
-            className={"px-3 py-1.5 rounded-md text-sm whitespace-nowrap "+(tab===k?"bg-emerald-500 text-slate-900 font-semibold":"text-slate-300 hover:bg-[#16213a]")}>
-            {label}
-          </button>
-        ))}
+      <nav className="bg-[#0b1220] border-b border-[#15203a] sticky top-[57px] z-10">
+        <div className="flex gap-1 px-3 pt-2 overflow-x-auto">
+          {GROUPS.map(g=>(
+            <button key={g.key} onClick={()=>setTab(g.tabs[0][0])}
+              className={"px-3 py-1.5 rounded-t-md text-sm whitespace-nowrap font-semibold border-b-2 "+
+                (activeGroup===g.key ? "text-emerald-300 border-emerald-400" : "text-slate-400 border-transparent hover:text-slate-200")}>
+              {g.label}
+            </button>
+          ))}
+          <button onClick={()=>setPalette(true)} title="Jump to… (⌘K)"
+            className="ml-auto px-2 py-1 rounded text-xs text-slate-500 hover:text-slate-200 whitespace-nowrap self-center">⌘K</button>
+        </div>
+        <div className="flex gap-1 px-3 py-2 overflow-x-auto">
+          {curGroup.tabs.map(([k,label])=>(
+            <button key={k} onClick={()=>setTab(k)}
+              className={"px-3 py-1.5 rounded-md text-sm whitespace-nowrap "+(tab===k?"bg-emerald-500 text-slate-900 font-semibold":"text-slate-300 hover:bg-[#16213a]")}>
+              {label}
+            </button>
+          ))}
+        </div>
       </nav>
 
       <main className="p-4 max-w-6xl mx-auto">
@@ -3941,6 +4314,8 @@ function App(){
       {toast && <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-emerald-500 text-slate-900 px-4 py-2 rounded-lg font-semibold shadow-lg z-50">{toast}</div>}
       {globalPlayer && <PlayerModal p={globalPlayer} G={G} onClose={()=>setGlobalPlayer(null)} />}
       {showSettings && <SettingsModal G={G} commit={commit} tShow={tShow} onClose={()=>setShowSettings(false)} />}
+      {showRules && <LeagueRulesModal G={G} commit={commit} tShow={tShow} onClose={()=>setShowRules(false)} />}
+      {palette && <CommandPalette G={G} onGo={setTab} onClose={()=>setPalette(false)} />}
       {G.jobOffers && G.jobOffers.length>0 && <JobModal G={G} commit={commit} tShow={tShow} setTab={setTab} onClose={()=>{ setG({...G}); }} onRetire={toMenu} />}
     </div>
     </PlayerCtx.Provider>
@@ -3948,6 +4323,229 @@ function App(){
 }
 
 /* ----------------------------- shared bits ----------------------------- */
+/* ------------------------------ navigation ------------------------------ */
+// Tabs grouped into sections. Phase-only and optional tabs (Offseason, Nation) fold
+// into the section they belong to rather than being appended to one long strip.
+function navGroups(G){
+  const club = [["hub","Hub"],["squad","Squad"],["tactics","Tactics"],["youth","Youth"],["finances","Finances"]];
+  const comp = [["table","Table"],["fixtures","Fixtures"],["cup","Cup"],["contcup","Champions Cup"],["stats","Leaders"]];
+  if(intlOn(G)) comp.push(["nation","Nation"]);
+  const market = [["transfers","Transfers"],["fa","Free Agents"],["players","Players"],["clubs","Clubs"]];
+  const history = [["awards","Awards"],["hof","Hall of Fame"],["records","Records"],["payouts","Prize Money"],["news","News"]];
+  const groups = [
+    { key:"club",    label:"🏟 Club",        tabs:club },
+    { key:"comp",    label:"🏆 Competitions", tabs:comp },
+    { key:"market",  label:"💱 Market",      tabs:market },
+    { key:"history", label:"📜 History",     tabs:history },
+  ];
+  if(G.phase==="offseason") groups.push({ key:"off", label:"🌱 Offseason", tabs:[["offseason","Offseason"]] });
+  return groups;
+}
+function allTabs(G){ return navGroups(G).flatMap(g=>g.tabs.map(([k,l])=>({k, label:l, group:g.label}))); }
+
+// ⌘K / Ctrl-K jump-to. Faster than hunting a section for a tab you already know.
+function CommandPalette({G, onGo, onClose}){
+  const [q, setQ] = useState("");
+  const [i, setI] = useState(0);
+  const inputRef = useRef(null);
+  React.useEffect(()=>{ if(inputRef.current) inputRef.current.focus(); }, []);
+  const items = allTabs(G).filter(t=>!q || t.label.toLowerCase().includes(q.toLowerCase()) || t.k.includes(q.toLowerCase()));
+  const pick = n => { const t=items[n]; if(t){ onGo(t.k); onClose(); } };
+  const onKey = e => {
+    if(e.key==="ArrowDown"){ e.preventDefault(); setI(x=>Math.min(x+1, items.length-1)); }
+    else if(e.key==="ArrowUp"){ e.preventDefault(); setI(x=>Math.max(x-1, 0)); }
+    else if(e.key==="Enter"){ e.preventDefault(); pick(i); }
+    else if(e.key==="Escape"){ onClose(); }
+  };
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-start justify-center p-4 pt-24" onClick={onClose}>
+      <div className="bg-[#101a30] border border-[#1d2940] rounded-xl w-full max-w-md overflow-hidden" onClick={e=>e.stopPropagation()}>
+        <input ref={inputRef} value={q} onKeyDown={onKey}
+          onChange={e=>{ setQ(e.target.value); setI(0); }} placeholder="Jump to…"
+          className="w-full bg-transparent px-4 py-3 text-sm outline-none border-b border-[#1d2940]" />
+        <div className="max-h-72 overflow-y-auto">
+          {items.map((t,n)=>(
+            <button key={t.k} onClick={()=>pick(n)} onMouseEnter={()=>setI(n)}
+              className={"w-full text-left px-4 py-2 text-sm flex items-center gap-2 "+(n===i?"bg-emerald-500/15 text-emerald-200":"text-slate-300 hover:bg-[#16213a]")}>
+              <span className="flex-1">{t.label}</span>
+              <span className="text-[11px] text-slate-500">{t.group}</span>
+            </button>
+          ))}
+          {!items.length && <div className="px-4 py-6 text-center text-sm text-slate-500">Nothing matches “{q}”.</div>}
+        </div>
+        <div className="px-4 py-2 text-[11px] text-slate-500 border-t border-[#1d2940]">↑↓ to move · Enter to open · Esc to close</div>
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------- League Rules screen ------------------------ */
+// The FA's desk. Structural rules (fixture count, the promotion ladder) are STAGED
+// and take effect at the next rollover — nothing reshapes a season in progress.
+function RuleRow({label, desc, staged, children}){
+  return (
+    <div className="py-2.5 border-b border-[#15203a] last:border-0">
+      <div className="flex items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="font-medium text-sm flex items-center gap-2 flex-wrap">
+            {label}
+            {staged && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 border border-amber-800/50">next season</span>}
+          </div>
+          {desc && <div className="text-xs text-slate-400 mt-0.5">{desc}</div>}
+        </div>
+        <div className="shrink-0">{children}</div>
+      </div>
+    </div>
+  );
+}
+function RulePick({value, options, onPick}){
+  return (
+    <div className="flex flex-wrap gap-1 justify-end">
+      {options.map(([v,lab])=>(
+        <button key={String(v)} onClick={()=>onPick(v)}
+          className={"px-2.5 py-1 rounded text-xs font-semibold whitespace-nowrap "+
+            (v===value ? "bg-emerald-500 text-slate-900" : "bg-[#16213a] text-slate-300 hover:bg-[#1c2c4a]")}>
+          {lab}
+        </button>
+      ))}
+    </div>
+  );
+}
+const RULE_TABS = [["match","Match"],["league","League"],["money","Money"],["diff","Difficulty"]];
+function LeagueRulesModal({G, commit, tShow, onClose}){
+  const [, force] = useState(0);
+  const [tab, setTab] = useState("match");
+  const R = rules(G);
+  const staged = G.pendingRules || {};
+  const set = (k,v) => {
+    setRule(G, k, v);
+    force(x=>x+1); commit(G);
+    if(isStructural(k) && G.phase!=="offseason") tShow(`📋 ${RULE_LABEL[k]||k} changes next season`);
+  };
+  const val = k => ruleValue(G, k);
+  const resetAll = () => {
+    if(!confirm("Reset every rule to the modern defaults?")) return;
+    G.rules = Object.assign({}, RULES_DEFAULT); G.pendingRules = null;
+    force(x=>x+1); commit(G); tShow("Rules reset");
+  };
+  const anyStaged = Object.keys(staged).length>0;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={onClose}>
+      <div className="bg-[#101a30] border border-[#1d2940] sm:rounded-xl w-full max-w-lg max-h-[92vh] sm:max-h-[85vh] flex flex-col" onClick={e=>e.stopPropagation()}>
+        <div className="p-4 border-b border-[#1d2940] flex items-center justify-between">
+          <div>
+            <div className="font-bold text-lg">📋 Competition Rules</div>
+            <div className="text-xs text-slate-500">You write the rulebook. Bend the game to taste.</div>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none px-2">×</button>
+        </div>
+
+        <div className="flex gap-1 px-3 pt-3 flex-wrap">
+          {RULE_TABS.map(([k,lab])=>(
+            <button key={k} onClick={()=>setTab(k)}
+              className={"px-3 py-1.5 rounded-lg text-xs font-semibold "+(tab===k?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300 hover:bg-[#1c2c4a]")}>{lab}</button>
+          ))}
+        </div>
+
+        <div className="p-4 overflow-y-auto flex-1">
+          {tab==="match" && <>
+            <RuleRow label="Substitutions"
+              desc={`${R.subs} allowed in normal time, ${R.subs+2} if a tie goes to extra time. Five subs lets you rotate a thin squad through a congested week.`}>
+              <RulePick value={R.subs} onPick={v=>set("subs",v)} options={[[3,"3"],[5,"5"]]}/>
+            </RuleRow>
+            <RuleRow label="VAR"
+              desc={R.var ? "Marginal goals are reviewed and a few are chalked off each season — scoring drops slightly."
+                          : "No review. The referee's call on the day stands, right or wrong."}>
+              <RulePick value={R.var} onPick={v=>set("var",v)} options={[[false,"Off"],[true,"On"]]}/>
+            </RuleRow>
+            <RuleRow label="Injuries" desc="Players pick up knocks in matches. Turning this off heals everyone.">
+              <RulePick value={G.settings && G.settings.injuries===false ? false : true}
+                onPick={v=>{ G.settings=G.settings||{}; G.settings.injuries=v;
+                  if(!v) Object.values(G.players).forEach(p=>{ if(p.injury) delete p.injury; });
+                  force(x=>x+1); commit(G); tShow(v?"Injuries ON":"Injuries OFF"); }}
+                options={[[true,"On"],[false,"Off"]]}/>
+            </RuleRow>
+            <RuleRow label="Press conferences"
+              desc="The media put a question to you after a notable run, a derby week, or an unsettled star. Every answer trades dressing-room morale against the fans.">
+              <RulePick value={G.settings && G.settings.pressers===false ? false : true}
+                onPick={v=>{ G.settings=G.settings||{}; G.settings.pressers=v; if(!v) G.presser=null;
+                  force(x=>x+1); commit(G); tShow(v?"Press conferences ON":"Press conferences OFF"); }}
+                options={[[true,"On"],[false,"Off"]]}/>
+            </RuleRow>
+          </>}
+
+          {tab==="league" && <>
+            <RuleRow label="Fixtures" staged={staged.legs!=null}
+              desc={val("legs")===2 ? "Full double round-robin — everyone home and away, 38 games."
+                                    : "Single round-robin — you meet everyone once, 19 games. A whole career in half the time."}>
+              <RulePick value={val("legs")} onPick={v=>set("legs",v)}
+                options={[[2,"38 (home & away)"],[1,"19 (once each)"]]}/>
+            </RuleRow>
+            <RuleRow label="Points for a win"
+              desc={R.pointsForWin===2 ? "Two points for a win, one for a draw — the old system. Draws are worth relatively more, so tables stay tight."
+                                       : "Three points for a win — the modern system that rewards going for it."}>
+              <RulePick value={R.pointsForWin} onPick={v=>set("pointsForWin",v)} options={[[3,"3"],[2,"2"]]}/>
+            </RuleRow>
+            <RuleRow label="Promotion & relegation" staged={staged.promoReleg!=null}
+              desc={`${val("promoReleg")} clubs go down and ${val("promoReleg")} come up at every tier boundary.`}>
+              <RulePick value={val("promoReleg")} onPick={v=>set("promoReleg",v)}
+                options={[[2,"2"],[3,"3"],[4,"4"]]}/>
+            </RuleRow>
+            <RuleRow label="Promotion play-off" staged={staged.promoPlayoff!=null}
+              desc={val("promoPlayoff") ? "The last promotion place is decided by a play-off between the clubs just below the automatic spots."
+                                        : "Every promotion place is automatic on league position."}>
+              <RulePick value={val("promoPlayoff")} onPick={v=>set("promoPlayoff",v)}
+                options={[[true,"Play-off"],[false,"Automatic"]]}/>
+            </RuleRow>
+          </>}
+
+          {tab==="money" && <>
+            <RuleRow label="Transfer windows"
+              desc={R.windows ? "Business only in the summer and January windows."
+                              : "No windows — sign and sell whenever you like, all season."}>
+              <RulePick value={R.windows} onPick={v=>set("windows",v)} options={[[true,"On"],[false,"Off"]]}/>
+            </RuleRow>
+            <RuleRow label="Financial fair play"
+              desc={R.ffp==="hard" ? `Hard ceiling: your wage bill may never exceed ${Math.round(R.wageCeilPct*100)}% of your budget — signings that would break it are blocked.`
+                  : R.ffp==="soft" ? `Soft ceiling: go past ${Math.round(R.wageCeilPct*100)}% of your budget and the authorities fine you at the season's end.`
+                  : "No wage regulation — spend what the board will give you."}>
+              <RulePick value={R.ffp} onPick={v=>set("ffp",v)}
+                options={[["none","Off"],["soft","Soft"],["hard","Hard"]]}/>
+            </RuleRow>
+            {R.ffp!=="none" && <RuleRow label="Wage ceiling" desc="Wage bill as a share of your annual budget.">
+              <RulePick value={R.wageCeilPct} onPick={v=>set("wageCeilPct",v)}
+                options={[[0.6,"60%"],[0.75,"75%"],[0.9,"90%"]]}/>
+            </RuleRow>}
+          </>}
+
+          {tab==="diff" && (()=>{ const d=diff(G); const cur=G.difficulty||"normal"; return <>
+            <RuleRow label="Difficulty" desc={DIFFICULTIES[cur].blurb}>
+              <RulePick value={cur} onPick={v=>{ G.difficulty=v; force(x=>x+1); commit(G); tShow(`Difficulty: ${DIFFICULTIES[v].label}`); }}
+                options={DIFFICULTY_ORDER.map(k=>[k,DIFFICULTIES[k].label])}/>
+            </RuleRow>
+            <div className="pt-3 text-xs text-slate-400 space-y-1.5">
+              <div className="font-semibold text-slate-300">What this preset changes</div>
+              <div className="flex justify-between"><span>Your transfer budget</span><span className="tnum text-slate-300">{d.budget===1?"standard":(d.budget>1?"+":"")+Math.round((d.budget-1)*100)+"%"}</span></div>
+              <div className="flex justify-between"><span>Rival bids in the market</span><span className="tnum text-slate-300">{d.rivalBid===1?"standard":(d.rivalBid>1?"+":"")+Math.round((d.rivalBid-1)*100)+"%"}</span></div>
+              <div className="flex justify-between"><span>Injury frequency</span><span className="tnum text-slate-300">{d.injury===1?"standard":(d.injury>1?"+":"")+Math.round((d.injury-1)*100)+"%"}</span></div>
+              <div className="flex justify-between"><span>Board patience</span><span className="tnum text-slate-300">{d.boardPatience===1?"standard":(d.boardPatience>1?"more forgiving":"quicker to sack")}</span></div>
+              <div className="text-slate-500 pt-1">Difficulty changes the pressure on you, not the AI's arithmetic — rivals don't get to cheat.</div>
+            </div>
+          </>; })()}
+        </div>
+
+        <div className="p-3 border-t border-[#1d2940] flex items-center justify-between gap-2">
+          <button onClick={resetAll} className="text-xs text-slate-400 hover:text-slate-200 px-2 py-1">Reset to defaults</button>
+          <div className="text-[11px] text-slate-500 text-right">
+            {anyStaged ? "⏳ Staged changes apply at the next season rollover." : "Rules are saved per save-game."}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Badge({children}){ return <span className="px-2 py-1 rounded bg-[#16213a] text-slate-200 tnum text-xs">{children}</span>; }
 // Deterministic club colours + a tiny crest, so every club has a visual identity.
 // Derived from the club id (stable), or from club.colors if the user ever sets one.
@@ -4035,6 +4633,15 @@ function Splash({onStart, onBack}){
   const [sel, setSel] = useState(0);
   const [country, setCountry] = useState(0);
   const [seed, setSeed] = useState("");
+  const [legs, setLegs] = useState(2);
+  const [ptsWin, setPtsWin] = useState(3);
+  const [subsN, setSubsN] = useState(3);
+  const [difficulty, setDifficulty] = useState("normal");
+  const [shuffle, setShuffle] = useState(false);
+  const pickBtn = (v, cur, on, lab) => (
+    <button key={String(v)} onClick={()=>on(v)}
+      className={"px-2.5 py-1 rounded text-xs font-semibold "+(v===cur?"bg-emerald-500 text-slate-900":"bg-[#16213a] text-slate-300 hover:bg-[#1c2c4a]")}>{lab}</button>
+  );
   // global club id = country*CLUBS_PER_COUNTRY + local index
   const base = country * CLUBS_PER_COUNTRY;
   const tierLabel = ["top flight","second tier","third tier","fourth tier"];
@@ -4068,9 +4675,40 @@ function Splash({onStart, onBack}){
         <input value={seed} onChange={e=>setSeed(e.target.value)} placeholder="Optional seed (number)"
           className="bg-[#101a30] border border-[#1d2940] rounded-lg px-3 py-2 text-sm flex-1" />
       </div>
+
+      {/* Starting rules — the rest of the book lives under 📋 Rules once you're in. */}
+      <div className="bg-[#101a30] border border-[#1d2940] rounded-xl p-4 mb-4 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-slate-300 w-32">Fixtures</span>
+          {pickBtn(2, legs, setLegs, "38 — home & away")}
+          {pickBtn(1, legs, setLegs, "19 — once each")}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-slate-300 w-32">Points for a win</span>
+          {pickBtn(3, ptsWin, setPtsWin, "3")}
+          {pickBtn(2, ptsWin, setPtsWin, "2 (old system)")}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-slate-300 w-32">Substitutions</span>
+          {pickBtn(3, subsN, setSubsN, "3")}
+          {pickBtn(5, subsN, setSubsN, "5")}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-slate-300 w-32">Difficulty</span>
+          {DIFFICULTY_ORDER.map(k=>pickBtn(k, difficulty, setDifficulty, DIFFICULTIES[k].label))}
+        </div>
+        <div className="text-xs text-slate-500">{DIFFICULTIES[difficulty].blurb}</div>
+        <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer pt-1">
+          <input type="checkbox" checked={shuffle} onChange={e=>setShuffle(e.target.checked)} />
+          🔀 Squad shuffle — redistribute every senior player in the world before kick-off
+        </label>
+        <div className="text-xs text-slate-500">Football has no draft, so this is the level-playing-field start: every squad is torn up and dealt out at random. Academies stay put.</div>
+      </div>
+
       <div className="flex gap-2">
         {onBack && <button onClick={onBack} className="px-4 py-3 rounded-xl bg-[#16213a] text-slate-200">Back</button>}
-        <button onClick={()=>onStart(sel, { seed: seed.trim()? (parseInt(seed,10)||hashStr(seed)) : null })}
+        <button onClick={()=>onStart(sel, { seed: seed.trim()? (parseInt(seed,10)||hashStr(seed)) : null,
+            difficulty, shuffle, rules:{ legs, pointsForWin:ptsWin, subs:subsN } })}
           className="flex-1 py-3 rounded-xl bg-emerald-500 text-slate-900 font-bold">
           Start as {ALL_CLUB_DEFS[sel][0]} {ALL_CLUB_DEFS[sel][1]}
         </button>
@@ -4301,6 +4939,32 @@ function Hub({G, commit, tShow, setTab}){
           </div>
         </div>
       </Card>
+
+      {/* The media are waiting. Every answer trades the dressing room against the stands. */}
+      {G.presser && (()=>{
+        const spec = PRESSERS[G.presser.kind]; if(!spec) return null;
+        const subject = G.presser.pid!=null ? G.players[G.presser.pid] : null;
+        const q = typeof spec.q === "function" ? spec.q(user, subject) : spec.q;
+        return (
+          <Card className="border-sky-700/60">
+            <div className="text-xs font-semibold text-sky-300 mb-1">🎤 Press conference</div>
+            <div className="text-sm text-slate-100 mb-2">{q}</div>
+            <div className="grid sm:grid-cols-3 gap-2">
+              {spec.options.map((o,i)=>(
+                <button key={i} onClick={()=>{ answerPresser(G,i); commit(G); tShow("🎤 Quote filed"); }}
+                  className="text-left px-3 py-2 rounded-lg bg-[#16213a] hover:bg-[#1c2c4a] border border-[#243152]">
+                  <div className="text-sm font-semibold">{o.label}</div>
+                  <div className="text-[11px] mt-0.5 flex gap-2 flex-wrap">
+                    <span className={o.morale>0?"text-emerald-400":o.morale<0?"text-rose-400":"text-slate-500"}>squad {o.morale>0?"+":""}{o.morale||0}</span>
+                    <span className={o.fans>0?"text-emerald-400":o.fans<0?"text-rose-400":"text-slate-500"}>fans {o.fans>0?"+":""}{o.fans||0}</span>
+                    {!!o.board && <span className={o.board>0?"text-emerald-400":"text-rose-400"}>board {o.board>0?"+":""}{o.board}</span>}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </Card>
+        );
+      })()}
 
       {user.rivalId!=null && G.clubs[user.rivalId] && (()=>{
         const rival = G.clubs[user.rivalId];
@@ -5506,7 +6170,10 @@ function Transfers({G, commit, tShow}){
   const squad = Object.values(G.players).filter(p=>p.teamId===user.id && !p.youth);
   const offers = G.transferOffers||[];
   const [sellOnDeal, setSellOnDeal] = useState(false);   // give seller 20% sell-on for -25% fee
-  const feeFor = p => round(p.value * 1.15 * (sellOnDeal?0.75:1) *10)/10;
+  // What a selling club wants from YOU. Difficulty's `rivalBid` is the market pushing
+  // back: on a harder setting rival interest drives the asking price up, so the same
+  // player costs more (and on Casual, clubs are readier to deal).
+  const feeFor = p => round(p.value * 1.15 * (1 + (diff(G).rivalBid-1)*0.35) * (sellOnDeal?0.75:1) *10)/10;
   const doBuy = p => { const fee=feeFor(p); const r=buyPlayer(G,p,fee,sellOnDeal?{sellOnPct:20}:{}); if(r.ok){ commit(G); tShow(`Signed ${p.name}`); } else tShow(r.msg); };
   const doRelease = p => { if(p.release==null) return; const r=buyPlayer(G,p,p.release,{via:"release"}); if(r.ok){ commit(G); tShow(`Triggered ${p.name}'s release clause`); } else tShow(r.msg); };
   const doSell = p => {
@@ -7782,6 +8449,9 @@ function PlayerModal({p, G, onClose}){
             {p.wantsOut&&<div className="text-xs mt-0.5 text-orange-400">✈️ Has requested a transfer</div>}
             {p.listed&&!p.wantsOut&&<div className="text-xs mt-0.5 text-indigo-300">🏷️ Transfer-listed</div>}
             {p.traits&&p.traits.length>0&&<div className="mt-1 flex flex-wrap gap-1">{p.traits.map(t=>TRAITS[t]&&<span key={t} className={"text-[11px] px-1.5 py-0.5 rounded "+(TRAITS[t].bad?"bg-red-900/40 text-red-300":"bg-[#16213a] text-slate-300")} title={TRAITS[t].bad?"Negative trait":"Special trait"}>{TRAITS[t].emoji} {TRAITS[t].name}</span>)}</div>}
+            {(()=>{ const pe=personalityOf(p); return (
+              <div className="mt-1"><span className="text-[11px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/25" title={pe.blurb}>{pe.icon} {pe.label}</span></div>
+            ); })()}
             {(isInjured(p)||isSuspended(p))&&<div className="text-xs mt-0.5">{isInjured(p)&&<span className="text-red-400">✚ {p.injury.type} ({p.injury.weeks}w)</span>}{isInjured(p)&&isSuspended(p)&&" · "}{isSuspended(p)&&<span className="text-orange-400">⛔ banned {p.susp} match{p.susp>1?"es":""}</span>}</div>}
           </div>
           <button onClick={onClose} className="text-slate-400">✕</button>
