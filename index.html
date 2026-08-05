@@ -4132,7 +4132,14 @@ function migrate(G){
       G.career.seasons.sort((a,b)=>b.season-a.season);
     }
     G.version = SAVE_VERSION;
-  }catch(e){}
+  }catch(e){
+    // Best-effort: a partial migration still beats a crash, so we keep the
+    // save and carry on. But swallowing this silently is how a corrupt
+    // career looks like a gameplay bug three sessions later — leave a trail,
+    // and stamp the save so the damage is visible after the fact.
+    console.error("[pocketgm] save migration failed; loading partially migrated save", e);
+    try{ G.migrationError = { message: String(e && e.message || e), at: Date.now(), from: G.version, to: SAVE_VERSION }; }catch(_){}
+  }
   return G;
 }
 function exportSave(G){
@@ -5487,11 +5494,16 @@ function PlayersBrowser({G}){
   const [q, setQ] = useState("");
   const [posF, setPosF] = useState("ALL");
   const [sort, setSort] = useState("ovr");
-  let list = Object.values(G.players).filter(p=>p.teamId!=null);
-  if(q) list = list.filter(p=>p.name.toLowerCase().includes(q.toLowerCase()));
-  if(posF!=="ALL") list = list.filter(p=>(p.positions||[p.pos]).includes(posF));
-  list.sort((a,b)=> sort==="ovr"?b.ovr-a.ovr : sort==="pot"?b.pot-a.pot : sort==="age"?a.age-b.age : b.value-a.value);
-  list = list.slice(0,200);
+  // Scanning and sorting every player in the world on each keystroke is the
+  // slowest thing on this screen once the save has a few seasons of squads in
+  // it. Recompute only when something that actually changes the list changes.
+  const list = React.useMemo(()=>{
+    let l = Object.values(G.players).filter(p=>p.teamId!=null);
+    if(q) l = l.filter(p=>p.name.toLowerCase().includes(q.toLowerCase()));
+    if(posF!=="ALL") l = l.filter(p=>(p.positions||[p.pos]).includes(posF));
+    l.sort((a,b)=> sort==="ovr"?b.ovr-a.ovr : sort==="pot"?b.pot-a.pot : sort==="age"?a.age-b.age : b.value-a.value);
+    return l.slice(0,200);
+  }, [G, q, posF, sort]);
   return (
     <div className="space-y-3">
       <Card>
@@ -6160,14 +6172,21 @@ function Transfers({G, commit, tShow}){
   const windowOpen = transferWindowOpen(G);
   const [tab, setTab] = useState("buy");
   const [q, setQ] = useState("");
-  // BUY: other clubs' players, affordable-ish
-  let market = Object.values(G.players).filter(p=>p.teamId!=null && p.teamId!==user.id);
-  if(q) market = market.filter(p=>p.name.toLowerCase().includes(q.toLowerCase()));
-  market.sort((a,b)=>b.ovr-a.ovr);
-  market = market.slice(0,80);
+  // BUY: other clubs' players, affordable-ish.
+  // This screen walks the full player table five separate times (market, squad,
+  // and the three loan pools below). Left unmemoized that all re-ran on every
+  // keystroke in the search box and on every unrelated state flip on this tab.
+  const market = React.useMemo(()=>{
+    let m = Object.values(G.players).filter(p=>p.teamId!=null && p.teamId!==user.id);
+    if(q) m = m.filter(p=>p.name.toLowerCase().includes(q.toLowerCase()));
+    m.sort((a,b)=>b.ovr-a.ovr);
+    return m.slice(0,80);
+  }, [G, user.id, q]);
   // Senior squad only — academy players never count toward roster slots or
   // appear as loan-out candidates (they have to be promoted first, see loanOut).
-  const squad = Object.values(G.players).filter(p=>p.teamId===user.id && !p.youth);
+  const squad = React.useMemo(
+    ()=>Object.values(G.players).filter(p=>p.teamId===user.id && !p.youth),
+    [G, user.id]);
   const offers = G.transferOffers||[];
   const [sellOnDeal, setSellOnDeal] = useState(false);   // give seller 20% sell-on for -25% fee
   // What a selling club wants from YOU. Difficulty's `rivalBid` is the market pushing
@@ -6193,10 +6212,16 @@ function Transfers({G, commit, tShow}){
   const [swapTarget, setSwapTarget] = useState(null);   // AI player you want; opens the swap builder
   const doSwap = (myP, cash) => { const r=proposeSwap(G, myP.id, swapTarget.id, cash); if(r.ok){ commit(G); tShow(`Swap complete — ${swapTarget.name} signed`); setSwapTarget(null); } else tShow(r.msg); };
   // loan-out candidates: your own players (not already loaned), youngest/fringe first
-  const loanOutPool = squad.filter(p=>!isLoaned(p)).sort((a,b)=>(a.ovr-b.ovr)||(a.age-b.age)).slice(0,30);
+  const loanOutPool = React.useMemo(
+    ()=>squad.filter(p=>!isLoaned(p)).sort((a,b)=>(a.ovr-b.ovr)||(a.age-b.age)).slice(0,30),
+    [squad]);
   // loan-in candidates: AI fringe players (not in their XI), decent quality
-  const loanInPool = Object.values(G.players).filter(p=>p.teamId!=null && p.teamId!==user.id && !isLoaned(p) && p.ovr>=55 && !(G.clubs[p.teamId].xi||[]).includes(p.id)).sort((a,b)=>b.ovr-a.ovr).slice(0,60);
-  const myLoans = Object.values(G.players).filter(p=>isLoaned(p) && (p.loanOwner===user.id || p.teamId===user.id));
+  const loanInPool = React.useMemo(
+    ()=>Object.values(G.players).filter(p=>p.teamId!=null && p.teamId!==user.id && !isLoaned(p) && p.ovr>=55 && !(G.clubs[p.teamId].xi||[]).includes(p.id)).sort((a,b)=>b.ovr-a.ovr).slice(0,60),
+    [G, user.id]);
+  const myLoans = React.useMemo(
+    ()=>Object.values(G.players).filter(p=>isLoaned(p) && (p.loanOwner===user.id || p.teamId===user.id)),
+    [G, user.id]);
   return (
     <div className="space-y-3">
       <Card>
@@ -8653,9 +8678,40 @@ function SettingsModal({G, commit, tShow, onClose}){
   );
 }
 
+/* --------------------------- error boundary ---------------------------- */
+// Without this, any render-time throw unmounts the whole tree and leaves a
+// blank page — with the career still safe in IndexedDB but no way to reach it,
+// and no clue what broke. Catch it, say so, and offer the two things that
+// actually recover: reload, or copy the error before touching anything.
+class ErrorBoundary extends React.Component {
+  constructor(props){ super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err){ return { err }; }
+  componentDidCatch(err, info){ console.error("[pocketgm] render crash", err, info); }
+  render(){
+    if(!this.state.err) return this.props.children;
+    const msg = String(this.state.err && this.state.err.stack || this.state.err);
+    return (
+      <div className="max-w-2xl mx-auto p-6 text-slate-200">
+        <h1 className="text-xl font-bold mb-2">Something broke while drawing this screen.</h1>
+        <p className="text-sm text-slate-400 mb-4">
+          Your save is untouched — it lives in IndexedDB, not in this page. Reload to get
+          back in. If it keeps happening, export the save first and note what you were doing.
+        </p>
+        <div className="flex gap-2 mb-4">
+          <button className="px-3 py-2 rounded bg-sky-700 hover:bg-sky-600 text-sm font-semibold"
+                  onClick={()=>window.location.reload()}>Reload</button>
+          <button className="px-3 py-2 rounded bg-slate-700 hover:bg-slate-600 text-sm font-semibold"
+                  onClick={()=>{ try{ navigator.clipboard.writeText(msg); }catch(e){} }}>Copy error</button>
+        </div>
+        <pre className="text-xs whitespace-pre-wrap bg-[#0f1729] p-3 rounded overflow-auto max-h-64">{msg}</pre>
+      </div>
+    );
+  }
+}
+
 /* ----------------------------- mount ----------------------------------- */
 const _root = ReactDOM.createRoot(document.getElementById("root"));
-_root.render(<App />);
+_root.render(<ErrorBoundary><App /></ErrorBoundary>);
 </script>
 <script>
   // Transpile the JSX source with Babel standalone, then run it. (Same offline

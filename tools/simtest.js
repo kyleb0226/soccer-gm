@@ -28,6 +28,7 @@ const EXPORTS = [
   "DIFFICULTIES", "diff", "tableFor", "leaguePos", "transferWindowOpen",
   "COUNTRIES", "NUM_DIVS", "personalityOf", "PERSONALITIES", "answerPresser", "pickPresser",
   "shuffleSquads", "wageBill", "startNextSeason",
+  "simMatch",
 ];
 
 /* ------------------------------- load the app ---------------------------- */
@@ -67,6 +68,10 @@ function loadGame() {
       useCallback: f => f, useContext: () => noop,
       createContext: () => ({ Provider: noop, Consumer: noop }),
       Fragment: "fragment",
+      // The error boundary is a real class component, so `extends
+      // React.Component` has to resolve to something constructible even
+      // though no component is ever rendered here.
+      Component: class { constructor(props){ this.props = props; this.state = null; } setState(){} },
     },
     ReactDOM: { createRoot: () => ({ render: noop }) },
   };
@@ -166,13 +171,33 @@ const CHECKS = {
   // Substitutions and VAR must move the numbers they claim to.
   matchRules(A) {
     section("Match-day rules (subs, VAR)");
-    const goalsIn = r => {
-      const G = A.newGame(0, { seed: 21, rules: Object.assign({ legs: 1 }, r) });
-      simSeason(A, G);
-      return divClubs(G, 0, 0).reduce((s, c) => s + c.gf, 0);
+    // This used to sim two whole seasons and assert the VAR one scored fewer
+    // goals in one division. VAR only chalks off ~3.5% of goals (≈18 over a
+    // ~509-goal division) while season-to-season goal variance is roughly
+    // ±32 — so the signal sat inside the noise and the check failed about
+    // half the time on an untouched tree.
+    //
+    // Sample the match sim directly instead: same two clubs, same squads,
+    // hundreds of matches, so the 3.5% shows up far outside the noise. The
+    // disallowed-goal counter on the box is the mechanism itself.
+    const G = A.newGame(0, { seed: 21, rules: { legs: 1 } });
+    const [home, away] = divClubs(G, 0, 0);
+    // Only the disallowed-goal counter is asserted, not an aggregate
+    // goals-scored comparison: the sim does `hs -= varOff.h`, so chalking a
+    // goal off lowers the score *by construction*. Re-deriving that from
+    // sampled totals would just reintroduce the same coin flip at a smaller
+    // scale — 400 matches still leaves the 3.5% effect inside Poisson noise.
+    const chalkedOver = (varOn, matches) => {
+      A.setRule(G, "var", varOn);
+      let chalked = 0;
+      for (let i = 0; i < matches; i++) {
+        const box = A.simMatch(home, away, G.players, { G });
+        if (box.varOff) chalked += box.varOff.h + box.varOff.a;
+      }
+      return chalked;
     };
-    const off = goalsIn({ var: false }), on = goalsIn({ var: true });
-    ok(on < off, `VAR chalks goals off (${on} < ${off})`);
+    ok(chalkedOver(false, 400) === 0, "no goals chalked off with VAR off");
+    ok(chalkedOver(true, 400) > 0, "VAR chalks goals off when enabled");
 
     const benchUsed = G => {
       const club = G.clubs[0];
