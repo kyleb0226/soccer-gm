@@ -28,7 +28,7 @@ const EXPORTS = [
   "DIFFICULTIES", "diff", "tableFor", "leaguePos", "transferWindowOpen",
   "COUNTRIES", "NUM_DIVS", "personalityOf", "PERSONALITIES", "answerPresser", "pickPresser",
   "shuffleSquads", "wageBill", "startNextSeason",
-  "simMatch", "monthCount", "potmOn", "scoringStreakTick",
+  "simMatch", "beginAutoManage", "endAutoManage", "autoSimSeason", "monthCount", "potmOn", "scoringStreakTick",
 ];
 
 /* ------------------------------- load the app ---------------------------- */
@@ -327,7 +327,23 @@ const CHECKS = {
     A.scoringStreakTick(G, p, 0);
     ok(!p.gStreak, "a blank ends it");
   },
+  // Auto-sim seasons leaves a report row per season for the "While you were away" card.
+  simReport(A) {
+    section("Auto-sim report");
+    const G = A.newGame(0, { seed: 52, rules: { legs: 1 } });
+    const s0 = G.season;
+    G.simReport = [];
+    A.beginAutoManage(G);
+    try { A.autoSimSeason(G); A.autoSimSeason(G); } finally { A.endAutoManage(G); }
+    const rows = G.simReport;
+    ok(rows.length === 2 && G.season === s0 + 2, `two seasons, two rows (${rows.map(r => r.season).join(", ")})`);
+    ok(rows.every(r => r.w + r.d + r.l === r.of - 1), `each row is a complete season (${rows.map(r => `${r.w}-${r.d}-${r.l}`).join(", ")})`);
+    ok(rows.every(r => r.pos >= 1 && r.pos <= r.of), "with a real league position");
+    ok(rows.every(r => typeof r.divAfter === "number" && Math.abs(r.divAfter - r.div) <= 1), "and where the club went next");
+    ok(G.phase === "regular" && G.clubs[G.userTeamId].userControlled, "control is handed back at a clean season start");
+  },
 };
+
 
 /* ---------------------------------- main --------------------------------- */
 const want = process.argv[2];

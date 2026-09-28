@@ -44,7 +44,9 @@ for that sport, not translated knob-for-knob.
 | Individual streaks | hit streaks | scoring runs (`p.gStreak`) | point streaks |
 | Player compare | Players tab | Players tab (`CompareCard`) | `CompareModal` |
 | Sim to the deadline | Hub "Sim to Deadline" | Hub "Skip 7 weeks" | header "To deadline" |
-| One-press full-year / multi-season sim | — (offseason lives in `OffseasonHub`) | ✓ (auto-manage) | `simFullYear` (`autoManage`) |
+| Multi-season sim (club runs itself) | `simToNextSeason` — Hub "Sim ahead" 1/5/10 | `SimYears` "Auto-sim seasons" (1–100) | `simYears` — header "Sim year" / 5 / 10 |
+| "While you were away" report | `SimReport` (`G.simReport`) | `SimReportCard` (`G.simReport`) | `SimReportCard` (`G.simReport`) |
+| Job safe during long sims | ✓ (Settings → "Job risk in long sims") | ✓ (sacking muted) | ✓ (`G._simAway`) |
 | HoF with voting ballot | ✓ | inducted on retirement | inducted after `HOF_WAIT` |
 | Draft | ✓ (+ college, HS, IFA) | — (youth academy) | ✓ |
 
@@ -96,7 +98,10 @@ A quick index to the systems this file doesn't otherwise describe — grep the f
 - **History:** Hall of Fame (`refreshHofEntry`), records (`updateRecords`, `G.records`), all-time table,
   club honours/trophy cabinets, award history (`G.awardHistory`: POTS, Golden Boot, Team of the Season,
   Ballon d'Or), the news wire (`logNews`, capped 250).
-- **Multi-season sim:** `autoSimSeason` + auto-manage of the user's club ("Simulate N years").
+- **Multi-season sim:** `autoSimSeason` + auto-manage of the user's club ("Auto-sim seasons", 1–100).
+  Each season now leaves a `simReportRow` (league, position, W-D-L, points, honours, top scorer, and after the
+  rollover whether the club went up/down) on `G.simReport`, shown as `SimReportCard` ("While you were away") on the
+  Hub until dismissed. `simReport` harness check.
 
 ## Monthly awards, scoring runs, rumours, compare (2026-09 batch)
 Ported from the sibling games and written for football.

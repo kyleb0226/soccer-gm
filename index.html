@@ -2323,8 +2323,23 @@ function endAutoManage(G){
 function autoSimSeason(G){
   let guard = 0;
   while(G.phase==="regular" && guard++ < 80) simRound(G);
+  const row = simReportRow(G);          // read the finished season BEFORE the rollover resets it
   startNextSeason(G);
+  const u = G.clubs[G.userTeamId];
+  if(row){ row.divAfter = u.div; (G.simReport = G.simReport || []).push(row); }
   G.pendingSack = false; G.jobOffers = null;   // belt-and-braces: never interrupt a bulk sim
+}
+// One line per auto-simmed season for the "While you were away" card: finish, record,
+// trophies, the club's top scorer, and (filled after the rollover) where it goes next.
+function simReportRow(G){
+  const u = G.clubs[G.userTeamId]; if(!u) return null;
+  const table = tableFor(G, u.div, u.country||0);
+  const squad = teamPlayersOf(G.players, u.id).filter(p=>!p.youth);
+  const top = squad.slice().sort((a,b)=>(b.stats.G||0)-(a.stats.G||0))[0];
+  return { season:G.season, div:u.div, country:u.country||0, pos:table.findIndex(c=>c.id===u.id)+1, of:table.length,
+    w:u.w, d:u.d, l:u.l, pts:u.pts,
+    honours:(u.honours||[]).filter(h=>h.season===G.season).map(h=>h.label),
+    top: top && (top.stats.G||0)>0 ? { name:top.name, g:top.stats.G } : null };
 }
 
 /* ----------------------------- live match ------------------------------ */
@@ -5019,6 +5034,7 @@ function SimYears({G, commit, tShow}){
     if(run || busyRef.current) return;
     const total = clamp(parseInt(years,10)||1, 1, 100);
     stopRef.current = false; busyRef.current = true;
+    G.simReport = [];
     beginAutoManage(G);
     let done = 0;
     const snap = () => ({ done, total, md:G.phase==="regular"?G.day+1:0, mdTotal:G.schedule.length, season:G.season, stopping:stopRef.current });
@@ -5079,6 +5095,43 @@ function SimYears({G, commit, tShow}){
     </>
   );
 }
+// After an auto-sim: one row per season for your club.
+function SimReportCard({G, commit}){
+  const rows = G.simReport||[];
+  if(!rows.length) return null;
+  const W=rows.reduce((a,r)=>a+r.w,0), D=rows.reduce((a,r)=>a+r.d,0), L=rows.reduce((a,r)=>a+r.l,0);
+  const trophies=rows.reduce((a,r)=>a+r.honours.filter(h=>!/promot/i.test(h)).length,0);
+  return (
+    <Card>
+      <div className="flex items-center justify-between mb-2">
+        <div className="font-semibold">📼 While you were away — {rows[0].season}–{rows[rows.length-1].season}</div>
+        <button onClick={()=>{ G.simReport=[]; commit(G); }} className="text-xs text-slate-400 hover:text-slate-200">Dismiss</button>
+      </div>
+      <div className="text-sm text-slate-300 mb-2"><b className="tnum">{W}-{D}-{L}</b>{trophies?<span className="text-amber-300 font-semibold"> · 🏆 ×{trophies}</span>:null}</div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm tnum">
+          <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]">
+            <th className="text-left p-1">Season</th><th className="text-left p-1">League</th><th className="p-1">Pos</th><th className="p-1">W-D-L</th><th className="p-1">Pts</th><th className="text-left p-1">Honours</th><th className="text-left p-1">Top scorer</th><th className="p-1">Next</th>
+          </tr></thead>
+          <tbody>
+            {rows.map(r=>(
+              <tr key={r.season} className={"border-b border-[#15203a] "+(r.honours.length?"bg-amber-500/10":"")}>
+                <td className="p-1">{r.season}</td>
+                <td className="p-1 text-xs text-slate-400">{divName(r.country, r.div)}</td>
+                <td className="p-1 text-center">{ordinal(r.pos)}</td>
+                <td className="p-1 text-center">{r.w}-{r.d}-{r.l}</td>
+                <td className="p-1 text-center">{r.pts}</td>
+                <td className="p-1 text-xs text-amber-200">{r.honours.join(" · ")||"—"}</td>
+                <td className="p-1 text-xs text-slate-300">{r.top?`${r.top.name} (${r.top.g})`:"—"}</td>
+                <td className={"p-1 text-center text-xs "+(r.divAfter<r.div?"text-emerald-300":r.divAfter>r.div?"text-rose-300":"text-slate-500")}>{r.divAfter<r.div?"⬆ up":r.divAfter>r.div?"⬇ down":"—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
 function Hub({G, commit, tShow, setTab}){
   const user = G.clubs[G.userTeamId];
   const round = G.schedule[G.day] || [];
@@ -5092,6 +5145,7 @@ function Hub({G, commit, tShow, setTab}){
   return (
     <div className="space-y-4">
       {live && <LiveMatch G={G} commit={commit} tShow={tShow} onClose={()=>setLive(false)} />}
+      <SimReportCard G={G} commit={commit} />
       <Card>
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-start gap-2">
