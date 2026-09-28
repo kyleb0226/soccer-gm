@@ -28,7 +28,7 @@ const EXPORTS = [
   "DIFFICULTIES", "diff", "tableFor", "leaguePos", "transferWindowOpen",
   "COUNTRIES", "NUM_DIVS", "personalityOf", "PERSONALITIES", "answerPresser", "pickPresser",
   "shuffleSquads", "wageBill", "startNextSeason",
-  "simMatch",
+  "simMatch", "monthCount", "potmOn", "scoringStreakTick",
 ];
 
 /* ------------------------------- load the app ---------------------------- */
@@ -289,6 +289,43 @@ const CHECKS = {
     ok(keepers.length === 0, "every club still has a goalkeeper", keepers.length ? `${keepers.length} without` : "");
     simSeason(A, G);
     ok(G.clubs[0].pld === 19, "the shuffled world plays a full season");
+  },
+
+  // Player of the Month, scoring runs and January transfer talk.
+  monthly(A) {
+    section("Player of the Month + scoring runs + rumours");
+    const G = A.newGame(0, { seed: 44 });
+    simSeason(A, G);
+    const n = A.monthCount(G);
+    const potm = G.potm || [];
+    const tops = A.COUNTRIES.map((_, ci) => potm.filter(x => x.ci === ci && x.div === 0).length);
+    ok(tops.every(c => c === n), `every top flight names ${n} monthly winners (${tops.join("/")})`);
+    const u = G.clubs[G.userTeamId];
+    const own = potm.filter(x => x.ci === (u.country || 0) && x.div === u.div).length;
+    ok(own === n, `the user's own division is covered (${own})`);
+    const counted = Object.values(G.players).reduce((a, p) => a + (p.potm || 0), 0);
+    ok(counted === potm.length, `awards land on the players (${counted} of ${potm.length})`);
+    ok(!Object.values(G.players).some(p => p._ms), "month snapshots are cleared at the season's end");
+    const gs = G.records && G.records.goalStreak;
+    ok(!!gs && gs.len >= 4 && gs.len <= 20, `a record scoring run is tracked (${gs ? gs.len + " by " + gs.name : "none"})`);
+    const runs = Object.values(G.players).filter(p => p.gStreak);
+    ok(runs.every(p => p.gStreak <= (p.bestGStreak || 0)), "live runs never exceed a player's best");
+    const talk = (G.news || []).filter(x => x.type === "rumour" && x.season === G.season);
+    ok(talk.length >= 1 && talk.length <= 12, `transfer talk around the January window (${talk.length})`);
+
+    // the rule toggle turns it off entirely
+    const H = A.newGame(0, { seed: 45, rules: { legs: 1 } });
+    H.settings = H.settings || {}; H.settings.potm = false;
+    simSeason(A, H);
+    ok(!(H.potm || []).length, "switched off, nobody is awarded");
+
+    // unit: an appearance without a goal ends the run
+    const p = Object.values(G.players).find(x => x.teamId != null);
+    delete p.gStreak;
+    A.scoringStreakTick(G, p, 1); A.scoringStreakTick(G, p, 2);
+    ok(p.gStreak === 2, "two games with a goal = a run of two");
+    A.scoringStreakTick(G, p, 0);
+    ok(!p.gStreak, "a blank ends it");
   },
 };
 

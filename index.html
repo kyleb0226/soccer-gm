@@ -6,8 +6,10 @@
 <title>Pocket GM — Soccer</title>
 <link rel="manifest" href="manifest.json" />
 <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<link rel="icon" href="icon-192.png" />
 <meta name="theme-color" content="#0b1220" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Soccer GM" />
 <script src="vendor/react.production.min.js"></script>
@@ -18,6 +20,9 @@
   html { background:#0b1220; }
   body { background:#0b1220; color:#e5e7eb;
     -webkit-text-size-adjust:100%; }
+  /* Installed to the home screen, iOS draws under the notch and the home indicator. */
+  body { padding: env(safe-area-inset-top) env(safe-area-inset-right)
+                 env(safe-area-inset-bottom) env(safe-area-inset-left); }
   ::-webkit-scrollbar{width:10px;height:10px}
   ::-webkit-scrollbar-thumb{background:#27324a;border-radius:6px}
   ::-webkit-scrollbar-track{background:#0b1220}
@@ -1182,6 +1187,7 @@ function applyMatch(home, away, hs, as, players, box, opts){
   const etg = box.etg || { h:0, a:0 };
   box.hScorers = awardGoals(H, hs, home, etg.h);
   box.aScorers = awardGoals(A, as, away, etg.a);
+  if(G && !isCup && !isCont){ streaksForSide(G, H, box.hScorers); streaksForSide(G, A, box.aScorers); }
   // missed penalty: a flavor event that doesn't change the scoreline
   [[H,home],[A,away]].forEach(([side,club])=>{
     const taker = club.setPieces && club.setPieces.pen ? side.find(o=>o.p.id===club.setPieces.pen) : null;
@@ -1921,6 +1927,162 @@ function playContCupRound(G){
 }
 
 /* ----------------------------- sim loop -------------------------------- */
+/* ----------------------- Player of the Month + scoring runs -----------------------
+ * Brought over from the baseball and hockey games, written for football.
+ *
+ * PLAYER OF THE MONTH — the season's league calendar is split into "months"
+ * (August–May, fewer when a one-leg season is too short to hold ten), and each
+ * nation's TOP FLIGHT names a Player of the Month, plus the user's own division
+ * when it sits lower. It reads the league-only line (`compStats.L`) so a cup
+ * hat-trick doesn't win a league award. Only players in those divisions are
+ * snapshotted (a six-number array, cleared when the month closes), so the save
+ * cost is bounded. Toggle: Rules → Match → Player of the Month.
+ *
+ * SCORING RUNS — "scored in N consecutive league appearances". An appearance
+ * without a goal ends the run; missing a match (injury, rotation) doesn't.
+ * Fed from the two places a league match is applied (applyMatch for simmed
+ * games, liveFinish for the watched one). `p.gStreak` is deleted at zero, so
+ * only players actually on a run carry the field.
+ * ------------------------------------------------------------------------- */
+const SEASON_MONTHS = ["August","September","October","November","December","January","February","March","April","May"];
+function potmOn(G){ return !(G && G.settings && G.settings.potm===false); }
+function monthCount(G){ return clamp(Math.round((G.schedule||[]).length/4), 4, SEASON_MONTHS.length); }
+function monthIdxOf(G){ const n=monthCount(G), len=Math.max(1,(G.schedule||[]).length); return Math.min(n-1, Math.floor(G.day*n/len)); }
+function monthName(G, i){ return SEASON_MONTHS[Math.min(SEASON_MONTHS.length-1, Math.floor(i*SEASON_MONTHS.length/monthCount(G)))]; }
+// Which divisions hand out a monthly award: every top flight, and the user's own.
+function potmDivs(G){
+  const u = G.clubs[G.userTeamId];
+  const set = new Set(COUNTRIES.map((_,ci)=>ci+":0"));
+  if(u) set.add((u.country||0)+":"+u.div);
+  return set;
+}
+const MS_KEYS = ["App","G","A","CS","ratingSum","ratingN"];
+function snapshotMonthLines(G){
+  const divs = potmDivs(G);
+  Object.values(G.players).forEach(p=>{
+    const c = p.teamId!=null ? G.clubs[p.teamId] : null;
+    if(!c || p.youth || !divs.has((c.country||0)+":"+c.div)){ if(p._ms) delete p._ms; return; }
+    const L = (p.compStats&&p.compStats.L)||{};
+    p._ms = MS_KEYS.map(k=>+(L[k]||0));
+  });
+  G._monthStartDay = G.day;
+}
+function monthLineOf(p){
+  const L = (p.compStats&&p.compStats.L)||{}, o = p._ms||[0,0,0,0,0,0], d={};
+  MS_KEYS.forEach((k,i)=>{ d[k] = (+(L[k]||0)) - o[i]; });
+  return d;
+}
+function potmScore(p, d){
+  const r = d.ratingN ? d.ratingSum/d.ratingN : 0;
+  const def = p.pos==="GK" || ["CB","RB","LB","RWB","LWB"].includes(p.pos);
+  return r*2.5 + d.G*0.55 + d.A*0.3 + (def ? d.CS*0.35 : 0);
+}
+function finishSoccerMonth(G, m){
+  if(!potmOn(G)) return;
+  const divs = potmDivs(G), minApps = Math.max(2, Math.round(monthCount(G)>=8 ? 3 : 2));
+  const best = {};
+  Object.values(G.players).forEach(p=>{
+    if(!p._ms || p.teamId==null) return;
+    const c = G.clubs[p.teamId]; if(!c) return;
+    const key = (c.country||0)+":"+c.div; if(!divs.has(key)) return;
+    const d = monthLineOf(p); if(d.ratingN < minApps) return;
+    const s = potmScore(p, d);
+    if(!best[key] || s>best[key].s) best[key] = { p, d, s };
+  });
+  G.potm = G.potm || [];
+  const u = G.clubs[G.userTeamId]||{};
+  Object.entries(best).forEach(([key, {p, d}])=>{
+    const [ci, div] = key.split(":").map(Number);
+    if(G.potm.some(x=>x.m===m && x.ci===ci && x.div===div)) return;
+    const club = G.clubs[p.teamId];
+    const r = d.ratingN ? (d.ratingSum/d.ratingN).toFixed(2) : "—";
+    const line = `${d.App} apps · ${d.G} G · ${d.A} A · ${r} avg`;
+    G.potm.push({ m, ci, div, id:p.id, name:p.name, pos:p.pos, abbr:club.abbr, line });
+    p.potm = (p.potm||0) + 1;
+    const mine = p.teamId===G.userTeamId;
+    if(mine || (ci===(u.country||0) && (div===0 || div===u.div)))
+      logNews(G, "award", `📅 ${monthName(G,m)} ${divName(ci,div)} Player of the Month: ${p.name} (${club.abbr}) — ${line}`, mine?G.userTeamId:club.id);
+  });
+}
+// Called at the top of each league matchday: closes the month the calendar just left.
+function tickSoccerMonth(G){
+  if(G.phase!=="regular") return;
+  const m = monthIdxOf(G);
+  if(G._month==null){ G._month = m; snapshotMonthLines(G); return; }
+  if(m!==G._month){ finishSoccerMonth(G, G._month); G._month = m; snapshotMonthLines(G); }
+}
+function closeSoccerMonth(G){
+  if(G._month!=null) finishSoccerMonth(G, G._month);
+  G._month = null; G._monthStartDay = null;
+  Object.values(G.players).forEach(p=>{ if(p._ms) delete p._ms; });
+}
+
+// One league appearance: `goals` is how many he scored in it.
+function scoringStreakTick(G, p, goals){
+  if(!G || !p) return;
+  if(!(goals>0)){ if(p.gStreak) delete p.gStreak; return; }
+  p.gStreak = (p.gStreak||0) + 1;
+  if(p.gStreak > (p.bestGStreak||0)) p.bestGStreak = p.gStreak;
+  G.records = G.records || { players:{}, biggestWin:null };
+  const rec = G.records.goalStreak;
+  const club = G.clubs[p.teamId];
+  const isRecord = !rec || p.gStreak > rec.len;
+  if(isRecord) G.records.goalStreak = { len:p.gStreak, id:p.id, name:p.name, club:club?club.abbr:"—", season:G.season };
+  const n = p.gStreak, top = club && club.div===0, mine = p.teamId===G.userTeamId;
+  if((mine && (n===4 || n>=6)) || (top && (n===7 || n===10 || n>=12)))
+    logNews(G, "streak", `🔥 ${p.name} (${club?club.abbr:"—"}) has scored in ${n} straight league games${isRecord && n>=6 ? " — a new league record!" : ""}`, mine?G.userTeamId:(club?club.id:null));
+}
+// A simmed league match: `side` is the appeared list [{p}], `scorers` its goal events.
+function streaksForSide(G, side, scorers){
+  const g = {}; (scorers||[]).forEach(s=>{ g[s.id]=(g[s.id]||0)+1; });
+  side.forEach(o=>scoringStreakTick(G, o.p, g[o.p.id]||0));
+}
+
+// Transfer talk. Runs through the January window (and the fortnight before it
+// opens) — links built from real club finances and player value, not noise.
+function tickTransferRumours(G){
+  if(G.phase!=="regular") return;
+  if(G.settings && G.settings.events===false) return;
+  const n = G.schedule.length, open = Math.round(n*0.41)-2, shut = Math.round(n*0.48);
+  if(G.day < open || G.day > shut) return;
+  if(!chance(0.75)) return;
+  const u = G.clubs[G.userTeamId];
+  const clubsIn = (ci, div) => G.clubs.filter(c=>(c.country||0)===ci && c.div===div);
+  const ci = chance(0.6) ? (u.country||0) : rint(0, NUM_COUNTRIES-1);
+  const top = clubsIn(ci, 0);
+  if(!top.length) return;
+  const rich = top.slice().sort((a,b)=>b.budget-a.budget).slice(0,6);
+  const buyer = rich[rint(0, rich.length-1)];
+  const r = _rng();
+  let msg=null, subj=null, tid=null;
+  if(r<0.3){
+    // one of the user's best players is being watched
+    const mine = teamPlayersOf(G.players, G.userTeamId).filter(p=>!p.youth && !isLoaned(p) && p.ovr>=68-u.div*4).sort((a,b)=>b.value-a.value).slice(0,3);
+    const p = mine[rint(0, Math.max(0, mine.length-1))];
+    if(p && buyer.id!==G.userTeamId){ subj=p.id; tid=G.userTeamId; msg=`🗞️ ${buyer.name} have sent scouts to watch your ${p.pos} ${p.name}. Expect a call if the price is right.`; }
+  } else if(r<0.55){
+    const wants = Object.values(G.players).filter(p=>p.wantsOut && p.teamId!=null && p.teamId!==G.userTeamId && p.ovr>=66);
+    const p = wants.length ? wants[rint(0, wants.length-1)] : null;
+    if(p){ const c=G.clubs[p.teamId]; subj=p.id; tid=c.id; msg=`🗞️ ${p.name} wants out of ${c.name} — agents are sounding out ${buyer.name}.`; }
+  }
+  if(!msg){
+    // a rich club linked with a star at a smaller club
+    const lower = G.clubs.filter(c=>c.id!==buyer.id && c.id!==G.userTeamId && (c.country||0)===ci && c.budget < buyer.budget*0.6);
+    const pool = [];
+    lower.forEach(c=>teamPlayersOf(G.players, c.id).forEach(p=>{ if(!p.youth && !isLoaned(p) && p.age<=29 && p.ovr>=70) pool.push(p); }));
+    pool.sort((a,b)=>b.value-a.value);
+    const p = pool[rint(0, Math.min(7, pool.length-1))];
+    if(!p) return;
+    const c = G.clubs[p.teamId];
+    subj=p.id; tid=c.id;
+    msg=`🗞️ ${buyer.name} are ${pick(["preparing a bid for","monitoring","in talks over","ready to test the water for"])} ${c.abbr}'s ${p.pos} ${p.name} (${p.ovr}, valued ${money(p.value)}).`;
+  }
+  G._rumourRecent = G._rumourRecent || [];
+  if(G._rumourRecent.includes(subj)) return;
+  G._rumourRecent.push(subj); if(G._rumourRecent.length>6) G._rumourRecent.shift();
+  logNews(G, "rumour", msg, tid);
+}
+
 function simRound(G){
   if(G.phase!=="regular") return;
   // one matchday = one team index (membership can't change mid-round)
@@ -1928,6 +2090,7 @@ function simRound(G){
 }
 function simRoundInner(G){
   const round = G.schedule[G.day]; if(!round) return;
+  tickSoccerMonth(G);   // Player of the Month at each month boundary
   // squad rotation for this matchday's league games (AI always; user if opted in)
   rotateForMatchday(G, false);
   // tactic context for the user's club (its chosen formation/tactic already on the club)
@@ -2002,6 +2165,7 @@ function simRoundInner(G){
   // DEADLINE DAY: the final matchday of the January window (day 21) triggers a late
   // flurry of AI business and one last round of bids for the user's players.
   if(G.day===_janShut) deadlineDay(G);
+  tickTransferRumours(G);
   // the media want a word (never more than one open, and not every week)
   if(G.settings && G.settings.pressers!==false){
     const _pr = pickPresser(G);
@@ -2273,6 +2437,7 @@ function liveFinish(G, M){
   let motm=null, motmR=0;
   ids.forEach(id=>{ const p=players[id]; if(!p)return; const slot=M.slotOf[id], side=M.sideOf[id]; const scored=side==="H"?M.hs:M.as, conceded=side==="H"?M.as:M.hs; const result=scored>conceded?1:scored<conceded?-1:0; let r=6.3+(result>0?0.4:result<0?-0.3:0)+0.95*(M.gBy[id]||0)+0.55*(M.aBy[id]||0); if(slot==="GK")r+=clamp(Math.min(p.stats.Sv||0,6)*0.03,0,0.4); if(conceded===0&&(BAND[slot]<=2||slot==="GK"))r+=0.6; if(conceded>=3&&(BAND[slot]<=2||slot==="GK"))r-=0.5; r=clamp(r+gauss(0,0.35),4,10); p.stats.ratingSum+=r; p.stats.ratingN++; addCompL(p,"ratingSum",r); addCompL(p,"ratingN"); p.form=p.form==null?r:+(p.form*0.7+r*0.3).toFixed(2); if(r>motmR){motmR=r;motm=p;} });
   if(motm){ motm.stats.MOTM++; addCompL(motm,"MOTM"); }
+  ids.forEach(id=>scoringStreakTick(G, players[id], M.gBy[id]||0));
   if(!G.settings||G.settings.morale!==false){ ids.forEach(id=>{ const p=players[id]; if(!p)return; const side=M.sideOf[id]; const result=(side==="H"?M.hs-M.as:M.as-M.hs); p.morale=clamp((p.morale==null?70:p.morale)+(result>0?2.5:result<0?-2.5:0.5),0,100); }); }
   home.pld++; away.pld++; home.gf+=M.hs; home.ga+=M.as; away.gf+=M.as; away.ga+=M.hs;
   const _wp = rules(G).pointsForWin;
@@ -2307,6 +2472,7 @@ function liveSub(club, players, outId, inId){
 
 /* ----------------------------- offseason ------------------------------- */
 function finalizeSeason(G){
+  closeSoccerMonth(G);   // the last month's award, before the season's lines are archived
   // league champion of every country
   G.champions = G.champions || [];
   COUNTRIES.forEach((C,ci)=>{
@@ -2492,6 +2658,7 @@ function computeAwards(G){
 // contracts, promotion/relegation, youth intake, finances, fresh fixtures + cup.
 function startNextSeason(G){
   ensureCareer(G); G.career.seasonsManaged++;
+  G.potm = []; G._rumourRecent = []; G._month = null;
   // finish the World Cup if the user never pressed play on the knockout stage
   if(intlOn(G) && (!G.intl || G.intl.lastPlayed !== G.season)) playIntlTournament(G);
   returnLoans(G);   // loanees go back to their owners before aging/contracts
@@ -4480,6 +4647,13 @@ function LeagueRulesModal({G, commit, tShow, onClose}){
                   force(x=>x+1); commit(G); tShow(v?"Press conferences ON":"Press conferences OFF"); }}
                 options={[[true,"On"],[false,"Off"]]}/>
             </RuleRow>
+            <RuleRow label="Player of the Month"
+              desc="Each top flight — and your own division — names a Player of the Month from its league games.">
+              <RulePick value={potmOn(G)}
+                onPick={v=>{ G.settings=G.settings||{}; G.settings.potm=v;
+                  force(x=>x+1); commit(G); tShow(v?"Monthly awards ON":"Monthly awards OFF"); }}
+                options={[[true,"On"],[false,"Off"]]}/>
+            </RuleRow>
           </>}
 
           {tab==="league" && <>
@@ -5490,10 +5664,71 @@ function LeagueTable({G}){
 }
 
 /* ----------------------------- players browser ------------------------- */
+// Side-by-side compare. The best value in each row is highlighted so the winner of
+// each category reads at a glance. Keepers compare on keeping; everyone else on
+// the outfield attributes (a mixed selection shows only the shared rows).
+function CompareCard({G, ids, onClear}){
+  const ps = ids.map(id=>G.players[id]).filter(Boolean);
+  if(!ps.length) return null;
+  const isGK = p => p.pos==="GK";
+  const allGK = ps.every(isGK), noGK = ps.every(p=>!isGK(p));
+  const S = p => p.stats||{};
+  const base = [
+    ["Age", p=>p.age, "low"], ["OVR", p=>p.ovr, "high"], ["POT", p=>p.pot, "high"],
+    ["Value", p=>p.value||0, "high", p=>money(p.value||0)],
+    ["Wage", p=>p.salary||0, "low", p=>money(p.salary||0)],
+    ["Years left", p=>p.years||0, "high"],
+    ["Apps", p=>S(p).App||0, "high"],
+    ["Avg rating", p=>avgRating(S(p)), "high", p=>S(p).ratingN?avgRating(S(p)).toFixed(2):"—"],
+  ];
+  const out = [["PAC",p=>p.pac,"high"],["SHO",p=>p.sho,"high"],["PAS",p=>p.pas,"high"],["DRI",p=>p.dri,"high"],["DEF",p=>p.def,"high"],["PHY",p=>p.phy,"high"],
+    ["Goals",p=>S(p).G||0,"high"],["Assists",p=>S(p).A||0,"high"],["Key passes",p=>S(p).KP||0,"high"]];
+  const gk = [["GK",p=>p.gk,"high"],["Clean sheets",p=>S(p).CS||0,"high"],["Saves",p=>S(p).Sv||0,"high"],["Conceded",p=>S(p).GA||0,"low"]];
+  const metrics = base.concat(allGK ? gk : noGK ? out : []);
+  return (
+    <Card>
+      <div className="flex items-center justify-between mb-2">
+        <div className="font-semibold text-sm">⚖️ Compare ({ps.length}{ps.length>=4?" — max":""})</div>
+        <button onClick={onClear} className="text-xs text-slate-400 hover:text-slate-200">Clear</button>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm tnum">
+          <thead><tr className="text-slate-400 text-xs border-b border-[#1d2940]">
+            <th className="text-left font-medium"></th>
+            {ps.map(p=><th key={p.id} className="px-2 text-center">
+              <PName p={p} />
+              <div className="text-[10px] text-slate-500 font-normal">{p.pos} · {G.clubs[p.teamId]?G.clubs[p.teamId].abbr:"FA"}</div>
+            </th>)}
+          </tr></thead>
+          <tbody>
+            {metrics.map(([label, get, dir, fmt])=>{
+              const vals = ps.map(get);
+              const best = dir==="low" ? Math.min(...vals) : Math.max(...vals);
+              const same = vals.every(v=>v===vals[0]);
+              return (
+                <tr key={label} className="border-b border-[#15203a]">
+                  <td className="text-left text-slate-400 text-xs py-1">{label}</td>
+                  {ps.map((p,i)=>(
+                    <td key={p.id} className={"px-2 text-center "+(!same && vals[i]===best ? "text-emerald-300 font-semibold" : "text-slate-300")}>{fmt?fmt(p):vals[i]}</td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {!allGK && !noGK && <div className="text-[11px] text-slate-500 mt-2">Keepers and outfielders mixed — only the shared rows are shown.</div>}
+    </Card>
+  );
+}
+
 function PlayersBrowser({G}){
   const [q, setQ] = useState("");
   const [posF, setPosF] = useState("ALL");
   const [sort, setSort] = useState("ovr");
+  // side-by-side compare (from baseball-gm): tick up to four rows
+  const [cmp, setCmp] = useState([]);
+  const toggleCmp = id => setCmp(c=>c.includes(id) ? c.filter(x=>x!==id) : (c.length>=4 ? c : c.concat(id)));
   // Scanning and sorting every player in the world on each keystroke is the
   // slowest thing on this screen once the save has a few seasons of squads in
   // it. Recompute only when something that actually changes the list changes.
@@ -5518,14 +5753,16 @@ function PlayersBrowser({G}){
           ))}
         </div>
       </Card>
+      {cmp.length>0 && <CompareCard G={G} ids={cmp} onClear={()=>setCmp([])} />}
       <Card className="p-0 overflow-x-auto">
         <table className="w-full text-sm">
           <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]">
-            <th className="text-left p-2">Player</th><th className="p-2">Club</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Pot</th><th className="p-2">Age</th><th className="p-2">Value</th>
+            <th className="w-6 p-2" title="Compare"></th><th className="text-left p-2">Player</th><th className="p-2">Club</th><th className="p-2">Pos</th><th className="p-2">OVR</th><th className="p-2">Pot</th><th className="p-2">Age</th><th className="p-2">Value</th>
           </tr></thead>
           <tbody>
             {list.map(p=>(
               <tr key={p.id} className="border-b border-[#15203a]">
+                <td className="p-2"><input type="checkbox" checked={cmp.includes(p.id)} onChange={()=>toggleCmp(p.id)} title="Add to compare" /></td>
                 <td className="p-2 text-left"><PName p={p} className="font-medium" /></td>
                 <td className="p-2 text-center text-slate-400">{G.clubs[p.teamId]?G.clubs[p.teamId].abbr:"—"}</td>
                 <td className="p-2 text-center"><PosTag p={p} /></td>
@@ -7752,6 +7989,24 @@ function AwardsView({G}){
           <button key={ci} onClick={()=>setCountry(ci)} className={"px-3 py-1.5 rounded text-sm "+(country===ci?"bg-indigo-500 text-white font-semibold":"bg-[#16213a] text-slate-300")}>{C.flag} {C.name}</button>
         ))}
       </div>
+      {(()=>{
+        const rows = (G.potm||[]).filter(x=>x.ci===country).sort((a,b)=>a.div-b.div || b.m-a.m);
+        if(!rows.length) return null;
+        return (
+          <Card>
+            <div className="font-semibold mb-2">📅 Player of the Month — {G.season}</div>
+            <div className="space-y-1 text-sm">
+              {rows.map(x=>{ const pl=G.players[x.id]; return (
+                <div key={x.m+":"+x.div} className={"flex flex-wrap gap-x-2 "+(G.players[x.id]&&G.players[x.id].teamId===G.userTeamId?"text-emerald-300":"")}>
+                  <span className="text-slate-500 w-24 shrink-0">{monthName(G,x.m)}</span>
+                  <span className="text-slate-500 text-xs w-28 shrink-0 self-center">{divName(x.ci,x.div)}</span>
+                  {pl ? <PName p={pl} className="font-medium" /> : <span className="font-medium">{x.name}</span>}
+                  <span className="text-slate-400 text-xs self-center">{x.pos} · {x.abbr} · {x.line}</span>
+                </div>); })}
+            </div>
+          </Card>
+        );
+      })()}
       {!hist.length && <Card><div className="text-slate-400 text-sm">No awards yet — finish a season.</div></Card>}
       {hist.filter(a=>a.ballonDor).length>0 && (
         <Card>
@@ -8094,6 +8349,12 @@ function RecordsView({G}){
         <Card>
           <div className="font-semibold mb-1">💥 Biggest league win on record</div>
           <div className="text-sm text-slate-300"><span className="font-semibold">{bw.winner}</span> {bw.hs}-{bw.as} {bw.loser} <span className="text-slate-500">· {bw.season}</span></div>
+        </Card>
+      )}
+      {G.records && G.records.goalStreak && (
+        <Card>
+          <div className="font-semibold mb-1">🔥 Longest scoring run on record</div>
+          <div className="text-sm text-slate-300"><span className="font-semibold">{G.records.goalStreak.name}</span> ({G.records.goalStreak.club}) scored in {G.records.goalStreak.len} straight league games <span className="text-slate-500">· {G.records.goalStreak.season}</span></div>
         </Card>
       )}
 
@@ -8468,7 +8729,7 @@ function PlayerModal({p, G, onClose}){
             {p.retired
               ? <div className="text-xs text-slate-500 mt-0.5">Retired{p.retiredSeason!=null?` in ${p.retiredSeason}`:""}{p.retiredAge!=null?` at ${p.retiredAge}`:""}{p.debutSeason!=null&&p.retiredSeason!=null?` · ${p.retiredSeason-p.debutSeason} season career`:""}</div>
               : <div className="text-xs text-slate-500 mt-0.5">Potential {scoutConf(p)>=0.85?p.pot:scoutedPot(p)+"~"} · Value {money(p.value)} · Wage {money(p.salary)}/yr{p.years>0?` · ${p.years}y left`:""}{p.fitness!=null&&p.fitness<100?` · ${p.fitness}% fit`:""}</div>}
-            <div className="text-xs text-slate-500 mt-0.5">{p.peakOvr?`Peak OVR ${p.peakOvr}`:""}{p.debutSeason!=null?` · Debut ${p.debutSeason}`:""}{p.hof?" · 🏅 Hall of Fame":""}{(p.awards||0)>0?` · ${p.awards}× POTS`:""}{(p.tots||0)>0?` · ${p.tots}× Team of the Season`:""}{(p.golden||0)>0?` · ${p.golden}× Golden Boot`:""}{(p.ballonDor||0)>0?` · 🏆 ${p.ballonDor}× Ballon d'Or`:""}{(p.caps||0)>0?` · ${p.caps} caps`:""}{(p.intlG||0)>0?` · ${p.intlG} intl goals`:""}</div>
+            <div className="text-xs text-slate-500 mt-0.5">{p.peakOvr?`Peak OVR ${p.peakOvr}`:""}{p.debutSeason!=null?` · Debut ${p.debutSeason}`:""}{p.hof?" · 🏅 Hall of Fame":""}{(p.awards||0)>0?` · ${p.awards}× POTS`:""}{(p.tots||0)>0?` · ${p.tots}× Team of the Season`:""}{(p.golden||0)>0?` · ${p.golden}× Golden Boot`:""}{(p.ballonDor||0)>0?` · 🏆 ${p.ballonDor}× Ballon d'Or`:""}{(p.potm||0)>0?` · 📅 ${p.potm}× Player of the Month`:""}{(p.gStreak||0)>=3?` · 🔥 scored in ${p.gStreak} straight`:""}{(p.caps||0)>0?` · ${p.caps} caps`:""}{(p.intlG||0)>0?` · ${p.intlG} intl goals`:""}</div>
             {(formTag(p.form)||moraleTag(p.morale))&&<div className="text-xs mt-0.5">{formTag(p.form)&&<span className={formTag(p.form).c}>{formTag(p.form).t}</span>}{formTag(p.form)&&moraleTag(p.morale)&&<span className="text-slate-600"> · </span>}{moraleTag(p.morale)&&<span className={moraleTag(p.morale).c}>{moraleTag(p.morale).t}</span>}</div>}
             {(p.release!=null||p.sellOn)&&<div className="text-xs mt-0.5 text-slate-500">{p.release!=null?`Release ${money(p.release)}`:""}{p.release!=null&&p.sellOn?" · ":""}{p.sellOn?`${p.sellOn.pct}% sell-on → ${(G.clubs[p.sellOn.toClubId]||{}).abbr||"?"}`:""}</div>}
             {p.wantsOut&&<div className="text-xs mt-0.5 text-orange-400">✈️ Has requested a transfer</div>}
